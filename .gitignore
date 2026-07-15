@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.so
+.Python
+venv/
+env/
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+*.log
+.npm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project
+uploads/
+models/
+*.pth
+*.onnx
+*.jpg
+*.png
+!frontend/public/
+
+# OS
+.DS_Store
+Thumbs.db

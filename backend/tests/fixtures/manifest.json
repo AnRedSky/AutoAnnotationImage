@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "count": 10,
+  "items": [
+    {
+      "filename": "fixture_01.png",
+      "width": 32,
+      "height": 32,
+      "color": [
+        220,
+        20,
+        60
+      ],
+      "format": "png",
+      "size_bytes": 108,
+      "path": "backend\\tests\\fixtures\\images\\fixture_01.png"
+    },
+    {
+      "filename": "fixture_02.png",
+      "width": 64,
+      "height": 64,
+      "color": [
+        30,
+        144,
+        255
+      ],
+      "format": "png",
+      "size_bytes": 191,
+      "path": "backend\\tests\\fixtures\\images\\fixture_02.png"
+    },
+    {
+      "filename": "fixture_03.png",
+      "width": 128,
+      "height": 96,
+      "color": [
+        50,
+        205,
+        50
+      ],
+      "format": "png",
+      "size_bytes": 276,
+      "path": "backend\\tests\\fixtures\\images\\fixture_03.png"
+    },
+    {
+      "filename": "fixture_04.png",
+      "width": 128,
+      "height": 128,
+      "color": [
+        255,
+        165,
+        0
+      ],
+      "format": "png",
+      "size_bytes": 336,
+      "path": "backend\\tests\\fixtures\\images\\fixture_04.png"
+    },
+    {
+      "filename": "fixture_05.png",
+      "width": 256,
+      "height": 192,
+      "color": [
+        148,
+        0,
+        211
+      ],
+      "format": "png",
+      "size_bytes": 671,
+      "path": "backend\\tests\\fixtures\\images\\fixture_05.png"
+    },
+    {
+      "filename": "fixture_06.png",
+      "width": 320,
+      "height": 240,
+      "color": [
+        255,
+        215,
+        0
+      ],
+      "format": "png",
+      "size_bytes": 994,
+      "path": "backend\\tests\\fixtures\\images\\fixture_06.png"
+    },
+    {
+      "filename": "fixture_07.png",
+      "width": 480,
+      "height": 320,
+      "color": [
+        0,
+        206,
+        209
+      ],
+      "format": "png",
+      "size_bytes": 1534,
+      "path": "backend\\tests\\fixtures\\images\\fixture_07.png"
+    },
+    {
+      "filename": "fixture_08.png",
+      "width": 512,
+      "height": 384,
+      "color": [
+        199,
+        21,
+        133
+      ],
+      "format": "png",
+      "size_bytes": 1728,
+      "path": "backend\\tests\\fixtures\\images\\fixture_08.png"
+    },
+    {
+      "filename": "fixture_09.jpg",
+      "width": 224,
+      "height": 224,
+      "color": [
+        72,
+        209,
+        204
+      ],
+      "format": "jpg",
+      "size_bytes": 4910,
+      "path": "backend\\tests\\fixtures\\images\\fixture_09.jpg"
+    },
+    {
+      "filename": "fixture_10.jpg",
+      "width": 640,
+      "height": 480,
+      "color": [
+        255,
+        99,
+        71
+      ],
+      "format": "jpg",
+      "size_bytes": 13044,
+      "path": "backend\\tests\\fixtures\\images\\fixture_10.jpg"
+    }
+  ]
+}

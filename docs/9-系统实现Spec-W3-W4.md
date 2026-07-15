@@ -1,0 +1,149 @@
+# W3-W4 系统实现 Spec
+
+> **编制日期**：2026-07-11
+> **位置**：`thesis-image-annotation/docs/9-系统实现Spec-W3-W4.md`
+> **原 spec-id**：`image-annotation-w3-w4-impl`
+> **维护人**：本项目作者
+
+---
+
+## Why
+
+W2 已完成系统骨架（后端 42 API + 前端 7 页面），但**距离论文第 4 章（系统实现）和第 5 章（系统测试）的素材齐备**还有三段缺口：(1) 训练 pipeline 缺少真实进度/曲线/异常处理；(2) 缺少真实数据集和端到端联调，6 张论文插图无来源；(3) 缺少测试报告与性能/模型对比数据。同时项目内 `docs/` 已有 7 份规划文档，需要把 W3-W4 的开发文档按"论文驱动 + 代码实况"的体系补齐。
+
+## What Changes
+
+- **训练 pipeline 完善**（W3）：每 100 batch 更新进度、Redis 训练曲线持久化、异常回滚、模型版本激活原子化
+- **Demo 数据集准备**（W3）：5 类 × 200 张的 CIFAR-10 子集，8:2 划分
+- **E2E 真实跑通**（W3）：10 步联调 + 每步截图，存到 `docs/e2e/`
+- **MySQL + MinIO + Celery 全栈验证**（W3）：docker-compose 起来，Celery worker 接收任务
+- **功能测试 + 性能测试 + 模型对比**（W4）：pytest 用例、并发/批量时延、3 模型（ResNet50/EfficientNet-B0/ConvNeXt-Tiny）对比
+- **6 张论文插图采集**（W4）：存到 `docs/draft/figures/`，按 `fig-X-Y-描述.png` 命名
+- **3 份测试报告**（W4）：`docs/系统测试报告.md` + `docs/性能测试报告.md` + `docs/模型对比实验.md`
+- **开发文档体系完善**（W3-W4）：更新 `docs/1-当前实现规划.md` / `docs/2-后端实现记录.md` / `docs/3-前端实现记录.md` / `docs/4-下一步行动计划.md` / `docs/5-系统功能设计文档.md` / `docs/6-系统功能规划文档.md`，新增 `docs/7-E2E联调记录.md` / `docs/8-测试报告汇总.md`
+
+## Impact
+
+### Affected specs（论文第 3-5 章）
+
+- 第 3 章 系统设计：3.2 架构图、3.3 三大模块、3.4 数据库、3.5 接口
+- 第 4 章 系统实现：4.2 AI 预标注、4.3 人工修正、4.4 模型训练、4.5 数据管理、4.6 统计、4.7 系统测试
+- 第 5 章 总结展望：实验结论 + 不足 + 展望
+
+### Affected code
+
+- `backend/app/workers/tasks.py`（训练任务进度/异常）
+- `backend/app/workers/celery_app.py`（Celery 配置）
+- `backend/app/services/ai_service.py`（推理 + 进度回调）
+- `backend/app/ml/train.py`（训练循环 + 曲线写入）
+- `backend/app/api/training.py`（训练 API）
+- `backend/app/api/model.py`（模型激活原子化）
+- `backend/app/core/redis_client.py`（曲线 key 设计）
+- `frontend/src/views/Training.vue`（曲线展示）
+- `frontend/src/views/Models.vue`（对比 UI）
+- `docker-compose.yml`（MySQL + MinIO + Redis 编排）
+
+### Affected docs
+
+- `docs/1-当前实现规划.md`（更新 W3 收官）
+- `docs/2-后端实现记录.md`（训练 pipeline 补充）
+- `docs/3-前端实现记录.md`（曲线/对比 UI 补充）
+- `docs/4-下一步行动计划.md`（W4 任务清单）
+- `docs/5-系统功能设计文档.md`（数据流补充）
+- `docs/6-系统功能规划文档.md`（验收清单）
+- `docs/7-E2E联调记录.md`（新建）
+- `docs/8-测试报告汇总.md`（新建）
+- `docs/draft/figures/`（6 张 PNG）
+
+## ADDED Requirements
+
+### Requirement: 训练任务真实进度与曲线
+The system SHALL 在 Celery 训练任务中每 100 个 batch 调用一次 `self.update_state(state='PROGRESS', meta=...)`，并把每个 epoch 的 `train_loss/val_loss/train_acc/val_acc` 写入 Redis key `train:history:{task_id}`，格式为 JSON 列表。
+
+#### Scenario: 启动训练后前端轮询进度
+- **WHEN** 前端 `Training.vue` 每 2 秒调用 `GET /api/training/progress/{task_id}`
+- **THEN** 返回值包含 `progress`（0-100 整数）、`current_epoch`、`total_epochs`、`state`
+- **AND** 调用 `GET /api/training/history/{task_id}` 返回 `[{epoch, train_loss, val_loss, train_acc, val_acc}, ...]`
+
+#### Scenario: 训练异常时清理半成品
+- **WHEN** 训练过程中抛出异常
+- **THEN** 删除 `model_versions` 中该任务的半成品记录
+- **AND** 删除磁盘上半成品 `.pth` 文件
+- **AND** `TrainingJob` 状态置为 `FAILED`，`error` 字段写入异常信息
+
+### Requirement: 模型版本激活互斥
+The system SHALL 保证同一数据集同一时刻最多 1 个 `ModelVersion.is_active = true`，使用 SQLAlchemy `with_for_update()` 行锁 + 事务实现。
+
+#### Scenario: 激活新模型
+- **WHEN** 调用 `POST /api/models/{id}/activate`
+- **THEN** 在一个事务中：先把同 dataset 下所有 `is_active=true` 的记录置 false，再把目标 id 置 true
+- **AND** 任何并发请求最终都能看到一致结果（不会出现 2 个激活）
+
+### Requirement: Demo 数据集就绪
+The system SHALL 提供 5 类 × 200 张 = 1000 张的 CIFAR-10 子集，按 8:2 划分训练/验证集，存放在 `thesis-image-annotation/demo/data/cifar10_subset/`。
+
+#### Scenario: 准备 demo 数据
+- **WHEN** 执行 `python scripts/prepare_demo_data.py`
+- **THEN** 下载 CIFAR-10、抽取 5 类（airplane/automobile/bird/cat/deer）、按 8:2 划分
+- **AND** 训练集 800 张 + 验证集 200 张分别存到 `train/` 和 `val/` 子目录
+
+### Requirement: 端到端联调可复现
+The system SHALL 支持从注册到导出 CSV 的 10 步流程全部跑通，并在 `docs/7-E2E联调记录.md` 中记录每步耗时、截图路径、返回数据。
+
+#### Scenario: 10 步 E2E
+- **WHEN** 按 `docs/7-E2E联调记录.md` 顺序执行
+- **THEN** 全部 10 步返回 2xx
+- **AND** 截图存到 `docs/e2e/screenshots/step-XX-*.png`
+
+### Requirement: 3 模型训练对比
+The system SHALL 在 CIFAR-10 子集上跑通 ResNet50 / EfficientNet-B0 / ConvNeXt-Tiny 三个模型的训练，每个 5 epoch，对比 4 指标（accuracy/precision/recall/f1）+ 训练时长 + 参数量。
+
+#### Scenario: 模型对比输出
+- **WHEN** 执行 `python tests/model_compare.py`
+- **THEN** 输出 `tests/results/model_comparison.csv`，列包含 `model, params, train_time_s, accuracy, precision, recall, f1`
+- **AND** Markdown 报告 `docs/模型对比实验.md` 自动生成表格
+
+### Requirement: 论文插图齐备
+The system SHALL 采集 6 张论文插图到 `毕业论文设计与实现/docs/draft/figures/`，按 `fig-X-Y-描述.png` 命名，每张配 100-200 文字说明。
+
+#### Scenario: 6 张图齐备
+- **WHEN** 执行截图采集脚本
+- **THEN** `fig-3-1-系统架构图.png` / `fig-3-2-功能模块图.png` / `fig-4-1-系统主界面.png` / `fig-4-2-AI预标注Top-5候选.png` / `fig-4-3-训练曲线对比.png` / `fig-4-4-模型对比结果.png` / `fig-4-5-数据集统计仪表盘.png` / `fig-4-6-导出CSV样例.png` 共 8 张图全部存在
+
+### Requirement: 测试报告完整
+The system SHALL 输出 3 份测试报告：功能测试（pytest 用例执行结果）、性能测试（并发上传/批量推理/训练时延）、模型对比实验（3 模型 4 指标）。
+
+#### Scenario: 测试报告
+- **WHEN** W4 收官
+- **THEN** `docs/系统测试报告.md` 含 17 条功能测试用例执行结果（PASS/FAIL + 耗时）
+- **AND** `docs/性能测试报告.md` 含 4 项性能数据 + 结论（2000 字）
+- **AND** `docs/模型对比实验.md` 含 3 模型对比表 + 1500 字分析
+
+## MODIFIED Requirements
+
+### Requirement: 后端训练 API 契约
+**原契约**：`GET /api/training/progress/{task_id}` 返回 `{state, progress, message}`。
+**新契约**：必须额外包含 `current_epoch` 和 `total_epochs` 字段。
+
+**BREAKING** 否（仅追加字段，向后兼容）。
+
+### Requirement: 文档编号体系
+**原契约**：`docs/` 下文件使用 `0-` 到 `6-` 编号。
+**新契约**：W3-W4 阶段新增 `7-E2E联调记录.md` / `8-测试报告汇总.md` / `9-系统实现Spec-W3-W4.md` / `10-任务执行清单-W3-W4.md` / `11-验收检查清单-W3-W4.md` / `系统测试报告.md` / `性能测试报告.md` / `模型对比实验.md`，前 5 者纳入编号体系，后 3 者放在 `docs/` 根目录与 8 号文档同级。
+
+## REMOVED Requirements
+
+无。
+
+---
+
+## 关联文档
+
+- **任务执行清单**：[`10-任务执行清单-W3-W4.md`](10-任务执行清单-W3-W4.md)
+- **验收检查清单**：[`11-验收检查清单-W3-W4.md`](11-验收检查清单-W3-W4.md)
+- **E2E 联调记录**：[`7-E2E联调记录.md`](7-E2E联调记录.md)
+- **测试报告汇总**：[`8-测试报告汇总.md`](8-测试报告汇总.md)
+- **系统测试报告**：[`系统测试报告.md`](系统测试报告.md)
+- **性能测试报告**：[`性能测试报告.md`](性能测试报告.md)
+- **模型对比实验**：[`模型对比实验.md`](模型对比实验.md)
+- **代码冻结检查**：[`03-实现开发规划/5-代码冻结检查清单.md`](03-实现开发规划/5-代码冻结检查清单.md)

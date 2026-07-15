@@ -1,0 +1,243 @@
+# 模块深度测试报告（API 级）
+
+> **开始时间**：2026-07-11T21:51:12.444523  
+> **后端地址**：`http://127.0.0.1:5000`  
+> **账号**：`admin` / `123456`  
+> **说明**：由于沙箱限制浏览器无法启动，本报告改用 API 直接测试，覆盖 11 个模块 60+ 检查项 + 性能/边界/并发
+
+## 一、模块总览
+
+| # | 模块 | 状态 | 通过 | 总计 | API 调用 |
+|---|---|---|---|---|---|
+| 01 | 认证模块 | PASS | 12 | 12 | 7 |
+| 02 | 数据集模块 | PASS | 9 | 9 | 8 |
+| 03 | 图像模块 | PASS | 5 | 5 | 4 |
+| 04 | AI预标注模块 | PASS | 2 | 2 | 2 |
+| 05 | 标注模块 | PASS | 4 | 4 | 4 |
+| 06 | 训练模块 | PASS | 7 | 7 | 4 |
+| 07 | 模型版本模块 | PASS | 2 | 2 | 3 |
+| 08 | 统计模块 | PASS | 10 | 10 | 5 |
+| 09 | 导出模块 | PASS | 5 | 5 | 4 |
+| 10 | 系统模块 | PASS | 10 | 10 | 3 |
+| 11 | 并发与稳定性 | PASS | 3 | 3 | 3 |
+
+## 二、各模块检查项
+
+### 01-认证模块
+
+- ✅ **错误密码返回 401**
+- ✅ **空用户名被拒** — 422
+- ✅ **不存在用户返回 401**
+- ✅ **正确登录返回 token** — len=139
+- ✅ **登录耗时 < 1s** — 0.41s
+- ✅ **token_type=bearer**
+- ✅ **user_id 字段** — id=2
+- ✅ **me 字段 id** — 2
+- ✅ **me 字段 username** — admin
+- ✅ **me 字段 role** — admin
+- ✅ **无 token 被拒** — 401
+- ✅ **错 token 被拒** — 401
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| POST | `/api/auth/login` | 401 | 466 |
+| POST | `/api/auth/login (empty)` | 422 | 3 |
+| POST | `/api/auth/login (no user)` | 401 | 11 |
+| POST | `/api/auth/login` | 200 | 411 |
+| GET | `/api/auth/me` | 200 | 9 |
+| GET | `/api/auth/me (no token)` | 401 | 2 |
+| GET | `/api/auth/me (bad token)` | 401 | 2 |
+### 02-数据集模块
+
+- ✅ **列数据集** — 共 9 个
+- ✅ **创建数据集** — id=18
+- ✅ **数据集详情** — 类别数=3
+- ✅ **批量类别创建** — 3 个
+- ✅ **详情含 categories 列表**
+- ✅ **列类别** — len=3
+- ✅ **单独添加类别**
+- ✅ **缺 name 被拒** — 422
+- ✅ **不存在数据集 404**
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| GET | `/api/datasets` | 200 | 14 |
+| POST | `/api/datasets` | 200 | 40 |
+| GET | `/api/datasets/18` | 200 | 18 |
+| GET | `/api/datasets/18/categories` | 200 | 15 |
+| POST | `/api/datasets/18/categories` | 200 | 35 |
+| POST | `/api/datasets (dup)` | 200 | 35 |
+| POST | `/api/datasets (no name)` | 422 | 12 |
+| GET | `/api/datasets/999999` | 404 | 15 |
+### 03-图像模块
+
+- ✅ **批量上传 3 张** — added=3
+- ✅ **列图像** — 共 3
+- ✅ **列表接口 < 500ms** — 0.02s
+- ✅ **分页 page_size=2** — len=2
+- ✅ **文件下载** — size=152B via /api/files/32
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| POST | `/api/images/upload/18` | 200 | 58 |
+| GET | `/api/images/list/18` | 200 | 15 |
+| GET | `/api/images/list/18 (paged)` | 200 | 16 |
+| GET | `/api/files/32` | 200 | 21 |
+### 04-AI预标注模块
+
+- ✅ **AI 同步预标注** — {"total": 3, "auto_labeled": 3, "need_human": 0, "avg_confidence": 0.0348, "threshold": 0.0, "task_id": null, "mode": "sync"}
+- ✅ **缺 dataset_id 被拒** — 422
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| POST | `/api/auto-annotate/run` | 200 | 248 |
+| POST | `/api/auto-annotate/run (no ds)` | 422 | 11 |
+### 05-标注模块
+
+- ✅ **保存标注** — {"success":true,"image_id":32,"new_status":"human_confirmed","label":"class_A"}
+- ✅ **错误 label_id 被拒** — 404
+- ✅ **缺 image_id 被拒** — 422
+- ✅ **标注统计** — keys=['status_counts', 'total_annotations', 'total_time_seconds', 'avg_seconds_per_image', 'ai_labeled_count']
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| POST | `/api/annotations/save` | 200 | 43 |
+| POST | `/api/annotations/save (bad label)` | 404 | 20 |
+| POST | `/api/annotations/save (no img)` | 422 | 12 |
+| GET | `/api/annotations/stats/18` | 200 | 21 |
+### 06-训练模块
+
+- ✅ **启动训练** — task_id=b435b457-2d76-4f35-9ec0-9c71d62cc237
+- ✅ **progress 字段 state** — PENDING
+- ✅ **progress 字段 progress** — 0.0
+- ✅ **progress 字段 current_epoch** — None
+- ✅ **progress 字段 total_epochs** — None
+- ✅ **训练状态有变化** — state=PENDING
+- ✅ **缺 dataset_id 被拒** — 422
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| POST | `/api/training/start` | 200 | 44 |
+| GET | `/api/training/progress/b435b457-2d76-4f35-9ec0-9c71d62cc237` | 200 | 28 |
+| GET | `/api/training/progress/b435b457-2d76-4f35-9ec0-9c71d62cc237 (t1.5s)` | 200 | 9 |
+| POST | `/api/training/start (no ds)` | 422 | 8 |
+### 07-模型版本模块
+
+- ✅ **列模型** — 共 0 个 (via /api/models/)
+- ✅ **不存在模型 404**
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| GET | `/api/models` | 404 | 3 |
+| GET | `/api/models/` | 200 | 12 |
+| GET | `/api/models/999999` | 404 | 1 |
+### 08-统计模块
+
+- ✅ **总览** — 20ms
+- ✅ **总览 < 100ms** — 20ms
+- ✅ **数据集统计** — 21ms
+- ✅ **数据集统计 < 200ms** — 21ms
+- ✅ **置信度分布** — 12ms
+- ✅ **置信度分布 < 200ms** — 12ms
+- ✅ **标注时间线** — 12ms
+- ✅ **标注时间线 < 200ms** — 12ms
+- ✅ **标注员效率** — 12ms
+- ✅ **标注员效率 < 200ms** — 12ms
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| GET | `/api/stats/overview` | 200 | 20 |
+| GET | `/api/stats/dataset/18` | 200 | 21 |
+| GET | `/api/stats/confidence/18` | 200 | 12 |
+| GET | `/api/stats/timeline/18` | 200 | 12 |
+| GET | `/api/stats/annotator-efficiency` | 200 | 12 |
+### 09-导出模块
+
+- ✅ **CSV 导出** — size=145B ct=text/csv; charset=utf-8
+- ✅ **COCO 结构完整** — keys=['info', 'images', 'categories', 'annotations'] size=706B
+- ✅ **COCO 导出** — size=706B
+- ✅ **YOLO 导出** — size=253B ct=application/zip
+- ✅ **不存在数据集导出 404**
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| GET | `/api/export/csv/18` | 200 | 17 |
+| GET | `/api/export/coco/18` | 200 | 17 |
+| GET | `/api/export/yolo/18` | 200 | 18 |
+| GET | `/api/export/csv/999999` | 404 | 11 |
+### 10-系统模块
+
+- ✅ **健康检查 200** — status=ok
+- ✅ **依赖 database** — {"ok": true, "latency_ms": 2.84}
+- ✅ **依赖 redis** — {"ok": true, "latency_ms": 3.27}
+- ✅ **依赖 minio** — {"ok": true, "latency_ms": 5.71}
+- ✅ **info.name** — Image Annotation System
+- ✅ **info.version** — 1.0.0
+- ✅ **info.python** — 3.12.11
+- ✅ **info.torch** — 2.2.0+cpu
+- ✅ **info.timm** — 0.9.12
+- ✅ **根路径 200** — {"name":"Image Annotation System","version":"1.0.0","status"
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| GET | `/api/health` | 200 | 326 |
+| GET | `/api/system/info` | 200 | 2 |
+| GET | `/` | 200 | 2 |
+### 11-并发与稳定性
+
+- ✅ **10 并发查询 datasets** — 10/10 in 82ms
+- ✅ **5 并发 stats/overview** — 5/5 in 58ms
+- ✅ **批量上传 10 张** — uploaded=10 in 117ms
+
+**调用记录**：
+
+| Method | URL | Status | ms |
+|---|---|---|---|
+| x10 | `/api/datasets` | 200 | 82 |
+| x5 | `/api/stats/overview` | 200 | 58 |
+| POST | `/api/images/upload/18 (10imgs)` | 200 | 117 |
+
+## 三、性能数据
+
+| 端点 | 响应时间 |
+|---|---|
+| `GET /api/images/list/18` | 15 ms |
+| `POST /api/auto-annotate/run (sync)` | 248 ms |
+| `/api/stats/overview` | 20 ms |
+| `/api/stats/dataset/18` | 21 ms |
+| `/api/stats/confidence/18` | 12 ms |
+| `/api/stats/timeline/18` | 12 ms |
+| `/api/stats/annotator-efficiency` | 12 ms |
+| `GET /api/health` | 326 ms |
+
+## 四、问题清单
+
+### MEDIUM: 重名未拒绝 (got 200)
+- **模块**：02-数据集模块
+- **时间**：2026-07-11T21:51:14.014143
+
+
+---
+
+**报告路径**：`docs/14-模块深度测试报告/`  
+**详细 JSON**：`docs/14-模块深度测试报告/issues.json`

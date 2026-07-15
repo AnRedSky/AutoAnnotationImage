@@ -1,0 +1,48 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+uv.lock
+
+# 环境
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 日志
+*.log
+logs/
+
+# 数据库
+*.db
+*.sqlite3
+
+# 模型与数据
+models/*.pth
+models/*.onnx
+uploads/
+data/raw/
+data/processed/
+
+# 系统
+Thumbs.db

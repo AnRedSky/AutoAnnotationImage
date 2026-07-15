@@ -1,0 +1,301 @@
+/* =============================================================
+   Global Design System - 论文系统主题
+   - 现代感: 圆角 + 柔和阴影 + 渐变
+   - 配色: 主色蓝紫 + 强调橙
+   - 字体: 系统字体栈 (跨平台)
+   ============================================================= */
+
+:root {
+  /* 主题色 */
+  --brand-primary: #4f7cff;
+  --brand-primary-dark: #3b5fe6;
+  --brand-accent: #ff8a4c;
+  --brand-success: #00c48c;
+  --brand-warning: #ffa940;
+  --brand-danger: #ff4d4f;
+  --brand-info: #4f7cff;
+
+  /* 中性色 */
+  --text-primary: #1f2937;
+  --text-regular: #374151;
+  --text-secondary: #6b7280;
+  --text-placeholder: #9ca3af;
+  --text-disabled: #d1d5db;
+
+  /* 背景 */
+  --bg-page: #f5f7fb;
+  --bg-card: #ffffff;
+  --bg-soft: #f9fafc;
+  --bg-hover: #f0f4ff;
+
+  /* 边框 */
+  --border-soft: #eef0f4;
+  --border-light: #f0f2f5;
+  --border-strong: #d6d8de;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08);
+  --shadow-glow: 0 0 0 3px rgba(79, 124, 255, 0.12);
+
+  /* 渐变 */
+  --gradient-brand: linear-gradient(135deg, #4f7cff 0%, #6e51e9 100%);
+  --gradient-warm: linear-gradient(135deg, #ff8a4c 0%, #ff5470 100%);
+  --gradient-success: linear-gradient(135deg, #00c48c 0%, #00a3e0 100%);
+  --gradient-warn: linear-gradient(135deg, #ffae57 0%, #ff7676 100%);
+  --gradient-night: linear-gradient(160deg, #0c123d 0%, #1a2563 50%, #2c3eaa 100%);
+  --gradient-aurora: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  /* 间距 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* 动画 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 整页底色: 极淡的渐变, 让卡片"浮"在背景上 */
+body {
+  background: var(--bg-page);
+  font-family: var(--font-sans);
+  color: var(--text-regular);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 通用卡片阴影 + 悬浮态 */
+.el-card {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--border-soft) !important;
+  box-shadow: var(--shadow-sm) !important;
+  transition: box-shadow 0.25s var(--ease-out), transform 0.25s var(--ease-out);
+}
+.el-card.is-hover-shadow:hover {
+  box-shadow: var(--shadow-md) !important;
+  transform: translateY(-1px);
+}
+
+/* 统计卡: 顶部彩色条 + 渐变悬浮 */
+/* 高度统一: 固定 min-height, 无论是否有 .stat-meta 副文本, 所有卡片等高 */
+.el-card.stat-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg) !important;
+  height: 100%;
+}
+.el-card.stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--gradient-brand);
+  opacity: 0.85;
+}
+.el-card.stat-card .el-card__body {
+  padding: 18px 20px;
+  /* 18(padding-top) + 18(title) + 4(margin) + 32(value) + 6(margin) + 14(meta) + 18(padding-bottom) ≈ 110 */
+  min-height: 116px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.el-card.stat-card .el-statistic {
+  display: block;
+}
+.el-card.stat-card .el-statistic__head {
+  color: var(--text-secondary) !important;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.el-card.stat-card .el-statistic__content {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+/* 副文本行: 固定行高, 即便没渲染文字也占位, 保证等高 */
+.el-card.stat-card .stat-meta {
+  color: var(--text-placeholder);
+  font-size: 12px;
+  margin-top: 6px;
+  min-height: 14px;
+  line-height: 14px;
+}
+
+/* 主按钮: 渐变 + 悬浮微抬 */
+.el-button--primary {
+  background: var(--gradient-brand) !important;
+  border-color: transparent !important;
+  box-shadow: 0 4px 12px rgba(79, 124, 255, 0.25);
+  transition: all 0.2s var(--ease-out) !important;
+}
+.el-button--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(79, 124, 255, 0.35);
+}
+.el-button--primary:active {
+  transform: translateY(0);
+}
+
+/* 表格行: 悬浮高亮更柔和 */
+.el-table tr {
+  transition: background 0.2s var(--ease-out);
+}
+.el-table th.el-table__cell {
+  background: var(--bg-soft) !important;
+  color: var(--text-regular) !important;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Tag 标签微美化 */
+.el-tag {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 500;
+}
+
+/* 分页器 */
+.el-pagination .el-pager li,
+.el-pagination .btn-prev,
+.el-pagination .btn-next {
+  border-radius: var(--radius-sm) !important;
+}
+.el-pagination .el-pager li.is-active {
+  background: var(--gradient-brand) !important;
+  color: #fff !important;
+}
+
+/* 输入框聚焦: 蓝色光晕 */
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus,
+.el-select.is-focused .el-select__wrapper {
+  box-shadow: var(--shadow-glow) !important;
+  border-color: var(--brand-primary) !important;
+}
+
+/* 弹窗: 圆角加大 + 顶部品牌色细线 */
+.el-dialog {
+  border-radius: var(--radius-lg) !important;
+  overflow: hidden;
+}
+.el-dialog__header {
+  background: var(--bg-soft);
+  margin-right: 0 !important;
+  padding: 16px 20px !important;
+  border-bottom: 1px solid var(--border-soft);
+}
+.el-dialog__title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 工具栏吸顶 (用于 DatasetDetail 工具栏) */
+.sticky-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-page);
+  padding: 12px 0;
+  margin-bottom: 12px;
+}
+
+/* 通用页面容器: 限制最大宽度, 居中 */
+.page-container {
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+/* 通用页面标题 */
+.page-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 20px;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.page-title .subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+/* 视图切换器 (DatasetDetail 用) */
+.view-mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #fff;
+}
+.view-mode-switch .mode-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+  border-right: 1px solid var(--border-soft);
+  background: transparent;
+  border-top: none;
+  border-bottom: none;
+  border-left: none;
+}
+.view-mode-switch .mode-btn:last-child { border-right: none; }
+.view-mode-switch .mode-btn:hover {
+  background: var(--bg-hover);
+  color: var(--brand-primary);
+}
+.view-mode-switch .mode-btn.active {
+  background: var(--gradient-brand);
+  color: #fff;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 通用动画 */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in-up {
+  animation: fadeInUp 0.4s var(--ease-out) both;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #f0f0f0 0%, #f8f8f8 50%, #f0f0f0 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
