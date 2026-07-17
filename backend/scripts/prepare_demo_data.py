@@ -5,6 +5,8 @@ Demo Data Preparation Script
 
 用法:
     python scripts/prepare_demo_data.py
+    # 如果 CIFAR-10 下载失败/慢, 改用本地合成版本:
+    python scripts/prepare_demo_data_local.py
 
 输出:
     demo/data/cifar10_subset/train/{class_name}/*.jpg  (5 × 160 = 800 张)

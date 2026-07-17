@@ -1,0 +1,47 @@
+/* ============================================================================
+   全局下拉框统一样式 (基准: Training.vue .filter-dataset 200px + flex-shrink: 0)
+   统一了所有页面 (Training / DatasetDetail / Annotate / Models / Datasets)
+   的 el-select 基础外观, 修饰 class 覆盖默认值实现多种宽度
+   ============================================================================ */
+
+/* ── 基础 (260px, 跟 Training .filter-dataset 一致, flex-shrink: 0 不缩) ── */
+.app-select {
+  width: 260px;
+  flex-shrink: 0;
+}
+
+/* ── 修饰: 窄下拉 (状态等) ── */
+.app-select--narrow {
+  width: 130px;
+}
+
+/* ── 修饰: 中等 (140px 状态下拉) ── */
+.app-select--medium {
+  width: 140px;
+}
+
+/* ── 修饰: 宽 (300px 模型下拉) ── */
+.app-select--wide {
+  width: 300px;
+}
+
+/* ── 修饰: 自适应内容 (max-content, 触发框不留白) ── */
+.app-select--content {
+  width: max-content;
+  min-width: 200px;
+  flex: 0 0 auto;
+}
+
+/* ── 修饰: form-item 内 (默认 width: 100%) ── */
+.app-select--full {
+  width: 100%;
+}
+
+/* ── 内容宽度下拉 (触发框按内容走, 下拉面板跟内容走) ──
+   注: 触发框用 content 宽度, element-plus 下拉面板用 fit-input-width="false"
+   + popper-class="app-select-dropdown" 独立按 option 内容走 */
+.app-select-dropdown {
+  width: max-content;
+  max-width: 600px;
+  min-width: 200px;
+}

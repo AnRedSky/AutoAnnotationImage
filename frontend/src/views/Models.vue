@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import {
-  Grid, CircleCheck, Aim, TrendCharts, Delete, Search, Refresh, Filter,
+import { Grid, CircleCheck, Aim, TrendCharts, Delete, Search, Refresh,
   VideoPlay, VideoPause
 } from '@element-plus/icons-vue'
 import { modelApi } from '@/api'
@@ -336,12 +335,38 @@ const resetFilters = () => {
       </el-col>
     </el-row>
 
-    <!-- ============== 顶部操作栏 ============== -->
+    <!-- ============== 顶部标题 ============== -->
     <div class="page-header">
       <h2 class="page-title">
         <span>模型版本管理</span>
         <span class="subtitle">Models</span>
       </h2>
+    </div>
+
+    <!-- ============== 筛选 + 批量操作 (同一行) ============== -->
+    <div class="filter-row">
+      <el-input
+        v-model="filterKeyword"
+        :prefix-icon="Search"
+        clearable
+        placeholder="搜索模型名 / 基础模型"
+        class="filter-keyword"
+        @input="onFilterChange"
+      />
+      <el-select
+        v-model="filterDatasetId"
+        clearable
+        placeholder="按数据集筛选"
+        class="app-select"
+        @change="onFilterChange"
+      >
+        <el-option label="全部数据集" value="" />
+        <el-option
+          v-for="ds in datasetOptions" :key="ds.id"
+          :label="ds.name"
+          :value="ds.id"
+        />
+      </el-select>
       <div class="header-actions">
         <span class="selection-tip">
           已选 <strong>{{ selectedIds.length }}</strong> 个版本
@@ -392,43 +417,6 @@ const resetFilters = () => {
       </div>
     </div>
 
-    <!-- ============== 筛选条件栏 (即时生效, 无需提交) ============== -->
-    <div class="filter-row">
-      <el-input
-        v-model="filterKeyword"
-        :prefix-icon="Search"
-        clearable
-        placeholder="搜索模型名 / 基础模型"
-        class="filter-keyword"
-        @input="onFilterChange"
-      />
-      <el-select
-        v-model="filterDatasetId"
-        clearable
-        placeholder="按数据集筛选"
-        class="filter-dataset"
-        @change="onFilterChange"
-      >
-        <el-option label="全部数据集" value="" />
-        <el-option
-          v-for="ds in datasetOptions" :key="ds.id"
-          :label="ds.name"
-          :value="ds.id"
-        />
-      </el-select>
-      <div class="filter-tip">
-        <el-icon><Filter /></el-icon>
-        <span>共 <strong>{{ filteredData.length }}</strong> / {{ data.length }} 条</span>
-        <el-button
-          v-if="filterKeyword || filterDatasetId !== ''"
-          link
-          type="primary"
-          size="small"
-          @click="resetFilters"
-        >清空筛选</el-button>
-      </div>
-    </div>
-
     <el-table v-loading="loading" :data="pagedData" border stripe class="data-table"
       @selection-change="onSelectionChange">
       <el-table-column type="index" :index="indexMethod" label="#" width="42" />
@@ -443,12 +431,12 @@ const resetFilters = () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="base_model" label="基础模型" min-width="200">
+      <el-table-column prop="base_model" label="基础模型" min-width="120" align="center">
         <template #default="{ row }">
           <el-tag size="small" type="info" effect="plain">{{ row.base_model }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="is_active" label="状态" width="120">
+      <el-table-column prop="is_active" label="状态" width="120" align="center">
         <template #default="{ row }">
           <el-tag v-if="row.is_active" type="success" effect="dark" size="small">
             <el-icon style="margin-right: 2px;"><CircleCheck /></el-icon>已激活
@@ -456,23 +444,23 @@ const resetFilters = () => {
           <el-tag v-else effect="plain" size="small">未激活</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="accuracy" label="准确率" width="100">
+      <el-table-column prop="accuracy" label="准确率" width="100" align="center">
         <template #default="{ row }">
           <span :class="['metric', 'metric--acc', { 'is-strong': Number(row.accuracy || 0) >= 0.8 }]">
             {{ pct(row.accuracy) }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column prop="precision" label="精确率" width="100">
+      <el-table-column prop="precision" label="精确率" width="100" align="center">
         <template #default="{ row }">{{ pct(row.precision) }}</template>
       </el-table-column>
-      <el-table-column prop="recall" label="召回率" width="100">
+      <el-table-column prop="recall" label="召回率" width="100" align="center">
         <template #default="{ row }">{{ pct(row.recall) }}</template>
       </el-table-column>
-      <el-table-column prop="f1_score" label="F1" width="80">
+      <el-table-column prop="f1_score" label="F1" width="80" align="center">
         <template #default="{ row }">{{ f1fmt(row.f1_score) }}</template>
       </el-table-column>
-      <el-table-column prop="dataset_id" label="训练集" min-width="140">
+      <el-table-column prop="dataset_id" label="训练集" min-width="140" align="center">
         <template #default="{ row }">
           <el-tooltip v-if="row.dataset_name" :content="`数据集 ID: ${row.dataset_id}`" placement="top">
             <span class="ds-name">
@@ -483,53 +471,55 @@ const resetFilters = () => {
           <span v-else class="ds-id">{{ row.dataset_id ?? '-' }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="num_classes" label="类别数" width="80">
+      <el-table-column prop="num_classes" label="类别数" width="80" align="center">
         <template #default="{ row }">
           <el-tag size="small" effect="plain" type="warning">{{ row.num_classes }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="created_at" label="创建时间" min-width="170">
+      <el-table-column prop="created_at" label="创建时间" min-width="170" align="center">
         <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString() : '-' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right"  align="center">
         <template #default="{ row }">
-          <!--
-            激活 / 取消激活 互斥按钮
-            - 未激活: 显示「激活」(success 绿, 提示)
-            - 已激活: 显示「取消激活」(info 灰, 提示)
-            - 互斥: 同时存在, 状态切换互不影响
-            - v2 改造: 允许多激活, 不再自动取消同 dataset 其他
-          -->
-          <template v-if="!row.is_active">
-            <el-tooltip content="激活该模型版本 (允许多激活并存)" placement="top">
+          <div class="row-actions">
+            <!--
+              激活 / 取消激活 互斥按钮
+              - 未激活: 显示「激活」(success 绿, 提示)
+              - 已激活: 显示「取消激活」(info 灰, 提示)
+              - 互斥: 同时存在, 状态切换互不影响
+              - v2 改造: 允许多激活, 不再自动取消同 dataset 其他
+            -->
+            <template v-if="!row.is_active">
+              <el-tooltip content="激活该模型版本 (允许多激活并存)" placement="top">
+                <el-button
+                  size="small"
+                  type="success"
+                  @click="onActivate(row.id)"
+                >激活</el-button>
+              </el-tooltip>
+            </template>
+            <template v-else>
+              <el-tooltip content="取消该模型版本的激活状态" placement="top">
+                <el-button
+                  size="small"
+                  type="info"
+                  plain
+                  @click="onDeactivate(row.id)"
+                >取消激活</el-button>
+              </el-tooltip>
+            </template>
+            <el-button size="small" @click="onDetail(row.id)">详情</el-button>
+            <!--
+              删除按钮: v2 改造, 允许删除激活模型 (删除即取消激活)
+            -->
+            <el-tooltip content="删除此模型版本 (激活态会同步取消激活)" placement="top">
               <el-button
                 size="small"
-                type="success"
-                @click="onActivate(row.id)"
-              >激活</el-button>
+                type="danger"
+                @click="onDelete(row)"
+              >删除</el-button>
             </el-tooltip>
-          </template>
-          <template v-else>
-            <el-tooltip content="取消该模型版本的激活状态" placement="top">
-              <el-button
-                size="small"
-                type="info"
-                plain
-                @click="onDeactivate(row.id)"
-              >取消激活</el-button>
-            </el-tooltip>
-          </template>
-          <el-button size="small" @click="onDetail(row.id)">详情</el-button>
-          <!--
-            删除按钮: v2 改造, 允许删除激活模型 (删除即取消激活)
-          -->
-          <el-tooltip content="删除此模型版本 (激活态会同步取消激活)" placement="top">
-            <el-button
-              size="small"
-              type="danger"
-              @click="onDelete(row)"
-            >删除</el-button>
-          </el-tooltip>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -758,11 +748,10 @@ const resetFilters = () => {
   text-overflow: ellipsis;
 }
 
-/* ============== 顶部操作栏 ============== */
+/* ============== 顶部标题 ============== */
 .page-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   margin-bottom: 12px;
   flex-shrink: 0;
 }
@@ -782,14 +771,33 @@ const resetFilters = () => {
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
+
+/* ============== 筛选 + 批量操作 同一行 ============== */
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #fff;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  flex-shrink: 0;
+  flex-wrap: wrap;             /* 控件多时换行, 避免单行过挤 */
+}
+.filter-keyword { width: 240px; flex-shrink: 0; }
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  margin-left: auto;            /* 推到行尾, 筛选在左, 操作在右 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .selection-tip {
   color: var(--text-secondary);
   font-size: 13px;
+  white-space: nowrap;
 }
 .selection-tip strong {
   color: var(--brand-primary);
@@ -837,32 +845,20 @@ const resetFilters = () => {
 .ds-name :deep(.el-icon) { color: #4f7cff; font-size: 13px; }
 .ds-id { color: var(--text-placeholder); font-family: var(--font-mono); font-size: 12px; }
 
-/* ============== 筛选条件栏 ============== */
-.filter-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  margin-bottom: 12px;
-  background: #fff;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-soft);
-  flex-shrink: 0;
-  flex-wrap: nowrap;
-}
-.filter-keyword { width: 240px; }
-.filter-dataset { width: 200px; }
-.filter-scene   { width: 170px; }
-.filter-tip {
+/* ============== 表格行操作按钮组 ============== */
+.row-actions {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  margin-left: auto;
+  gap: 10px;
+  white-space: nowrap;
+  justify-content: center;
 }
-.filter-tip :deep(.el-icon) { color: var(--brand-primary); }
-.filter-tip strong { color: var(--brand-primary); font-weight: 600; }
+.row-actions .el-button {
+  margin: 4;
+  padding: 10px;
+  min-height: auto;
+  size: large;
+}
 
 /* ============== 分页栏 ============== */
 .pager {

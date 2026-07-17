@@ -304,8 +304,8 @@ const currentModelLabel = computed(() => {
       <template #default>
         <div style="margin-top: 4px; font-size: 13px; line-height: 1.6;">
           <strong>如何应用训练好的模型:</strong>
-          切换到「使用项目训练模型」(ON) →
-          从下拉框选择本数据集的微调模型 (默认=激活的) →
+          切换「使用项目训练模型」(是) →
+          从下拉框选择本数据集的微调模型 (已激活) →
           点击「启动 AI 预标注」批量推理,
           候选标签会自动对齐到项目预设类目
           ({{ categories.map((c: any) => c.name).join(' / ') || '尚未配置类目' }})。
@@ -332,31 +332,38 @@ const currentModelLabel = computed(() => {
     <el-card style="margin-bottom: 16px;">
       <el-form inline>
         <el-form-item label="数据集">
-          <el-select v-model="datasetId" placeholder="请选择" style="width: 200px;" filterable>
+          <el-select v-model="datasetId" placeholder="请选择" class="app-select" filterable>
             <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="预训练模型">
-          <!-- fine-tune 模式下: 显示项目训练的微调模型 (默认=激活的) -->
-          <el-tooltip
-            v-if="useFinetune"
-            :content="activeModel ? '当前激活: ' + activeModel.name : '当前没有激活的模型'"
-            placement="top">
-            <el-select
-              v-model="selectedModelId"
-              style="width: 260px;"
-              :disabled="finetuneModels.length === 0"
-              :placeholder="finetuneModels.length === 0 ? '暂无可用 fine-tune 模型' : '选择 fine-tune 模型'"
-            >
+        <el-form-item >
+          <!-- 固定宽度容器: 防止 fine-tune / 基础模型 切换时表单 reflow 导致其他控件左右跳动 -->
+          <div class="model-select-slot">
+            <!-- fine-tune 模式下: 显示项目训练的微调模型 (默认=激活的) -->
+            <el-tooltip
+              v-if="useFinetune"
+              :content="activeModel ? '当前激活: ' + activeModel.name : '当前没有激活的模型'"
+              placement="top">
+              <el-select
+                v-model="selectedModelId"
+                class="app-select"
+                :fit-input-width="false"
+                popper-class="app-select-dropdown"
+                :disabled="finetuneModels.length === 0"
+                :placeholder="finetuneModels.length === 0 ? '选择 fine-tune 模型 (仅本数据集已激活)' : '选择 fine-tune 模型'"
+              >
+              <!-- 风格参考 DatasetDetail.vue 模型下拉:
+                   - label 简化为 「name · base_model」, 不再加 ID 前缀
+                   - 内部 layout: name (主体) + base_model (灰) + 准确率 (绿, 自动居右)
+                   - 移除「激活」绿 tag, 激活状态通过 tooltip 提示 (避免与 Models.vue 产品规范冲突) -->
               <el-option
                 v-for="m in finetuneModels" :key="m.id"
-                :label="`${m.name} (${m.base_model}, 准确率 ${(m.accuracy * 100).toFixed(1)}%)`"
                 :value="m.id"
+                :label="`${m.name} · ${m.base_model}`"
               >
                 <div style="display: flex; align-items: center; gap: 6px;">
-                  <el-tag v-if="m.is_active" size="small" type="success" effect="dark">激活</el-tag>
                   <span>{{ m.name }}</span>
-                  <span style="color: #909399; font-size: 12px;">({{ m.base_model }})</span>
+                  <span style="color: #909399; font-size: 12px;">· {{ m.base_model }}</span>
                   <span style="margin-left: auto; color: #67c23a; font-size: 12px;">{{ (m.accuracy * 100).toFixed(1) }}%</span>
                 </div>
               </el-option>
@@ -367,7 +374,7 @@ const currentModelLabel = computed(() => {
             v-else
             content="基础模型输出会被归一为「未知」, 请谨慎使用"
             placement="top">
-            <el-select v-model="modelName" style="width: 220px;">
+            <el-select v-model="modelName" class="app-select" :fit-input-width="false" popper-class="app-select-dropdown">
               <el-option v-for="m in models" :key="m.name" :label="`${m.name} (${m.params})`" :value="m.name">
                 <div style="display: flex; align-items: center; gap: 6px;">
                   <el-tag v-if="m.framework" size="small" type="info" effect="plain">{{ m.framework }}</el-tag>
@@ -377,15 +384,16 @@ const currentModelLabel = computed(() => {
               </el-option>
             </el-select>
           </el-tooltip>
+          </div>
         </el-form-item>
         <el-form-item label="置信度阈值">
           <el-slider v-model="threshold" :min="0.1" :max="1.0" :step="0.05" style="width: 160px;"
             :format-tooltip="(v: number) => `${(v * 100).toFixed(0)}%`" />
         </el-form-item>
-        <el-form-item label="使用项目训练模型">
+        <el-form-item label="是否使用项目训练模型">
           <!-- 严格模式: 默认开启 fine-tune, 基础模型只作冷启动排查 -->
           <el-switch v-model="useFinetune"
-            active-text="Fine-tune (项目类目)" inactive-text="基础模型 (归「未知」)"
+            active-text="是" inactive-text="否"
             inline-prompt style="--el-switch-on-color: #67c23a;" />
         </el-form-item>
         <el-form-item>
@@ -528,6 +536,11 @@ const currentModelLabel = computed(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+/* 模型下拉切换容器: 固定宽度, 防止 useFinetune 切换时表单 reflow 抖动 */
+.model-select-slot {
+  display: inline-block;
+  width: 260px;
 }
 .model-confidence-bar {
   padding: 10px 0;

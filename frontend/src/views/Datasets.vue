@@ -305,7 +305,7 @@ const closeUpload = async () => {
           <el-input v-model="createForm.description" type="textarea" :rows="2" />
         </el-form-item>
         <el-form-item label="任务类型">
-          <el-select v-model="createForm.task_type" style="width: 100%;">
+          <el-select v-model="createForm.task_type" class="app-select app-select--full">
             <el-option
               v-for="opt in TASK_TYPE_OPTIONS" :key="opt.value"
               :label="opt.label" :value="opt.value"

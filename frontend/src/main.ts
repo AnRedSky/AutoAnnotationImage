@@ -10,6 +10,7 @@ import App from './App.vue'
 import router from './router'
 import './style.css'
 import './styles/theme.css'  // 全局设计系统 (圆角/阴影/按钮渐变/卡片悬浮等)
+import './styles/select.css' // 全局下拉框统一样式 (基准: Training .filter-dataset 200px)
 
 const app = createApp(App)
 

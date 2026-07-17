@@ -10,7 +10,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft, Refresh, Delete, Download, Lightning, Search, Picture, Document, UploadFilled, RefreshLeft, View, Grid, List,
-  CircleCheck, CircleClose, Clock, MagicStick, CollectionTag, Check, Minus, InfoFilled, DataAnalysis
+  CircleCheck, CircleClose, Clock, MagicStick, CollectionTag, Check, Minus, InfoFilled, DataAnalysis, EditPen
 } from '@element-plus/icons-vue'
 import {
   datasetApi, imageApi, annotationApi, autoAnnotateApi, exportApi, statsApi, modelApi
@@ -30,7 +30,7 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(24)
 const pageSizes = ref([12, 24, 48, 96])
-const statusFilter = ref<string>('')   // '' = all
+const statusFilter = ref<string>('all')   // 'all' = 全部 (element-plus el-select 不把空字符串 v-model 视为"已选中", 用 'all' 让默认 label "全部" 渲染)
 const keyword = ref('')
 const loading = ref(false)
 const stats = ref<any>(null)
@@ -52,7 +52,9 @@ const uploadOpen = ref(false)
 const viewMode = ref<'grid' | 'list'>('grid')
 
 const statusOptions = [
-  { value: '', label: '全部', color: '#909399' },
+  // 注意: value 不能用 '' (空串), element-plus el-select 把 v-model='' 视为 unselected,
+  // 不匹配任何 option, 默认显示 placeholder 而非 label. 用 'all' 占位 + load 时翻译成 undefined.
+  { value: 'all', label: '全部', color: '#909399' },
   { value: 'pending', label: '待标注', color: '#909399' },
   { value: 'ai_labeled', label: 'AI 已标', color: '#409eff' },
   { value: 'human_confirmed', label: '已确认', color: '#67c23a' },
@@ -66,12 +68,17 @@ async function load() {
     const [d, list, s, mvsResp, actResp]: any[] = await Promise.all([
       datasetApi.get(datasetId.value),
       imageApi.list(datasetId.value, {
-        status: statusFilter.value || undefined,
+        // 'all' 翻译成 undefined (不传 status 参数, 后端返所有)
+        status: statusFilter.value === 'all' ? undefined : statusFilter.value,
         page: page.value,
         page_size: pageSize.value
       }),
       statsApi.dataset(datasetId.value).catch(() => null),
-      modelApi.list().catch(() => ({ items: [] })),
+      // 与「标注工作台 Annotate.vue」一致:
+      // 顶部模型下拉只显示**当前数据集已激活的** fine-tune 模型
+      // 后端 /models/ 支持 dataset_id + active 过滤, 一次拉到位
+      modelApi.list({ dataset_id: datasetId.value, active: true }).catch(() => ({ items: [] })),
+      // 保留 actResp 给启动预标注时用 (后端兜底)
       modelApi.getActive(datasetId.value).catch(() => ({ model: null })),
     ])
     dataset.value = d
@@ -79,20 +86,14 @@ async function load() {
     total.value = list?.total || 0
     stats.value = s
 
-    // 本数据集已训练的 fine-tune 模型 (后端 /models/ 返回全部, 客户端按 dataset_id 过滤)
+    // 当前数据集已激活的 fine-tune 模型
+    // (后端已按 dataset_id + active 过滤; 客户端再冗余校验, 防止 API 返回异常)
     const allFT = mvsResp?.items || mvsResp || []
-    finetuneModels.value = allFT.filter((m: any) => m.dataset_id === datasetId.value)
+    finetuneModels.value = allFT.filter((m: any) => m.dataset_id === datasetId.value && m.is_active)
 
-    // 默认选择策略:
-    // 1) 优先用后端返回的激活模型
-    // 2) 否则用本数据集训练出的最新一个 fine-tune (is_active 优先, 其次第一项)
-    // 3) 都没有 → null, 后端在 onAutoAnnotate 时走 timm 冷启动
-    const activeModel = actResp?.model || null
-    if (activeModel && finetuneModels.value.some((m: any) => m.id === activeModel.id)) {
-      selectedFinetuneId.value = activeModel.id
-    } else if (finetuneModels.value.length > 0) {
-      const active = finetuneModels.value.find((m: any) => m.is_active)
-      selectedFinetuneId.value = (active?.id) ?? finetuneModels.value[0].id
+    // 默认选择: list 本身就是按 active=true 过滤的结果, 取第一个即可
+    if (finetuneModels.value.length > 0) {
+      selectedFinetuneId.value = finetuneModels.value[0].id
     } else {
       selectedFinetuneId.value = null
     }
@@ -503,10 +504,6 @@ watch(() => route.params.id, () => load())
           <el-button :icon="UploadFilled" type="success" @click="uploadOpen = true">
             上传图片
           </el-button>
-          <el-button :icon="Lightning" type="primary" :loading="autoLabeling" @click="onAutoAnnotate">
-            启动 AI 预标注
-          </el-button>
-          <el-button @click="goAnnotate">去标注</el-button>
           <el-dropdown @command="(c: any) => handleExport(c)">
             <el-button :icon="Download">导出</el-button>
             <template #dropdown>
@@ -517,6 +514,8 @@ watch(() => route.params.id, () => load())
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+          <!-- 启动 AI 预标注 / 去标注 / 模型选择 仍整合在 filter-card 的 action-bar (单行)
+               仅导出按钮按要求回到 page header 原位 -->
         </div>
       </div>
     </div>
@@ -581,33 +580,41 @@ watch(() => route.params.id, () => load())
 
     <!-- 过滤 + AI 选项 -->
     <el-card shadow="never" class="filter-card">
-      <!-- 单行紧凑布局: 状态/搜索/AI模型/置信度/批量操作/视图切换 -->
-      <el-row :gutter="8" align="middle" class="filter-row filter-row--single">
-        <el-col :span="3" class="filter-cell">
-          <el-select v-model="statusFilter" size="default" placeholder="状态" style="width: 100%;">
+      <!-- 单行紧凑布局: flex + flex-wrap 保证窄屏自动换行
+           分 3 组 (用 | 视觉分隔):
+             过滤组: 状态 / 搜索
+             AI 组:  模型下拉 / 启动AI预标注 / 测评 (相邻, 测评是启动的 dry-run)
+             操作组: 去标注 / 导出 (去标注 = 跳标注页, 导出 = 输出数据集)
+             辅助组: 批量 (去标/删除) / 视图切换
+           注: 启动AI预标注 / 去标注 / 导出 / 模型选择 整合在同一行 (按产品要求) -->
+      <div class="filter-row filter-row--single">
+        <!-- ===== 过滤组 ===== -->
+        <div class="filter-group filter-group--filter">
+          <el-select v-model="statusFilter" size="default" placeholder="状态" class="filter-cell filter-cell--select app-select app-select--medium">
             <el-option
               v-for="opt in statusOptions" :key="opt.value"
               :label="opt.label" :value="opt.value"
             />
           </el-select>
-        </el-col>
-        <el-col :span="3" class="filter-cell">
           <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索文件名/类别"
-            clearable size="default" />
-        </el-col>
-        <!-- 模型列 (5 cols): 仅展示 fine-tune 模型下拉, 给长模型名更多空间 -->
-        <el-col :span="5" class="filter-cell filter-cell--model">
+            clearable size="default" class="filter-cell filter-cell--search" />
+        </div>
+
+        <!-- ===== AI 组 (核心) ===== -->
+        <div class="filter-group filter-group--ai">
           <el-tooltip
             placement="top" :show-after="200"
-            content="选择用于 AI 预标注的 fine-tune 模型 (项目自训练). 若项目暂无训练模型, 后端将自动回退到 timm 预训练 (冷启动)"
+            content="选择用于 AI 预标注的 fine-tune 模型. 若数据集暂无激活的 fine-tune 模型, 切换到模型管理页面激活"
           >
             <el-select
               v-model="selectedFinetuneId"
-              placeholder="选择 fine-tune 模型"
+              placeholder="选择 fine-tune 模型 (仅本数据集已激活)"
               size="default"
-              style="width: 100%;"
+              :fit-input-width="false"
+              popper-class="app-select-dropdown model-select-dropdown"
+              class="app-select"
               filterable
-              :empty-text="finetuneModels.length === 0 ? '该项目暂无训练模型, 启动预标注将自动走 timm 冷启动' : '无可用模型'"
+              :empty-text="finetuneModels.length === 0 ? '该数据集暂无激活的 fine-tune 模型' : '无可用模型'"
             >
               <el-option
                 v-for="m in finetuneModels" :key="m.id" :value="m.id"
@@ -625,47 +632,60 @@ watch(() => route.params.id, () => load())
               </el-option>
             </el-select>
           </el-tooltip>
-        </el-col>
-        <el-col :span="4" class="filter-cell filter-cell--slider">
-          <div class="threshold-row">
-            <el-tooltip
-              placement="top" :show-after="200"
-              :content="`置信度阈值: 决定一张图被自动标注的最低可信度。>= ${(threshold * 100).toFixed(0)}% 将直接标注, 其余保留为「待标注」由人工复核`"
-            >
+          <!-- 启动 AI 预标注 按钮已移除 (按要求)
+               标注工作台 Annotate.vue 仍提供此功能入口 -->
+          <!-- 置信度阈值 (从原 filter-row--threshold 第 2 行挪到 AI 组, 测评前面, 紧凑模式) -->
+          <el-tooltip
+            placement="top" :show-after="200"
+            :content="`置信度阈值: 决定一张图被自动标注的最低可信度。>= ${(threshold * 100).toFixed(0)}% 将直接标注, 其余保留为「待标注」由人工复核`"
+          >
+            <div class="threshold-row threshold-row--inline">
+              <span class="threshold-label">阈值</span>
               <el-slider v-model="threshold" :min="0.1" :max="1.0" :step="0.05" :show-tooltip="true"
-                :format-tooltip="(v: number) => `阈值 ${(v * 100).toFixed(0)}%`" />
-            </el-tooltip>
-            <el-tooltip
-              placement="top" :show-after="200"
-              :content="`对当前页 ${images.length} 张图片跑一遍 ${displayModel}, 不写库, 仅返回 top-1 置信度, 帮你在执行批量预标注前评估阈值是否合适`"
-            >
-              <el-button
-                size="small" plain type="primary" :icon="DataAnalysis"
-                :loading="previewing"
-                :disabled="images.length === 0"
-                @click="onPreviewConfidence"
-                class="threshold-row__btn"
-              >测评</el-button>
-            </el-tooltip>
-          </div>
-        </el-col>
-        <el-col :span="7" class="filter-cell filter-cell--actions">
+                :format-tooltip="(v: number) => `阈值 ${(v * 100).toFixed(0)}%`"
+                class="threshold-slider threshold-slider--inline" />
+              <el-tag type="primary" effect="dark" class="threshold-value">
+                {{ (threshold * 100).toFixed(0) }}%
+              </el-tag>
+            </div>
+          </el-tooltip>
+          <el-tooltip
+            placement="top" :show-after="200"
+            content="dry-run 试跑当前页图片, 不写库, 弹窗显示 3 类: 会标/待标/无交集, 帮你在执行批量预标注前评估阈值是否合适"
+          >
+            <el-button
+              plain :icon="DataAnalysis" :loading="previewing"
+              :disabled="images.length === 0"
+              @click="onPreviewConfidence"
+              class="filter-cell filter-cell--btn"
+            >测评</el-button>
+          </el-tooltip>
+        </div>
+
+        <!-- ===== 操作组 (去标注; 导出已回到 page header 原位) ===== -->
+        <div class="filter-group filter-group--ops">
+          <el-tooltip placement="top" :show-after="200" content="跳转到标注工作台, 继续人工确认/修正">
+            <el-button :icon="EditPen" @click="goAnnotate" class="filter-cell filter-cell--btn">去标注</el-button>
+          </el-tooltip>
+        </div>
+
+        <!-- ===== 辅助组 (批量 + 视图) ===== -->
+        <div class="filter-group filter-group--aux">
           <el-button
-            size="small" plain
+            plain
             :type="allOnPageSelected ? 'primary' : 'default'"
             :icon="allOnPageSelected ? 'Minus' : 'Check'"
             @click="toggleSelectAll"
+            class="filter-cell filter-cell--btn"
           >{{ allOnPageSelected ? '取消' : '全选' }}</el-button>
           <el-tag v-if="selectedIds.length > 0" type="warning" effect="dark" size="default" class="batch-count">
             {{ selectedIds.length }}
           </el-tag>
-          <el-button :disabled="selectedIds.length === 0" type="warning" size="small"
-            :icon="RefreshLeft" @click="batchClearAnnotation">去标</el-button>
-          <el-button :disabled="selectedIds.length === 0" type="danger" size="small"
-            :icon="Delete" @click="batchDelete">删除</el-button>
-        </el-col>
-        <el-col :span="2" class="filter-cell filter-cell--view">
-          <div class="view-mode-switch">
+          <el-button :disabled="selectedIds.length === 0" type="warning"
+            :icon="RefreshLeft" @click="batchClearAnnotation" class="filter-cell filter-cell--btn">去标</el-button>
+          <el-button :disabled="selectedIds.length === 0" type="danger"
+            :icon="Delete" @click="batchDelete" class="filter-cell filter-cell--btn">删除</el-button>
+          <div class="view-mode-switch" :title="viewMode === 'grid' ? '网格视图' : '列表视图'">
             <button
               class="mode-btn" :class="{ active: viewMode === 'grid' }"
               :title="'网格视图'" @click="viewMode = 'grid'"
@@ -679,8 +699,9 @@ watch(() => route.params.id, () => load())
               <el-icon><List /></el-icon>
             </button>
           </div>
-        </el-col>
-      </el-row>
+        </div>
+      </div>
+      <!-- 第 2 行 (filter-row--threshold) 已移除: 置信度 slider 已挪到第 1 行 AI 组测评前面 -->
       <!-- AI 配置实时提示: 告知用户当前模型/阈值将如何作用于待标图片 -->
       <div class="ai-config-hint">
         <el-icon class="ai-config-hint__icon"><InfoFilled /></el-icon>
@@ -1150,41 +1171,210 @@ watch(() => route.params.id, () => load())
   font-weight: 500;
 }
 .filter-row { margin-top: 0; padding-top: 0; border-top: none; }
-.filter-cell { display: flex; align-items: center; min-width: 0; }
-.filter-cell > * { min-width: 0; flex: 1 1 auto; }
-/* 滑块单元: 充满整列, 边距最小化 */
-.filter-cell--slider { padding: 0 4px; }
-.filter-cell--slider .el-slider { flex: 1; min-width: 0; }
-.filter-cell--slider .el-slider__runway { margin: 0 12px; }
-/* 视图模式 / 批量操作区: 多个按钮紧凑 */
-.filter-cell--actions {
+
+/* ===== 单行整合布局: 4 组 flex + flex-wrap (响应式) =====
+   .filter-row--single: 单行, 4 组用 | 视觉分隔
+     [过滤组] | [AI 组] | [操作组] | [辅助组]
+   窄屏 (< 1100px) 自动换行, 每组 100% 宽度 */
+.filter-row--single {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
-  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
 }
-.filter-cell--actions > * { flex: 0 0 auto; }
+/* 组与组之间的 | 视觉分隔: 每组右侧加 1px 浅灰 (除最后一组) */
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  min-width: 0;
+  flex-wrap: nowrap;            /* 强制单行, 防止组内 wrap */
+}
+.filter-group:not(:last-child) {
+  padding-right: var(--divider);
+  border-right: 1px solid var(--border-soft, #ebeef5);
+}
+/* 各 group 宽度策略 (1130-1280 屏主区 ~858-1008px):
+   - filter: 状态(140) + 搜索(150) + gap(8) = 298
+   - ai:     模型(180) + 阈值组(170) + 测评(72) + 2×8 = 446
+   - ops:    去标注(88) = 88
+   - aux:    全选+去标+删除+视图 ≈ 280
+   - 3×12 (|) = 36
+   - 总 ≈ 1148 (1130 屏会换行, 1280 屏单行) */
+.filter-group--filter { flex: 0 1 auto; min-width: 280px; }
+.filter-group--ai     { flex: 1 1 auto; min-width: 440px; }
+.filter-group--ops    { flex: 0 0 auto; }
+.filter-group--aux    { flex: 0 1 auto; margin-left: auto; min-width: 260px; }  /* 辅助组靠右 */
+
+/* ───────────────────────────────────────────────────────────
+   filter-card 宽度统一管理 (CSS 变量)
+   改一个数字, 所有用到的 width / flex-basis / min-width 同步更新
+   ─────────────────────────────────────────────────────────── */
+.filter-card {
+  /* 单值宽度: 改这里就能调整对应元素 */
+  --w-status:  140px;   /* 状态下拉 (label "已修正" 3 汉字 + 箭头) */
+  --w-search:  200px;   /* 搜索框 (placeholder "搜索文件名/类别" + icon) */
+  --w-model:    260px;   /* 模型下拉触发框 (300 = 固定值, 不留白也不截断) */
+  --w-thresh:  180px;   /* 阈值组 (label "阈值" + slider + 60% tag) */
+  --w-btn:      72px;   /* 次按钮 (测评/去标注 padding 0 10) */
+  --w-btn-pri: 100px;   /* 主按钮 (启动 AI 预标注 padding 0 14) */
+  --gap:        8px;    /* filter-row 内部 gap */
+  --divider:   12px;    /* group 之间的 | 内边距 */
+}
+
+/* 通用单元 */
+.filter-cell { display: flex; align-items: center; min-width: 0; }
+
+/* ── 状态下拉 (固定, 不让 flex 改) ── */
+.filter-cell--select {
+  width: var(--w-status);
+  flex-shrink: 0;
+  /* flex: 0 0 var(--w-status); */
+  display: block;   /* 不能用 display: flex 包裹 el-select, 会压扁 .el-select__placeholder */
+}
+.filter-cell--select .el-select { width: 100%; }
+
+/* ── 搜索框 (固定 200) ── */
+.filter-cell--search {
+  width: var(--w-search);
+  flex: 0 0 var(--w-search);
+}
+
+/* ── 模型下拉 (固定 300) ── */
+.filter-cell--model {
+  width: var(--w-model);
+  /* flex: 0 0 var(--w-model); */
+  flex-shrink: 0;
+}
+/* 关键: el-select 默认 width = content, 不是 100%.
+   外层 500px 但内部 select 只占 content 宽 (≈ 200px), 右侧空白.
+   必须给 .el-select 设 100% 撑满外层. */
+.filter-cell--model .el-select,
+.filter-cell--model .el-select__wrapper { width: 100%; }
+
+/* 下拉面板 (popper): 跟内容走, 不强制匹配触发框
+   fit-input-width="false" 已让面板按 option 内容自适应
+   这里再设 max-width: max-content 防止过长 */
+.model-select-dropdown {
+  width: max-content;
+  max-width: 600px;        /* 防超长 option 撑爆 */
+  min-width: 200px;        /* 不短于触发框 */
+}
+
+/* ── 按钮 (auto 宽, 跟随 content) ── */
+.filter-cell--btn,
+.filter-cell--btn-primary {
+  flex: 0 0 auto;
+}
+.filter-cell--btn-primary {
+  font-weight: 600;
+  --el-button-size: 32px;
+  height: 32px;
+  padding: 0 14px;
+}
+.filter-cell--btn { padding: 0 10px; }
+
+/* ── 阈值组 (label + slider + tag) ── */
+.threshold-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.threshold-label {
+  font-size: 13px;
+  color: var(--text-secondary, #606266);
+  font-weight: 500;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.threshold-row--inline {
+  width: var(--w-thresh);
+  flex: 0 0 var(--w-thresh);
+}
+.threshold-row :deep(.el-slider) { flex: 1 1 auto; min-width: 0; }
+.threshold-slider--inline { margin: 0 4px; }
+.threshold-slider--inline :deep(.el-slider__runway) { margin: 0 6px; }
+.threshold-value {
+  flex: 0 0 auto;
+  font-weight: 600;
+  min-width: 44px;
+  text-align: center;
+}
+
+/* 辅助组内: 全选/批量/视图切换紧凑排列 */
+.filter-group--aux { gap: 6px; }
 .batch-count { font-weight: 600; }
+.view-mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-soft, #ebeef5);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-left: 4px;
+}
+.mode-btn {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg-card, #fff);
+  color: var(--text-secondary, #606266);
+  border: none;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.mode-btn + .mode-btn { border-left: 1px solid var(--border-soft, #ebeef5); }
+.mode-btn:hover { color: var(--el-color-primary); background: rgba(64,158,255,0.08); }
+.mode-btn.active { color: #fff; background: var(--el-color-primary); }
 
-/* 模型列: 仅 fine-tune 下拉, 5 cols 给长模型名足够空间 */
-.filter-cell--model .el-select { width: 100%; }
-
-/* 阈值列: slider 主体 + 测评按钮 (右侧紧凑排列) */
+/* 置信度阈值 (紧凑模式, 在第 1 行 AI 组测评前面)
+   原 filter-row--threshold 第 2 行整行布局已移除, slider 改为 inline 模式 */
 .threshold-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
+  gap: 6px;
+  min-width: 0;
+}
+.threshold-label {
+  font-size: 13px;
+  color: var(--text-secondary, #606266);
+  font-weight: 500;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* 内联模式: 带 label (简化为"阈值" 2 字符), slider 较窄 (140-170px) */
+.threshold-row--inline {
+  flex: 0 1 180px;       /* 基础 180, 允许收缩 */
+  min-width: 300px;
 }
 .threshold-row :deep(.el-slider) {
   flex: 1 1 auto;
   min-width: 0;
 }
-.threshold-row__btn {
+/* 内联 slider: 高度压缩, 适配 32px 按钮同行 */
+.threshold-slider--inline {
+  margin: 0 4px;
+}
+.threshold-slider--inline :deep(.el-slider__runway) {
+  margin: 0 6px;
+}
+.threshold-value {
   flex: 0 0 auto;
-  padding: 4px 10px;
-  font-size: 12px;
+  font-weight: 600;
+  min-width: 44px;
+  text-align: center;
+}
+
+/* 响应式: 窄屏 (< 1100px) 组内元素换行, 组不再用 | 分隔 */
+@media (max-width: 1100px) {
+  .filter-group:not(:last-child) {
+    border-right: none;
+    padding-right: 0;
+  }
+  .filter-group--aux { margin-left: 0; }
+  .filter-group {
+    flex-basis: 100%;
+  }
+  .filter-group--ai { flex-basis: 100%; }
+  .filter-cell--search { width: 100%; flex: 1 1 100%; }
+}
+@media (max-width: 720px) {
+  .filter-cell--model { min-width: 0; }
+  .filter-cell--btn-primary { font-size: 12px; padding: 0 10px; }
 }
 
 /* 测评结果弹窗: 顶部三张统计卡 */
@@ -1326,7 +1516,7 @@ watch(() => route.params.id, () => load())
   position: relative;
   width: 100%;
   aspect-ratio: 1 / 1;
-  background: linear-gradient(135deg, #f5f7fa 0%, #ebedf2 100%);
+  background: linear-gradient(135deg, #f5f7 0%, #ebedf2 100%);
   border-radius: 4px;
   overflow: hidden;
 }

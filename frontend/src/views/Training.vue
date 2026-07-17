@@ -1048,58 +1048,62 @@ const stopSilentRefresh = () => {
       </el-col>
     </el-row>
 
-    <!-- ============== 顶部操作栏 ============== -->
+    <!-- ============== 顶部标题 ============== -->
     <div class="page-header">
       <h2 class="page-title">
         <span>训练任务</span>
         <span class="subtitle">Training</span>
       </h2>
-      <div class="header-actions">
-        <!-- 状态筛选 -->
-        <el-select
-          v-model="stateFilter"
-          placeholder="状态"
-          style="width: 120px;"
-          clearable
-          @change="onStateFilterChange"
-        >
-          <el-option
-            v-for="o in STATE_OPTIONS.filter((o) => o.value)" :key="o.value"
-            :label="o.label" :value="o.value"
-          />
-        </el-select>
-        <!-- 数据集筛选: 独立下拉, 从 DATASET_OPTIONS 取数 -->
-        <el-select
-          v-model="datasetIdFilter"
-          placeholder="数据集"
-          style="width: 200px;"
-          clearable
-          filterable
-          @change="onDatasetFilterChange"
-        >
-          <el-option
-            v-for="d in DATASET_OPTIONS" :key="d.id"
-            :label="d.name" :value="d.id"
-          />
-        </el-select>
-        <!-- 模型关键词筛选: 模糊匹配 model_name / base_model -->
-        <el-input
-          v-model="modelKeywordFilter"
-          placeholder="模型名 / 基础模型"
-          style="width: 200px;"
-          clearable
-          :prefix-icon="Search"
-          @input="onModelKeywordChange"
+    </div>
+
+    <!-- ============== 筛选 + 操作 同一行 ============== -->
+    <div class="filter-row">
+      <!-- 状态筛选 -->
+      <el-select
+        v-model="stateFilter"
+        placeholder="状态"
+        class="app-select app-select--narrow"
+        clearable
+        @change="onStateFilterChange"
+      >
+        <el-option
+          v-for="o in STATE_OPTIONS.filter((o) => o.value)" :key="o.value"
+          :label="o.label" :value="o.value"
         />
-        <!-- 重置按钮: 仅在有任一筛选时显示 -->
-        <el-button
-          v-if="stateFilter || datasetIdFilter != null || modelKeywordFilter"
-          text
-          :icon="Refresh"
-          @click="resetFilters"
-        >
-          重置
-        </el-button>
+      </el-select>
+      <!-- 数据集筛选: 独立下拉, 从 DATASET_OPTIONS 取数 -->
+      <el-select
+        v-model="datasetIdFilter"
+        placeholder="数据集"
+        class="app-select"
+        clearable
+        filterable
+        @change="onDatasetFilterChange"
+      >
+        <el-option
+          v-for="d in DATASET_OPTIONS" :key="d.id"
+          :label="d.name" :value="d.id"
+        />
+      </el-select>
+      <!-- 模型关键词筛选: 模糊匹配 model_name / base_model -->
+      <el-input
+        v-model="modelKeywordFilter"
+        placeholder="模型名 / 基础模型"
+        class="filter-keyword"
+        clearable
+        :prefix-icon="Search"
+        @input="onModelKeywordChange"
+      />
+      <!-- 重置按钮: 仅在有任一筛选时显示 -->
+      <el-button
+        v-if="stateFilter || datasetIdFilter != null || modelKeywordFilter"
+        text
+        :icon="Refresh"
+        @click="resetFilters"
+      >
+        重置
+      </el-button>
+      <div class="header-actions">
         <el-button type="primary" :icon="Plus" @click="openCreateDialog">新建训练任务</el-button>
         <el-button :icon="Refresh" @click="loadJobs">刷新</el-button>
       </div>
@@ -1143,12 +1147,13 @@ const stopSilentRefresh = () => {
       <el-table
         :data="jobs"
         v-loading="loading"
-        size="small" border stripe
+        border stripe
+        class="jobs-table"
         height="100%"
         style="width: 100%;"
         empty-text="暂无训练任务"
         @selection-change="onJobSelectionChange"
-      >        
+      >
         <el-table-column type="index" :index="indexMethod" label="#" width="42" align="center" />
         <el-table-column type="selection" width="40" :reserve-selection="false" />
         <el-table-column label="数据集" min-width="92" show-overflow-tooltip>
@@ -1544,15 +1549,12 @@ const stopSilentRefresh = () => {
   padding: 4px;
   min-height: auto;
 }
-/* 行内 cell 紧凑: el-table 默认 cell-padding 12px 0, 适当压缩 */
+/* 行内 cell 紧凑: el-table 默认 cell-padding 12px 0, 压缩到 8px 让单行更易读 */
 :deep(.el-table .el-table__cell) {
-  padding: 4px 0 !important;
-}
-:deep(.el-table--small .el-table__cell) {
-  padding: 3px 0 !important;
+  padding: 8px 0 !important;
 }
 :deep(.el-table .el-table__cell .cell) {
-  padding: 0 6px;
+  padding: 0 8px;
   word-break: break-word;
 }
 /* 列头居中视觉对齐 */
@@ -1618,11 +1620,10 @@ const stopSilentRefresh = () => {
 .stat-card--orange .stat-icon { background: rgba(255, 138, 76, 0.1); color: #ff8a4c; }
 .stat-card--red    .stat-icon { background: rgba(255, 77, 79, 0.1); color: #ff4d4f; }
 
-/* ============== 顶部操作栏 ============== */
+/* ============== 顶部标题 ============== */
 .page-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   margin-bottom: 12px;
   flex-shrink: 0;
 }
@@ -1642,7 +1643,29 @@ const stopSilentRefresh = () => {
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
-.header-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+/* ============== 筛选 + 操作 同一行 ============== */
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #fff;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  flex-shrink: 0;
+  flex-wrap: wrap;             /* 控件多时换行, 避免单行过挤 */
+}
+.filter-keyword { width: 220px; flex-shrink: 0; }
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;            /* 推到行尾, 筛选在左, 操作在右 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 
 /* ============== 筛选 chip 状态条 ============== */
 .filter-chips {
@@ -1691,7 +1714,7 @@ const stopSilentRefresh = () => {
 /* 表格区: 占据所有剩余高度, 内部滚动, 不挤压分页栏 */
 .table-wrapper {
   flex: 1 1 0;
-  min-height: 0;
+  min-height: 420px;        /* 兜底: 即使上方内容变多, 表格也至少能显示 8-10 行 */
   overflow: auto;  /* 内容多时表格内部滚动 */
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
@@ -1701,9 +1724,21 @@ const stopSilentRefresh = () => {
   /* el-table 自身是 display: table, 不接受 flex:1; 用 height: 100% 占满父容器 */
   height: 100% !important;
   width: 100% !important;
+  font-size: 13px;          /* 单元格字号: 13px, 与全站表格统一, 比原 12px small 更易读 */
 }
 /* Element Plus el-table 在 flex 容器中, 默认会自己处理 body 滚动, 不要
    给 __inner-wrapper 强加 overflow:auto, 否则 fixed-right 列会盖住内容列. */
+
+/* 单元格内边距: 默认 12px 0 偏大, 压缩到 8px 让单行更紧凑; 行高随之 ~38px */
+.jobs-table :deep(.el-table .el-table__cell) {
+  padding: 8px 0 !important;
+}
+/* 表头略加粗并放大到 13px (theme.css 已是 13px, 这里显式覆盖确保不被 inherit) */
+.jobs-table :deep(.el-table th.el-table__cell) {
+  font-size: 13px !important;
+  font-weight: 600;
+  background: var(--bg-soft) !important;
+}
 
 /* 分页栏: 固定在页面底部, 不会被表格滚动条挡住 */
 .pager {
