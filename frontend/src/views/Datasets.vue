@@ -28,7 +28,6 @@ const catDs = ref<any>(null)
 const catOpen = ref(false)
 const categories = ref<any[]>([])
 const newCatName = ref('')
-const models = ref<any[]>([])
 
 // 分页 (client-side)
 const page = ref(1)
@@ -70,15 +69,7 @@ const loadCategories = async (dsId: number) => {
   } catch (e) {}
 }
 
-const loadModels = async () => {
-  try {
-    const ms: any = await autoAnnotateApi.models()
-    models.value = ms?.models || []
-  } catch {}
-}
-
 load()
-loadModels()
 onMounted(() => load())
 
 watch(catDs, (v) => { if (v) loadCategories(v.id) })

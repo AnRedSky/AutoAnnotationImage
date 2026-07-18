@@ -10,7 +10,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft, Refresh, Delete, Download, Lightning, Search, Picture, Document, UploadFilled, RefreshLeft, View, Grid, List,
-  CircleCheck, CircleClose, Clock, MagicStick, CollectionTag, Check, Minus, InfoFilled, DataAnalysis, EditPen
+  CircleCheck, CircleClose, Clock, MagicStick, CollectionTag, Check, Minus, InfoFilled, DataAnalysis, EditPen,
+  WarningFilled, Promotion
 } from '@element-plus/icons-vue'
 import {
   datasetApi, imageApi, annotationApi, autoAnnotateApi, exportApi, statsApi, modelApi
@@ -46,6 +47,7 @@ const autoLabeling = ref(false)
 // 回退到 timm ImageNet 预训练 (冷启动), 无需前端额外处理
 const finetuneModels = ref<any[]>([])     // 本数据集已训练出的 fine-tune 模型
 const selectedFinetuneId = ref<number | null>(null)  // 当前选中的 fine-tune ModelVersion.id
+const activeModel = ref<any>(null)        // 当前数据集激活的 fine-tune 模型 (与 Annotate 命名一致)
 const threshold = ref(0.6)
 const uploadOpen = ref(false)
 // 视图模式: grid (默认) / list
@@ -65,7 +67,7 @@ async function load() {
   if (!datasetId.value) return
   loading.value = true
   try {
-    const [d, list, s, mvsResp, actResp]: any[] = await Promise.all([
+    const [d, list, s, actResp]: any[] = await Promise.all([
       datasetApi.get(datasetId.value),
       imageApi.list(datasetId.value, {
         // 'all' 翻译成 undefined (不传 status 参数, 后端返所有)
@@ -74,33 +76,65 @@ async function load() {
         page_size: pageSize.value
       }),
       statsApi.dataset(datasetId.value).catch(() => null),
-      // 与「标注工作台 Annotate.vue」一致:
-      // 顶部模型下拉只显示**当前数据集已激活的** fine-tune 模型
-      // 后端 /models/ 支持 dataset_id + active 过滤, 一次拉到位
-      modelApi.list({ dataset_id: datasetId.value, active: true }).catch(() => ({ items: [] })),
-      // 保留 actResp 给启动预标注时用 (后端兜底)
+      // 与 Annotate 一致: 拿当前数据集的激活模型, 用于 tooltip 提示
       modelApi.getActive(datasetId.value).catch(() => ({ model: null })),
     ])
     dataset.value = d
     images.value = list?.items || []
     total.value = list?.total || 0
     stats.value = s
+    activeModel.value = actResp?.model || actResp?.items?.[0] || null
 
-    // 当前数据集已激活的 fine-tune 模型
-    // (后端已按 dataset_id + active 过滤; 客户端再冗余校验, 防止 API 返回异常)
-    const allFT = mvsResp?.items || mvsResp || []
-    finetuneModels.value = allFT.filter((m: any) => m.dataset_id === datasetId.value && m.is_active)
-
-    // 默认选择: list 本身就是按 active=true 过滤的结果, 取第一个即可
-    if (finetuneModels.value.length > 0) {
-      selectedFinetuneId.value = finetuneModels.value[0].id
-    } else {
-      selectedFinetuneId.value = null
-    }
+    // 模型下拉列表: 与标注工作台 (Annotate.vue) 完全对齐
+    // - 仅显示本数据集**已激活**的 fine-tune 模型
+    // - 无激活时下拉禁用 (与 Annotate 行为一致)
+    await loadFinetuneModels()
   } catch (e: any) {
     ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 加载本数据集已激活的 fine-tune 模型下拉列表
+ * 与 Annotate.vue 的 refreshFinetuneModels 行为完全一致:
+ * - 仅显示已激活模型
+ * - 默认选择: 已选仍存在 > 第一个
+ * - 无激活时清空下拉, 由模板 disabled 控制禁用态
+ */
+async function loadFinetuneModels() {
+  const did = datasetId.value
+  if (!did) {
+    finetuneModels.value = []
+    selectedFinetuneId.value = null
+    return
+  }
+  try {
+    // 与 Annotate 一致: 先 list+active=true, 兜底 getActive
+    let items: any[] = []
+    try {
+      const r: any = await modelApi.list({ dataset_id: did, active: true })
+      items = r?.items || r || []
+    } catch {
+      items = []
+    }
+    if (items.length === 0) {
+      const r: any = await modelApi.getActive(did)
+      items = r?.items || (r?.model ? [r.model] : [])
+    }
+    finetuneModels.value = items
+    // 默认选择: 已选仍存在 > 第一个; 否则清空
+    if (items.length > 0) {
+      const prev = selectedFinetuneId.value
+      const stillExists = items.find((m: any) => m.id === prev)
+      selectedFinetuneId.value = stillExists ? prev : items[0].id
+    } else {
+      selectedFinetuneId.value = null
+    }
+  } catch {
+    finetuneModels.value = []
+    selectedFinetuneId.value = null
   }
 }
 
@@ -204,6 +238,13 @@ const selectedFinetuneModel = computed(
   () => finetuneModels.value.find((m: any) => m.id === selectedFinetuneId.value) || null
 )
 
+/**
+ * 是否存在本数据集的 fine-tune 模型
+ * - false 时: 测评按钮 disabled + 友好提示, 引导去训练
+ * - true 时:  正常测评
+ */
+const hasFinetuneModel = computed(() => finetuneModels.value.length > 0)
+
 function onSelectionChange(rows: any[]) {
   selectedIds.value = rows.map((r) => r.id)
 }
@@ -219,6 +260,22 @@ async function onPreviewConfidence() {
   if (!datasetId.value) return
   if (images.value.length === 0) {
     ElMessage.warning('当前页没有图片, 请调整过滤条件或翻页')
+    return
+  }
+  // 硬性约束: 测评**必须**用本数据集训练出的 fine-tune 模型
+  // 防止用户用 timm ImageNet 基础模型测评出与项目业务无关的结果
+  if (!hasFinetuneModel.value || !selectedFinetuneId.value) {
+    ElMessageBox.confirm(
+      '该数据集暂无训练模型, 无法进行置信度测评。\n请先到「训练任务」页选定该数据集启动训练, 完成后即可用本数据集专属模型测评。',
+      '缺少数据集模型',
+      {
+        type: 'warning',
+        confirmButtonText: '前往训练任务',
+        cancelButtonText: '稍后再说',
+      }
+    )
+      .then(() => router.push('/training'))
+      .catch(() => { /* 用户取消 */ })
     return
   }
   previewing.value = true
@@ -604,30 +661,27 @@ watch(() => route.params.id, () => load())
         <div class="filter-group filter-group--ai">
           <el-tooltip
             placement="top" :show-after="200"
-            content="选择用于 AI 预标注的 fine-tune 模型. 若数据集暂无激活的 fine-tune 模型, 切换到模型管理页面激活"
+            :content="activeModel ? '当前激活: ' + activeModel.name : '当前没有激活的模型'"
           >
             <el-select
               v-model="selectedFinetuneId"
-              placeholder="选择 fine-tune 模型 (仅本数据集已激活)"
+              :placeholder="finetuneModels.length === 0 ? '选择 fine-tune 模型 (仅本数据集已激活)' : '选择 fine-tune 模型'"
               size="default"
               :fit-input-width="false"
               popper-class="app-select-dropdown model-select-dropdown"
               class="app-select"
+              :disabled="finetuneModels.length === 0"
               filterable
-              :empty-text="finetuneModels.length === 0 ? '该数据集暂无激活的 fine-tune 模型' : '无可用模型'"
+              :empty-text="finetuneModels.length === 0 ? '该数据集暂无训练模型' : '无可用模型'"
             >
               <el-option
                 v-for="m in finetuneModels" :key="m.id" :value="m.id"
                 :label="`${m.name} · ${m.base_model}`"
               >
-                <div class="ft-option">
-                  <span class="ft-option__name">{{ m.name }}</span>
-                  <span class="ft-option__meta">
-                    <el-tag size="small" type="info" effect="plain">{{ m.base_model }}</el-tag>
-                    <el-tag size="small" type="warning" effect="plain" style="margin-left: 4px;">
-                      {{ (m.accuracy * 100).toFixed(1) }}%
-                    </el-tag>
-                  </span>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <span>{{ m.name }}</span>
+                  <span style="color: #909399; font-size: 12px;">· {{ m.base_model }}</span>
+                  <span style="margin-left: auto; color: #67c23a; font-size: 12px;">{{ (m.accuracy * 100).toFixed(1) }}%</span>
                 </div>
               </el-option>
             </el-select>
@@ -651,11 +705,13 @@ watch(() => route.params.id, () => load())
           </el-tooltip>
           <el-tooltip
             placement="top" :show-after="200"
-            content="dry-run 试跑当前页图片, 不写库, 弹窗显示 3 类: 会标/待标/无交集, 帮你在执行批量预标注前评估阈值是否合适"
+            :content="hasFinetuneModel
+              ? 'dry-run 试跑当前页图片, 不写库, 弹窗显示 3 类: 会标/待标/无交集, 帮你在执行批量预标注前评估阈值是否合适'
+              : '该数据集暂无训练模型, 请先到「训练任务」页选定该数据集启动训练'"
           >
             <el-button
               plain :icon="DataAnalysis" :loading="previewing"
-              :disabled="images.length === 0"
+              :disabled="images.length === 0 || !hasFinetuneModel"
               @click="onPreviewConfidence"
               class="filter-cell filter-cell--btn"
             >测评</el-button>
@@ -703,21 +759,33 @@ watch(() => route.params.id, () => load())
       </div>
       <!-- 第 2 行 (filter-row--threshold) 已移除: 置信度 slider 已挪到第 1 行 AI 组测评前面 -->
       <!-- AI 配置实时提示: 告知用户当前模型/阈值将如何作用于待标图片 -->
-      <div class="ai-config-hint">
-        <el-icon class="ai-config-hint__icon"><InfoFilled /></el-icon>
-        <span>
+      <div class="ai-config-hint" :class="{ 'ai-config-hint--warn': !hasFinetuneModel }">
+        <el-icon class="ai-config-hint__icon">
+          <component :is="hasFinetuneModel ? InfoFilled : WarningFilled" />
+        </el-icon>
+        <span v-if="hasFinetuneModel">
           当前将用
           <b class="ai-config-hint__model">{{ displayModel }}</b>
           对 <b>{{ pendingCount }}</b> 张「待标注」图片进行预标注,
           置信度 ≥ <b>{{ (threshold * 100).toFixed(0) }}%</b> 的图片会自动落标,
           其余保留为「待标注」由人工复核。
         </span>
-        <el-tag v-if="pendingCount === 0" type="success" size="small" effect="plain">
-          暂无待标注
-        </el-tag>
-        <el-tag v-else size="small" type="info" effect="plain">
-          待标 {{ pendingCount }}
-        </el-tag>
+        <span v-else>
+          当前数据集<b>暂无训练模型</b>, <b>测评</b>功能不可用。
+          请先到「训练任务」页选定本数据集启动训练, 训练完成后再来预标注和测评。
+        </span>
+        <div class="ai-config-hint__actions">
+          <el-button v-if="!hasFinetuneModel" type="warning" size="small" round
+            :icon="Promotion" @click="router.push('/training')">
+            前往训练任务
+          </el-button>
+          <el-tag v-else-if="pendingCount === 0" type="success" size="small" effect="plain">
+            暂无待标注
+          </el-tag>
+          <el-tag v-else size="small" type="info" effect="plain">
+            待标 {{ pendingCount }}
+          </el-tag>
+        </div>
       </div>
     </el-card>
 
@@ -1443,32 +1511,9 @@ watch(() => route.params.id, () => load())
 .preview-summary__model b { color: var(--text-primary); font-weight: 600; }
 .preview-tabs { margin-top: 4px; }
 .preview-tabs :deep(.el-tabs__header) { margin-bottom: 8px; }
-/* Fine-tune 下拉中的选项排版: 名称 + 基础模型标签 + 准确率标签 */
-.ft-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  gap: 8px;
-}
-.ft-option__name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-}
-.ft-option__meta {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-}
-.ft-option__icon {
-  font-size: 10px;
-  margin-right: 2px;
-  vertical-align: middle;
-}
+/* Fine-tune 下拉选项已与 Annotate.vue 视觉对齐:
+   名称 + 灰字「· base_model」 + 绿字准确率 (由内联 style 控制),
+   此处不再需要 ft-option 系列样式 */
 /* 视图切换单元: 贴在最右, 固定宽度 */
 .filter-cell--view { justify-content: flex-end; }
 .filter-cell--view .view-mode-switch { flex: 0 0 auto; }
@@ -1485,7 +1530,14 @@ watch(() => route.params.id, () => load())
   align-items: center;
   gap: 6px;
   line-height: 1.5;
+  flex-wrap: wrap;
 }
+/* 警告态: 本数据集无 fine-tune 模型, 用更醒目的暖色系 */
+.ai-config-hint--warn {
+  background: linear-gradient(90deg, rgba(255, 168, 64, 0.08) 0%, rgba(255, 168, 64, 0.02) 100%);
+  border-left-color: var(--brand-warning, #ffa940);
+}
+.ai-config-hint--warn .ai-config-hint__icon { color: var(--brand-warning, #ffa940); }
 .ai-config-hint__icon {
   color: var(--color-primary, #409eff);
   font-size: 14px;
@@ -1493,6 +1545,13 @@ watch(() => route.params.id, () => load())
 }
 .ai-config-hint__model { color: var(--color-primary, #409eff); }
 .ai-config-hint b { color: var(--text-primary); font-weight: 600; }
+.ai-config-hint__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
 .filter-right {
   display: flex;
   align-items: center;
