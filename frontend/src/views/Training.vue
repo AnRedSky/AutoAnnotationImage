@@ -19,14 +19,21 @@ interface EpochData {
 }
 
 // ============== 基础选项 ==============
-// 与后端 /api/auto-annotate/models 保持一致的子集；framework 用于在前端下拉中标注模型来源
-const BASE_MODELS: Array<{ name: string; framework: string; params?: string }> = [
-  { name: 'resnet18',              framework: 'timm', params: '11.7M' },
-  { name: 'resnet50',              framework: 'timm', params: '25.6M' },
-  { name: 'efficientnet_b0',       framework: 'timm', params: '5.3M'  },
-  { name: 'efficientnet_b3',       framework: 'timm', params: '12.0M' },
-  { name: 'mobilenetv3_large_100', framework: 'timm', params: '5.5M'  },
-  { name: 'convnext_tiny',         framework: 'timm', params: '28.6M' },
+// 与后端 /api/auto-annotate/models 保持一致的子集
+// - framework:  来源框架, 在 el-option 显示 (浅蓝标签)
+// - params:     参数量, 在 el-option 显示 (浅黄标签)
+// - taskTypes:  适用任务类型, 取自数据集 taskType 枚举, 由 BaseModelSelect 渲染彩色 chip
+//               (与 Datasets 页面 taskType 视觉一致)
+// - description: 适用场景说明, 在 el-option 底部显示一行小字, 选中后顶部 tooltip 可见
+// 当前 6 个 timm 模型都是 ImageNet 预训练的图像分类 backbone, 所以 taskTypes 全部为 ['classification'].
+// 保留数组结构以便未来扩展目标检测/分割模型.
+const BASE_MODELS: Array<{ name: string; framework: string; params?: string; taskTypes?: string[]; description?: string }> = [
+  { name: 'resnet18',              framework: 'timm', params: '11.7M', taskTypes: ['classification'], description: '轻量级残差网络, 训练快、显存占用低, 适合中小数据集快速实验或 CPU/低端 GPU 部署' },
+  { name: 'resnet50',              framework: 'timm', params: '25.6M', taskTypes: ['classification'], description: '经典深度残差网络, 特征表达力强, 适合中等规模数据集与追求高精度的训练场景' },
+  { name: 'efficientnet_b0',       framework: 'timm', params: '5.3M',  taskTypes: ['classification'], description: '复合缩放轻量网络, 速度与精度平衡, 适合移动端、实时推理或算力受限场景' },
+  { name: 'efficientnet_b3',       framework: 'timm', params: '12.0M', taskTypes: ['classification'], description: 'B0 的精度升级版, 中等规模数据下表现更稳, 适合精度-速度折中的工业分类任务' },
+  { name: 'mobilenetv3_large_100', framework: 'timm', params: '5.5M',  taskTypes: ['classification'], description: '移动端优化网络, 延迟极低, 适合边缘设备、嵌入式或 Web 前端推理部署' },
+  { name: 'convnext_tiny',         framework: 'timm', params: '28.6M', taskTypes: ['classification'], description: '现代化纯卷积架构, 精度可比 Transformer, 适合数据量充足、追求高精度的训练任务' },
 ]
 
 // ============== 表格多选 + 批量操作 ==============
@@ -286,6 +293,26 @@ const formatDeviceTooltip = (info: any) => {
   if (info.os_platform) lines.push(`系统: ${info.os_platform}`)
   if (info.fallback_reason) lines.push(`⚠️ 退回: ${info.fallback_reason}`)
   return lines.join('\n')
+}
+
+/**
+ * 智能格式化耗时 (秒 → 人类可读)
+ *  < 60s   → "42.3s"
+ *  < 3600s → "5m 23s"
+ *  >= 3600s → "1h 12m"
+ * 详细页用这个替代纯数字, 大训练 (1h+) 一眼能看懂
+ */
+const formatDurationSmart = (s: number): string => {
+  if (!s || s < 0) return '-'
+  if (s < 60) return `${s.toFixed(1)}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) {
+    const rem = Math.floor(s % 60)
+    return `${m}m ${rem}s`
+  }
+  const h = Math.floor(m / 60)
+  const remM = m % 60
+  return `${h}h ${remM}m`
 }
 
 // ============== 新建任务对话框 ==============
@@ -704,6 +731,30 @@ let detailChart: echarts.ECharts | null = null
 let detailCancelStream: (() => void) | null = null
 let detailHistoryTimer: any = null
 
+// ---- 数据集统计双源 fallback (SSE 实时 ref + DB 持久化) ----
+// 之前: 模板直接绑 detailDataTotal.value, SSE 推之前永远是 null/0
+// 现在: SSE 推送的 ref 优先 (最新); ref 为 null 时回退到 detailJob.data_* (DB)
+const displayDataTotal = computed(() =>
+  detailDataTotal.value ?? detailJob.value?.data_total ?? null
+)
+const displayDataTrain = computed(() =>
+  detailDataTrain.value ?? detailJob.value?.data_train ?? null
+)
+const displayDataVal = computed(() =>
+  detailDataVal.value ?? detailJob.value?.data_val ?? null
+)
+const displayNumClasses = computed(() =>
+  detailNumClasses.value ?? detailJob.value?.num_classes ?? null
+)
+// class_names: SSE 推的是数组, DB 的也是数组, 选非空的那个
+const displayClassNames = computed(() => {
+  if (detailClassNames.value.length > 0) return detailClassNames.value
+  if (Array.isArray(detailJob.value?.class_names) && detailJob.value.class_names.length > 0) {
+    return detailJob.value.class_names
+  }
+  return []
+})
+
 const openDetail = async (row: any) => {
   // 先关掉旧详情资源
   cleanupDetail()
@@ -736,6 +787,17 @@ const openDetail = async (row: any) => {
     detailState.value = d.state
     detailTotalEpochs.value = d.epochs
     detailMessage.value = d.message || ''
+
+    // ---- 从 DB 回填数据集统计 (持久化字段) ----
+    // 之前: 详情打开时直接 reset 为 null, 仅靠 SSE 推送填充
+    //   - 完成的任务 (SUCCESS): 不连 SSE, 永远是 0
+    //   - 中途刷新页面: SSE 重连前也是 0
+    // 现在: 从 /jobs/{id} 返回的 d.data_* 回填, 兼容已完成的旧任务 + 中途刷新
+    if (typeof d.data_total === 'number') detailDataTotal.value = d.data_total
+    if (typeof d.data_train === 'number') detailDataTrain.value = d.data_train
+    if (typeof d.data_val === 'number') detailDataVal.value = d.data_val
+    if (typeof d.num_classes === 'number') detailNumClasses.value = d.num_classes
+    if (Array.isArray(d.class_names)) detailClassNames.value = d.class_names
     if (d.state === 'FAILURE' || d.error) {
       try {
         const e: any = await trainingApi.error(row.id)
@@ -803,7 +865,12 @@ const startDetailStream = (taskId: string) => {
   )
   detailCancelStream = trainingApi.streamProgress(taskId, {
     onMessage: (data) => {
-      detailState.value = data.state || 'PROGRESS'
+      // 同步 detailState 和 detailJob.state (修复「下方完成, 上方还显示训练中」的 bug)
+      // - 之前: 只更新 detailState.value, 模板用 detailJob.state, 导致 StateBadge 卡在 PROGRESS
+      // - 现在: 同步两者, 终态时还会重新拉 DB 拿 finished_at / duration / device_info
+      const newState = data.state || 'PROGRESS'
+      detailState.value = newState
+      if (detailJob.value) detailJob.value.state = newState
       detailProgress.value = Number(data.progress || 0)
       detailCurrentEpoch.value = data.current_epoch ?? null
       detailTotalEpochs.value = data.total_epochs ?? detailTotalEpochs.value
@@ -833,6 +900,19 @@ const startDetailStream = (taskId: string) => {
       if (detailLog.value.length > 100) detailLog.value = detailLog.value.slice(-100)
       // 同步持久化日志到后端 (D1) — 详情页再次打开可还原
       saveDetailLog(taskId, logLine)
+
+      // ---- 终态检测: 重新拉完整 job 拿 finished_at / duration / device_info ----
+      // 之前: 终态时 detailJob 仍停留在 openDetail 时的初始值, 结束时间/耗时/设备都是空
+      // 现在: SSE 收到 SUCCESS/FAILURE/REVOKED 时, 主动调一次 /jobs/{id} 拉 DB 最终状态
+      const isTerminal = ['SUCCESS', 'FAILURE', 'REVOKED'].includes(newState)
+      if (isTerminal && detailJob.value?.id) {
+        // 用 fire-and-forget 模式, 不阻塞 SSE 主流程
+        trainingApi.job(detailJob.value.id).then((d: any) => {
+          detailJob.value = d
+        }).catch(() => {
+          // 拉取失败不影响其他字段, 保留 SSE 已推的 state
+        })
+      }
     },
     onComplete: () => {
       detailCancelStream = null
@@ -1299,12 +1379,20 @@ const stopSilentRefresh = () => {
             <el-tooltip
               v-if="row.device_info"
               placement="top"
-              :content="formatDeviceTooltip(row.device_info)">
+              :content="formatDeviceTooltip(row.device_info) +
+                (row.gpu_peak_memory_mb
+                  ? `\n\nGPU 峰值显存: ${row.gpu_peak_memory_mb} MB`
+                  : '')">
               <el-tag :type="deviceTagType(row.device_type)" size="small">
                 {{ deviceShortLabel(row.device_type, row.device_name) }}
               </el-tag>
             </el-tooltip>
             <span v-else style="color: #c0c4cc;">-</span>
+            <el-tag
+              v-if="row.gpu_peak_memory_mb"
+              size="small" type="warning" effect="plain"
+              style="margin-left: 4px;"
+            >{{ row.gpu_peak_memory_mb }}MB</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="epochs" label="轮次" width="80" align="center" />
@@ -1517,15 +1605,31 @@ const stopSilentRefresh = () => {
               {{ deviceShortLabel(detailJob.device_type, detailJob.device_name) }}
             </el-tag>
             <span v-else style="color: #c0c4cc;">未记录</span>
-            <el-tooltip v-if="detailJob.device_info" placement="top" :content="formatDeviceTooltip(detailJob.device_info)">
+            <el-tooltip
+              v-if="detailJob.device_info"
+              placement="top"
+              :content="formatDeviceTooltip(detailJob.device_info) +
+                (detailJob.gpu_peak_memory_mb
+                  ? `\n\nGPU 峰值显存: ${detailJob.gpu_peak_memory_mb} MB`
+                  : '')">
               <el-icon style="margin-left: 4px; cursor: help;"><InfoFilled /></el-icon>
             </el-tooltip>
+            <el-tag
+              v-if="detailJob.gpu_peak_memory_mb"
+              size="small" type="warning" effect="plain"
+              style="margin-left: 6px;"
+            >峰值 {{ detailJob.gpu_peak_memory_mb }} MB</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="轮次">{{ detailJob.epochs }}</el-descriptions-item>
           <el-descriptions-item label="批大小">{{ detailJob.batch_size }}</el-descriptions-item>
           <el-descriptions-item label="学习率">{{ detailJob.learning_rate }}</el-descriptions-item>
           <el-descriptions-item label="耗时(s)">
-            {{ detailJob.duration_seconds ? detailJob.duration_seconds.toFixed(1) : '-' }}
+            <span v-if="detailJob.duration_seconds">{{ detailJob.duration_seconds.toFixed(1) }}</span>
+            <span v-else style="color: #c0c4cc;">-</span>
+            <!-- duration 也智能格式化: > 60s 显 Xm Ys, > 3600s 显 Xh Ym -->
+            <span v-if="detailJob.duration_seconds >= 60" style="color: var(--text-secondary); font-size: 12px; margin-left: 4px;">
+              ({{ formatDurationSmart(detailJob.duration_seconds) }})
+            </span>
           </el-descriptions-item>
           <el-descriptions-item label="开始时间">{{ formatTime(detailJob.started_at) }}</el-descriptions-item>
           <el-descriptions-item label="结束时间">{{ formatTime(detailJob.finished_at) }}</el-descriptions-item>
@@ -1551,40 +1655,41 @@ const stopSilentRefresh = () => {
           />
         </div>
 
-        <!-- 数据集统计 (SSE 启动时推过来, 实时显示) -->
+        <!-- 数据集统计 (SSE 实时 + DB fallback) -->
         <el-divider content-position="left">数据集统计</el-divider>
         <el-row :gutter="12" style="margin-bottom: 8px;">
           <el-col :span="6">
             <div class="mini-stat mini-stat--blue">
               <div class="mini-label">总样本数</div>
-              <div class="mini-value">{{ detailDataTotal ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">张</span></div>
+              <div class="mini-value">{{ displayDataTotal ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">张</span></div>
             </div>
           </el-col>
           <el-col :span="6">
             <div class="mini-stat mini-stat--green">
               <div class="mini-label">训练集</div>
-              <div class="mini-value">{{ detailDataTrain ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">张</span></div>
+              <div class="mini-value">{{ displayDataTrain ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">张</span></div>
             </div>
           </el-col>
           <el-col :span="6">
             <div class="mini-stat mini-stat--orange">
               <div class="mini-label">验证集</div>
-              <div class="mini-value">{{ detailDataVal ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">张</span></div>
+              <div class="mini-value">{{ displayDataVal ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">张</span></div>
             </div>
           </el-col>
           <el-col :span="6">
             <div class="mini-stat mini-stat--red">
               <div class="mini-label">类别数</div>
-              <div class="mini-value">{{ detailNumClasses ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">类</span></div>
+              <div class="mini-value">{{ displayNumClasses ?? 0 }} <span style="font-size: 12px; color: var(--text-secondary); font-weight: 400;">类</span></div>
             </div>
           </el-col>
         </el-row>
         <div
-          v-if="detailClassNames.length > 0"
+          v-if="displayClassNames.length > 0"
           style="margin-bottom: 8px; color: #606266; font-size: 13px;"
         >
-          类别: <el-tag
-            v-for="cn in detailClassNames" :key="cn"
+          类别:
+          <el-tag
+            v-for="cn in displayClassNames" :key="cn"
             size="small" type="info" effect="plain" style="margin-right: 4px;"
           >{{ cn }}</el-tag>
         </div>
