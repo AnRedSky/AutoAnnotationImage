@@ -83,7 +83,7 @@ export const imageApi = {
         use_finetune: params.use_finetune,
       },
     }),
-  list: (datasetId: number, params?: ImageListParams & { exclude_id?: number }) =>
+  list: (datasetId: number, params?: ImageListParams & { exclude_id?: number; exclude_ids?: string }) =>
     http.get(`/images/list/${datasetId}`, { params }),
   detail: (id: number) => http.get(`/images/${id}`),
   remove: (id: number) => http.delete(`/images/${id}`),
@@ -197,8 +197,11 @@ export const trainingApi = {
   job: (jobId: number) => http.get(`/training/jobs/${jobId}`),
   // 行操作 — 复用旧配置重新提交
   // - mode: restart=再训练(默认) | resume=继续(复用同 job)
-  // - params: 仅 mode=restart 生效, 用于「原任务不动, 仅作为新任务的训练参数」场景
-  //   后端会把 params 合并到旧 job 字段上, 然后建新任务. model_name 仍会自动加 _r{timestamp} 后缀.
+  // - mode=restart: 后端预创建新 TrainingJob 行 (state=PENDING),
+  //   返回 { new_job_id, task_id, ... }, 前端可以据此塞占位行
+  // - mode=resume: 复用旧行, 仅更新 state/celery_task_id
+  // - params: 仅 mode=restart 生效, 后端会把 params 合并到旧 job 字段上,
+  //   新 model_name 自动加 _r{timestamp} 后缀
   startJob: (
     jobId: number,
     mode: 'restart' | 'resume' = 'restart',
@@ -211,7 +214,14 @@ export const trainingApi = {
       learning_rate?: number
     }
   ) =>
-    http.post(
+    http.post<{
+      success: boolean
+      job_id: number
+      new_job_id?: number
+      state?: string
+      message?: string
+      task_id?: string
+    }>(
       `/training/jobs/${jobId}/start${mode === 'resume' ? '?mode=resume' : ''}`,
       params && Object.keys(params).length > 0 ? params : undefined
     ),

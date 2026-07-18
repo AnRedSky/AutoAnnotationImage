@@ -220,7 +220,20 @@ async def auto_label(
     )
     images = result.scalars().all()
     if not images:
-        return {"total": 0, "auto_labeled": 0, "need_human": 0, "message": "No pending images"}
+        return {
+            "total": 0,
+            "auto_labeled": 0,
+            "need_human": 0,
+            "no_match": 0,
+            "avg_confidence": 0.0,
+            "threshold": confidence_threshold,
+            "used_finetune": used_finetune,   # 早 return 也补, 前端能正确判断
+            "model_name": ai_service.current_model_name,
+            "model_path": ai_service.current_model_path,
+            "model_id": mv.id if (used_finetune and mv is not None) else None,
+            "fallback_to_pretrained": (use_finetune and not used_finetune),
+            "message": "No pending images",
+        }
 
     # 3. 批量推理
     storage_root = settings.UPLOAD_DIR
@@ -286,6 +299,9 @@ async def auto_label(
         "threshold": confidence_threshold,
         "used_finetune": used_finetune,
         "model_name": ai_service.current_model_name,
+        # 真实使用的 fine-tune 模型名 (具体某次训练的产物), 与 preview-confidence 字段对齐
+        "finetune_name": mv.name if (used_finetune and mv is not None) else None,
+        "base_model": mv.base_model if (used_finetune and mv is not None) else ai_service.current_model_name,
         "model_path": ai_service.current_model_path,
         "model_id": mv.id if (used_finetune and mv is not None) else None,
         # 冷启动兜底提示: 当 use_finetune 请求但无 fine-tune 时, 前端可显示
@@ -347,9 +363,15 @@ async def preview_confidence(
             "would_label": 0,
             "need_human": 0,
             "no_match": 0,
+            "total": 0,
             "threshold": confidence_threshold,
             "model_name": None,
             "used_finetune": False,
+            # 早 return 也补齐 finetune_name / base_model 字段, 前端模板能稳定渲染
+            "finetune_name": None,
+            "base_model": None,
+            "model_id": None,
+            "fallback_to_pretrained": False,
         }
 
     # 2. 加载模型 (与 auto_label 完全一致, 不写库)
@@ -480,7 +502,12 @@ async def preview_confidence(
         "no_match": no_match,
         "total": len(items),
         "threshold": confidence_threshold,
+        # model_name 是 ai_service 加载的 timm 模型名 (base_model, e.g. "resnet50")
         "model_name": ai_service.current_model_name,
+        # 真实测评的 fine-tune 模型名 (具体某次训练的产物, e.g. "resnet50_v1_1784124522")
+        # 前端用这个显示"测评的是哪个具体微调模型", 避免只看到基础模型名 + fine-tune tag 困惑
+        "finetune_name": mv.name if (used_finetune and mv is not None) else None,
+        "base_model": mv.base_model if (used_finetune and mv is not None) else ai_service.current_model_name,
         "model_id": mv.id if (used_finetune and mv is not None) else None,
         "used_finetune": used_finetune,
         "fallback_to_pretrained": (use_finetune and not used_finetune),
@@ -499,6 +526,7 @@ async def list_images(
     page: int = 1,
     page_size: int = 20,
     exclude_id: Optional[int] = Query(default=None, description="排除的 image id (标注工作台「下一张」用, 避免连续返回同一张)"),
+    exclude_ids: Optional[str] = Query(default=None, description="批量排除的 image id 列表, 逗号分隔, 用于排除「本会话已加载但未标注」的全部图片, 防止连续点下一张回到已看过的图"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -506,8 +534,8 @@ async def list_images(
     分页查询数据集下的图片
     新增 total / status / file_size / file_url 字段, 便于前端做图像网格
 
-    exclude_id: 用于标注工作台"下一张"逻辑 — 跳过当前图片, 避免连续点击返回同一张.
-    实现方式: 优先用排除 id 的第一张 (page=1), 没有则空.
+    exclude_id: 排除单个 image id (单张维度, 兼容旧调用)
+    exclude_ids: 批量排除, 逗号分隔, 例如 "1,2,3" (标注工作台「下一张」累积已看过的图, 避免循环回到已看过的)
     """
     # 校验数据集
     dataset = await db.get(Dataset, dataset_id)
@@ -524,8 +552,19 @@ async def list_images(
     base = select(Image).where(Image.dataset_id == dataset_id)
     if status:
         base = base.where(Image.status == status)
+
+    # 合并 exclude_id + exclude_ids, 统一用 NOT IN
+    # 优先用 exclude_ids (多值), 缺失时回退到 exclude_id (单值, 兼容)
+    exclude_set: set = set()
+    if exclude_ids:
+        for x in exclude_ids.split(','):
+            x = x.strip()
+            if x.isdigit():
+                exclude_set.add(int(x))
     if exclude_id is not None:
-        base = base.where(Image.id != exclude_id)
+        exclude_set.add(exclude_id)
+    if exclude_set:
+        base = base.where(Image.id.notin_(exclude_set))
 
     # total
     count_stmt = select(func.count()).select_from(base.subquery())
@@ -542,6 +581,7 @@ async def list_images(
         "page_size": page_size,
         "status_filter": status,
         "exclude_id": exclude_id,
+        "exclude_ids": sorted(exclude_set) if exclude_set else None,
         "items": [
             {
                 "id": img.id,
