@@ -12,6 +12,7 @@ from typing import Optional
 
 from app.workers.celery_app import celery_app
 from app.core.redis_client import redis_client
+from app.models.training_job import TrainingJob  # _persist_dataset_stats 需要
 
 # ---- 在最早期禁用 HF symlink (Windows [WinError 14007] 根因) ----
 # Celery worker 进程不经过 FastAPI startup, 所以必须在 worker import 阶段
@@ -71,6 +72,57 @@ def _update_training_history(task_id: str, history: list):
     """训练历史曲线写入 Redis, 前端可轮询 /training/history/{task_id} 获取"""
     key = f"train:history:{task_id}"
     redis_client.setex(key, 86400, json.dumps(history))  # 24h 过期
+
+
+def _persist_dataset_stats(task_id: str, extra: dict):
+    """
+    训练启动那一刻, train.py 通过 progress_cb 把数据集统计推到 extra:
+      - data_total / data_train / data_val / num_classes / class_names
+    之前这些字段只在 Celery Redis state meta 里, 训练完成后 result.info 变成
+    return dict 不再含这些字段, 详情页 /api/training/jobs/{id} 返回 ORM 行
+    (无这些列), 用户看到「总样本数 0 张 / 训练集 0 张 / 验证集 0 张 / 类别数 0 类」。
+
+    本函数在 progress_cb 收到这些字段的瞬间同步写库:
+      - SELECT-then-UPDATE 模式 (比直接 update() 更稳, 避免 sync_session 副作用)
+      - 用 fresh event loop + engine.dispose() 避免 Celery sync 上下文污染
+      - 即便 DB 写失败也不影响训练主流程 (try/except 兜底)
+      - 成功后 print 诊断信息 (worker 终端可见), 失败时 print [warn] 错误
+    """
+    try:
+        data_total = extra.get("data_total")
+        data_train = extra.get("data_train")
+        data_val = extra.get("data_val")
+        num_classes = extra.get("num_classes")
+        class_names = extra.get("class_names")
+        if data_total is None or num_classes is None:
+            print(f"[stats] skip: data_total/num_classes missing for {task_id}")
+            return
+
+        async def _write():
+            from sqlalchemy import select
+            from app.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                # 1) 先查: 确认行存在 (避免 update 命中 0 行被误判为成功)
+                job = (await db.execute(
+                    select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+                )).scalar_one_or_none()
+                if not job:
+                    print(f"[stats] warn: no TrainingJob row for {task_id} (job not yet created?)")
+                    return
+                # 2) 直接 setattr + flush, 兼容性最好 (不依赖 update() 的 session 策略)
+                job.data_total = int(data_total) if data_total is not None else None
+                job.data_train = int(data_train) if data_train is not None else None
+                job.data_val = int(data_val) if data_val is not None else None
+                job.num_classes = int(num_classes) if num_classes is not None else None
+                job.class_names = list(class_names) if class_names is not None else None
+                await db.commit()
+                print(f"[stats] OK: task={task_id} db_id={job.id} data_total={data_total} "
+                      f"data_train={data_train} data_val={data_val} num_classes={num_classes}")
+
+        _run_async(_write())
+    except Exception as e:
+        # DB 写失败不能让训练炸, 仅记日志
+        print(f"[warn] _persist_dataset_stats failed for {task_id}: {type(e).__name__}: {e}")
 
 
 @celery_app.task(bind=True)
@@ -178,6 +230,16 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             # 永久保留, 后续 epoch 回调也能透传给前端
             sticky_meta.update(extra)
         self.update_state(state="PROGRESS", meta=meta)
+
+        # ---- 持久化数据集统计到 DB ----
+        # 之前: 这 5 个字段 (data_total/data_train/data_val/num_classes/class_names)
+        #       只通过 Celery state meta 推给前端, 训练完成后 result.info 变成
+        #       return dict 不再含这些字段, 详情页 /api/training/jobs/{id} 返回 ORM
+        #       行 (无这些列), 显示全 0.
+        # 现在: 在 progress_cb 收到 extra 的瞬间同步写库, 后续任意时刻查
+        #       /jobs/{id} 都能恢复完整统计
+        if extra and "data_total" in extra and "num_classes" in extra:
+            _persist_dataset_stats(task_id, extra)
 
     def epoch_cb(p: float, msg: str, epoch_data: dict):
         """每 epoch 结束回调, 累积历史并写入 Redis"""

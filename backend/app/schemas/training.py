@@ -85,6 +85,17 @@ class TrainingJobOut(_Base):
     device_info: Optional[Dict[str, Any]] = None
     gpu_peak_memory_mb: Optional[int] = None
 
+    # ---- 数据集统计 (训练启动那一刻由 train.py 推送, 持久化到 DB) ----
+    # 详情页 Training.vue 用这 4 个字段展示「数据集统计」4 联卡 (总样本/训练/验证/类数)
+    # 之前: 训练完成后 (result.info = return dict) 这 4 个字段全 0, 用户看到的
+    #       截图里「总样本数 0 张 / 训练集 0 张 / 验证集 0 张 / 类别数 0 类」
+    # 现在: 持久化到 TrainingJob 表, 详情接口直接返回
+    data_total: Optional[int] = None
+    data_train: Optional[int] = None
+    data_val: Optional[int] = None
+    num_classes: Optional[int] = None
+    class_names: Optional[List[str]] = None
+
 
 class TrainingJobList(_Base):
     """分页列表响应 - 前端 el-pagination 直接对接"""
