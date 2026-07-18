@@ -8,6 +8,7 @@ import {
 import { trainingApi, datasetApi, autoAnnotateApi } from '@/api'
 import * as echarts from 'echarts'
 import TrainingParamsForm, { type TrainingParams } from '@/components/TrainingParamsForm.vue'
+import StateBadge from '@/components/StateBadge.vue'
 
 interface EpochData {
   epoch: number
@@ -119,6 +120,11 @@ const modelKeywordFilter = ref<string>('')
 // 防抖: 关键词输入用 setTimeout 静默刷新, 避免每按一个字母就发一次请求
 let keywordDebounceTimer: any = null
 
+/** 表格行 class: 占位行加 .row--placeholder (虚化 + 斜体) */
+const rowClassName = ({ row }: { row: any }) => {
+  return row?.is_placeholder ? 'row--placeholder' : ''
+}
+
 const STATE_OPTIONS = [
   { label: '全部', value: '' },
   { label: '等待中', value: 'PENDING' },
@@ -139,8 +145,55 @@ const loadJobs = async () => {
       params.q = modelKeywordFilter.value.trim()
     }
     const r: any = await trainingApi.jobs(params)
-    jobs.value = r?.items || []
+    const items: any[] = r?.items || []
     total.value = r?.total ?? 0
+
+    // ---- 占位保留: 把占位行 (celery_task_id 在新列表里找不到的) 保留在顶部 ----
+    // 解决"刷新后占位被抹掉"的问题:
+    // 1. 后端已预创建 TrainingJob 行 (state=PENDING), 正常情况下 loadJobs 立即能查到
+    // 2. 但若 worker 刚启动且数据库连接慢 / 同步延迟, 仍可能短暂查不到
+    // 3. 此时如果用户点了刷新, 旧的 jobs.value = items 会把占位行清掉, 用户感觉
+    //    "刚提交的任务消失了". 修复: 在新 items 里找不到对应 celery_task_id 的
+    //    占位行, 把它们 prepend 到顶部, 不被覆盖.
+    const placeholders = jobs.value.filter((j: any) => j.is_placeholder)
+    if (placeholders.length > 0) {
+      const stillMissing: any[] = []
+      for (const p of placeholders) {
+        const hit = items.some(
+          (it: any) => it.celery_task_id === p.celery_task_id
+        )
+        if (!hit) stillMissing.push(p)
+      }
+      if (stillMissing.length > 0) {
+        // ---- 幽灵占位检测 ----
+        // 真实记录已经覆盖了新任务, 把仍缺失的占位 prepend 到顶部
+        // 之前 total 累加存在 bug: 反复刷新时, 幽灵占位 (后端实际未写入)
+        // 会让 total 持续 +1, 导致 total 与真实数量长期不一致.
+        // 修复: 把"占位"也算进 total 一次 (不是每次都 +), 用户翻页/筛选时按 total 走
+        // 即可; 同时给占位加个超时, 超过 5 分钟且 celery_task_id 仍查不到, 主动丢弃
+        // 并提示, 避免占位永远占着第一行.
+        const now = Date.now()
+        const GHOST_TIMEOUT_MS = 5 * 60 * 1000
+        const fresh: any[] = []
+        const ghosts: any[] = []
+        for (const p of stillMissing) {
+          const age = now - (p._placeholder_at || now)
+          if (age > GHOST_TIMEOUT_MS) ghosts.push(p)
+          else fresh.push(p)
+        }
+        if (ghosts.length > 0) {
+          // 幽灵占位: 后端查不到, worker 可能未接管, 主动清理
+          console.warn('[loadJobs] 丢弃幽灵占位 (后端查不到对应 celery_task_id):',
+            ghosts.map((g) => g.celery_task_id))
+          ElMessage.warning(`${ghosts.length} 个任务长时间未确认, 已自动清理 (后端可能未写入)`)
+        }
+        jobs.value = [...fresh, ...items]
+        // total: 用后端真实 total + 仍有效的占位数量 (不要累加, 累加会越加越大)
+        total.value = (r?.total ?? 0) + fresh.length
+        return
+      }
+    }
+    jobs.value = items
   } catch (e: any) {
     ElMessage.error('加载训练任务失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
@@ -269,6 +322,52 @@ const openCreateDialog = () => {
   createDialogVisible.value = true
 }
 
+/**
+ * 训练任务入队的统一占位逻辑 (新建/再训练 共用)
+ *
+ * 后端已预创建 TrainingJob 行 (PENDING), API 返回 task_id + job_id. 这里
+ * 立即在 jobs.value 顶部插入一条占位行, 给用户视觉反馈, 避免提交到
+ * loadJobs 返回之间的 RTT (200-500ms) 期间列表为空. 后续 loadJobs() 拉到
+ * 真实数据时, 占位行的 celery_task_id 与真实行匹配, 被自动剔除.
+ *
+ * @param newTaskId 后端返回的 Celery task_id
+ * @param params    预填字段, 用于构造占位行 (model_name/base_model/...)
+ * @returns         占位行对象, 已 prepend 到 jobs.value
+ */
+const insertPlaceholderJob = (newTaskId: string, params: {
+  dataset_id: number
+  base_model: string
+  model_name: string
+  epochs: number
+  batch_size: number
+  learning_rate: number
+}) => {
+  const placeholder = {
+    id: -Date.now(),  // 负数 id, 不会与真实 id 冲突
+    celery_task_id: newTaskId,
+    user_id: 0,
+    dataset_id: params.dataset_id,
+    base_model: params.base_model,
+    model_name: params.model_name,
+    epochs: params.epochs,
+    batch_size: params.batch_size,
+    learning_rate: params.learning_rate,
+    state: 'PENDING',
+    progress: 0,
+    message: '等待 worker 启动...',
+    created_at: new Date().toISOString(),  // 占位行的"创建日期"用当前时刻
+    started_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    is_placeholder: true,
+    _placeholder_at: Date.now(),  // 占位时间戳, 用于 loadJobs 中判断幽灵占位超时
+  }
+  jobs.value = [placeholder, ...jobs.value]
+  total.value = (total.value || 0) + 1
+  page.value = 1
+  return placeholder
+}
+
 const onCreateSubmit = async () => {
   if (!createForm.value.dataset_id) {
     ElMessage.warning('请选择数据集')
@@ -285,18 +384,25 @@ const onCreateSubmit = async () => {
       dataset_id: createForm.value.dataset_id!,
     })
     const newTaskId: string = r.task_id
-    ElMessage.success(`训练任务已提交 (task_id=${(newTaskId || '').slice(0, 8)}…)`)
+    const newJobId: number | undefined = r.job_id
+    ElMessage.success(`训练任务已提交 (job=#${newJobId ?? '?'})`)
     createDialogVisible.value = false
-    // 跳到第 1 页, 重新加载列表
-    page.value = 1
-    await loadJobs()
 
-    // ---- 关键: 用 SSE 等 worker 真正开始执行 (DB 记录就绪), 再静默刷新一次 ----
-    // 原因: 后端 start_training 端点只入队不写库, TrainingJob 记录是 worker 启动时
-    // 才会写. 紧跟 loadJobs() 之后立即再刷一次, 列表里就能稳定看到这条新任务.
+    // 立即插入占位行 + 调用 loadJobs()
+    // - 后端已预创建 TrainingJob 行 (state=PENDING), loadJobs() 立即能查到
+    // - 占位仅作为提交到 loadJobs 返回之间 (约 200-500ms) 的瞬时视觉填充
+    // - loadJobs 内部有占位保留逻辑, 真实数据会无缝替换占位
     if (newTaskId) {
-      waitForJobInList(newTaskId).catch(() => { /* 超时也无妨, 用户可手动刷新 */ })
+      insertPlaceholderJob(newTaskId, {
+        dataset_id: createForm.value.dataset_id!,
+        base_model: createForm.value.base_model,
+        model_name: createForm.value.model_name,
+        epochs: createForm.value.epochs,
+        batch_size: createForm.value.batch_size,
+        learning_rate: createForm.value.learning_rate,
+      })
     }
+    await loadJobs()
   } catch (e: any) {
     ElMessage.error('启动失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
@@ -304,55 +410,11 @@ const onCreateSubmit = async () => {
   }
 }
 
-/**
- * 用 SSE 监测一个新提交的 task_id, 当首帧 (或 worker 端任何状态变化)
- * 到达时, 表明 worker 已接手 (DB 已有 TrainingJob 记录), 此时调用 loadJobs()
- * 把新任务拉入列表.
- *
- * 实现: 复用 streamProgress 接口, 在 onMessage 触发一次 silent refresh
- * 即可; 然后主动关闭流.
- *
- * 兜底: 30s 内未收到任何帧, 主动 close + 静默调用一次 loadJobs()
- * (避免 worker 永远不启动的场景下永远不刷新).
- */
-const waitForJobInList = (taskId: string): Promise<void> => {
-  return new Promise((resolve) => {
-    let done = false
-    const cleanup = (cancel?: () => void) => {
-      if (done) return
-      done = true
-      if (cancel) cancel()
-    }
-    const cancel = trainingApi.streamProgress(taskId, {
-      onMessage: () => {
-        if (done) return
-        cleanup()
-        loadJobs()
-        resolve()
-      },
-      onError: () => {
-        if (done) return
-        cleanup()
-        // SSE 出错时也兜底刷一次
-        loadJobs()
-        resolve()
-      },
-      onComplete: () => {
-        if (done) return
-        cleanup()
-        loadJobs()
-        resolve()
-      },
-    })
-    // 兜底超时: 30s 还没拿到首帧, 主动断流 + 静默刷一次
-    setTimeout(() => {
-      if (done) return
-      cleanup(cancel)
-      loadJobs()
-      resolve()
-    }, 30000)
-  })
-}
+// 注意: 之前有 waitForJobInList 后台轮询函数, 已删除.
+// 原因: 后端 start_training 已预创建 TrainingJob 行 (state=PENDING), 提交后
+// 立即调用 loadJobs() 就能查到新任务, 不需要再单独轮询. 占位行仅作为
+// 提交到 loadJobs 返回之间 (约 200-500ms) 的瞬时视觉填充, 由 loadJobs
+// 的占位保留逻辑兜底 (见 loadJobs 中关于 placeholders 的合并代码).
 
 /**
  * TrainingParamsForm 单字段变更 → 同步到本地 form
@@ -467,7 +529,24 @@ const onEditAndStartSubmit = async () => {
       learning_rate: editStartForm.value.learning_rate,
     })
     if (r.success) {
-      ElMessage.success(r.message || '已创建新一轮训练任务, 原任务保持不变')
+      const newJobId: number | undefined = r.new_job_id
+      const newTaskId: string | undefined = r.task_id
+      ElMessage.success(r.message || `已创建新一轮训练任务 #${newJobId}, 原任务 #${jobId} 保持不变`)
+
+      // 立即插入占位行, 让用户看到"再训练已生效"
+      // - 后端已预创建新 TrainingJob 行 (state=PENDING), new_job_id 即新行 id
+      // - model_name 会在 worker 端 INSERT 时再加 _r{timestamp} 后缀, 但本占位
+      //   行用用户输入的 model_name 占位即可, loadJobs() 拉到真实行时替换
+      if (newTaskId) {
+        insertPlaceholderJob(newTaskId, {
+          dataset_id: editStartForm.value.dataset_id!,
+          base_model: editStartForm.value.base_model,
+          model_name: editStartForm.value.model_name,
+          epochs: editStartForm.value.epochs,
+          batch_size: editStartForm.value.batch_size,
+          learning_rate: editStartForm.value.learning_rate,
+        })
+      }
     } else {
       ElMessage.warning(r.message || '启动失败')
     }
@@ -491,6 +570,20 @@ const onRowStart = async (row: any, mode: 'restart' | 'resume' = 'restart') => {
     const r: any = await trainingApi.startJob(row.id, mode)
     if (r.success) {
       ElMessage.success(r.message || (mode === 'resume' ? '已继续训练' : '已启动新一轮训练'))
+
+      // mode=restart: 后端预创建新 TrainingJob 行, 返回 new_job_id + task_id
+      // 立即插入占位行让用户看到"再训练已生效"
+      // mode=resume: 复用旧行, 不需要占位, 直接 reload 即可
+      if (mode === 'restart' && r.task_id) {
+        insertPlaceholderJob(r.task_id, {
+          dataset_id: row.dataset_id,
+          base_model: row.base_model,
+          model_name: row.model_name,  // 后端会自动追加 _r{timestamp} 后缀
+          epochs: row.epochs,
+          batch_size: row.batch_size,
+          learning_rate: row.learning_rate,
+        })
+      }
       await loadJobs()
     } else {
       ElMessage.warning(r.message || '启动失败')
@@ -835,19 +928,36 @@ watch(detailHistory, (h) => {
 }, { deep: true })
 
 // ============== 工具 ==============
+/**
+ * 格式化时间为本地时区 (CST/GMT+8) 显示
+ *
+ * 后端 datetime 序列化规则:
+ * - 历史数据: 后端用 datetime.utcnow() 写库, FastAPI 序列化为 naive ISO 字符串
+ *   例如 "2026-07-17T21:47:58" (无 tz 标记). 浏览器 new Date() 会按本地时区解析,
+ *   导致与实际 UTC 时间相差 8 小时.
+ * - 新数据: 后续如果后端改用 datetime.now(timezone.utc), 字符串会带 "Z" 或 "+00:00",
+ *   浏览器会正确按 UTC 解析.
+ *
+ * 修复策略: 检测字符串是否带 tz 标记:
+ * - 带 "Z" 或 "+/-HH:MM" → 信任浏览器解析 (已经按 UTC)
+ * - 不带 → 默认当作 UTC 处理, 手动追加 "Z" 后再解析
+ *   (这是历史数据的兼容方案, 避免一次性 ETL 全表改字段)
+ *
+ * @param iso 后端返回的 ISO 字符串, 可能带也可能不带 tz 标记
+ * @returns 本地时区格式化字符串 (yyyy/MM/dd HH:mm:ss)
+ */
 const formatTime = (iso: string | null | undefined): string => {
   if (!iso) return '-'
+  // 已经带 tz 标记 (Z 或 ±HH:MM) → 直接解析
+  const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(iso)
+  const parseable = hasTz ? iso : `${iso}Z`  // naive datetime → 按 UTC 解释
   try {
-    return new Date(iso).toLocaleString('zh-CN', { hour12: false })
-  } catch { return iso }
-}
-
-const stateType = (s: string) => {
-  if (s === 'SUCCESS') return 'success'
-  if (s === 'FAILURE' || s === 'REVOKED') return 'danger'
-  if (s === 'PROGRESS') return 'primary'
-  if (s === 'PAUSED') return 'warning'
-  return 'info'
+    const d = new Date(parseable)
+    if (isNaN(d.getTime())) return iso  // 解析失败回退原值
+    return d.toLocaleString('zh-CN', { hour12: false })
+  } catch {
+    return iso
+  }
 }
 
 const stateLabel = (s: string) => {
@@ -1050,10 +1160,16 @@ const stopSilentRefresh = () => {
 
     <!-- ============== 顶部标题 ============== -->
     <div class="page-header">
-      <h2 class="page-title">
-        <span>训练任务</span>
-        <span class="subtitle">Training</span>
-      </h2>
+      <div>
+        <h2 class="page-title">
+          <el-icon class="page-title__icon"><Promotion /></el-icon>
+          <span>训练任务</span>
+          <span class="subtitle">Training</span>
+        </h2>
+        <p class="page-desc text-soft">
+          选择数据集和基础模型, 启动微调训练; 训练完成后激活即可用于 AI 预标注
+        </p>
+      </div>
     </div>
 
     <!-- ============== 筛选 + 操作 同一行 ============== -->
@@ -1151,9 +1267,25 @@ const stopSilentRefresh = () => {
         class="jobs-table"
         height="100%"
         style="width: 100%;"
-        empty-text="暂无训练任务"
+        :row-class-name="rowClassName"
         @selection-change="onJobSelectionChange"
       >
+        <template #empty>
+          <div class="empty-state">
+            <div class="empty-state__icon empty-state__icon--brand">
+              <el-icon><Promotion /></el-icon>
+            </div>
+            <div class="empty-state__title">
+              {{ stateFilter ? '没有匹配的任务' : '还没有训练任务' }}
+            </div>
+            <div class="empty-state__desc">
+              {{ stateFilter
+                ? '尝试切换状态筛选, 或等待新任务完成'
+                : '点击右上角「新建训练任务」, 选定数据集后即可启动微调'
+              }}
+            </div>
+          </div>
+        </template>
         <el-table-column type="index" :index="indexMethod" label="#" width="42" align="center" />
         <el-table-column type="selection" width="40" :reserve-selection="false" />
         <el-table-column label="数据集" min-width="92" show-overflow-tooltip>
@@ -1176,9 +1308,9 @@ const stopSilentRefresh = () => {
           </template>
         </el-table-column>
         <el-table-column prop="epochs" label="轮次" width="80" align="center" />
-        <el-table-column label="状态" width="80" align="center">
+        <el-table-column label="状态" width="86" align="center">
           <template #default="{ row }">
-            <el-tag :type="stateType(row.state)" size="small">{{ stateLabel(row.state) }}</el-tag>
+            <StateBadge :state="row.state" />
           </template>
         </el-table-column>
         <el-table-column label="进度" min-width="100">
@@ -1190,8 +1322,41 @@ const stopSilentRefresh = () => {
             />
           </template>
         </el-table-column>
-        <el-table-column label="开始时间" min-width="92" show-overflow-tooltip>
-          <template #default="{ row }">{{ formatTime(row.started_at) }}</template>
+        <el-table-column label="创建日期" min-width="92" show-overflow-tooltip>
+          <template #default="{ row }">
+            <!--
+              创建日期 = 任务入库时间 (PENDING 阶段就有), 与"开始时间"区分
+              - created_at: 后端在 API 端提交瞬间写入 (PENDING 起就有)
+              - started_at: worker 真正开始训练的时间, PENDING/PAUSED 为空
+              对应后端 TrainingJob.created_at / TrainingJob.started_at
+            -->
+            {{ formatTime(row.created_at) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="开始日期" min-width="92" show-overflow-tooltip>
+          <template #default="{ row }">
+            <!--
+              PENDING/PAUSED 状态下不显示开始时间:
+              - started_at 语义是"worker 真正开始训练"的时间, 仅 PROGRESS/SUCCESS/
+                FAILURE/REVOKED 时才有意义
+              - 历史数据中 mode=resume 的 API 端会写入 started_at (后端已修复),
+                但 DB 里已有遗留行. 兜底在此处按状态过滤, 避免显示错乱
+            -->
+            {{ (row.state === 'PENDING' || row.state === 'PAUSED') ? '-' : formatTime(row.started_at) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="结束日期" min-width="92" show-overflow-tooltip>
+          <template #default="{ row }">
+            <!--
+              结束日期 = finished_at, 仅终态 (SUCCESS/FAILURE/REVOKED) 才有值
+              非终态显示 "-"
+              三个时间字段语义 (与后端 TrainingJob 模型对应):
+                - created_at (创建日期): API 入库瞬间, PENDING 起就有
+                - started_at (开始日期): worker 真正开始训练, PENDING/PAUSED 为空
+                - finished_at (结束日期): 任务进入终态, 仅 SUCCESS/FAILURE/REVOKED 有值
+            -->
+            {{ ['SUCCESS', 'FAILURE', 'REVOKED'].includes(row.state) ? formatTime(row.finished_at) : '-' }}
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="200" fixed="right" align="center">
           <template #default="{ row }">
@@ -1203,7 +1368,7 @@ const stopSilentRefresh = () => {
                   :icon="row.state === 'PROGRESS' ? VideoPause : VideoPlay"
                   circle plain
                   :type="runBtnType(row.state)"
-                  :disabled="runBtnDisabled(row.state)"
+                  :disabled="row.is_placeholder || runBtnDisabled(row.state)"
                   :loading="actionPending[row.id] === runBtnAction(row.state)"
                   @click="onRunBtnClick(row)"
                 />
@@ -1214,7 +1379,7 @@ const stopSilentRefresh = () => {
                   :icon="CircleClose"
                   circle plain
                   type="danger"
-                  :disabled="!canCancel(row.state)"
+                  :disabled="row.is_placeholder || !canCancel(row.state)"
                   :loading="actionPending[row.id] === 'cancel'"
                   @click="onRowCancel(row)"
                 />
@@ -1225,6 +1390,7 @@ const stopSilentRefresh = () => {
                   :icon="View"
                   circle plain
                   type="primary"
+                  :disabled="row.is_placeholder"
                   @click="openDetail(row)"
                 />
               </el-tooltip>
@@ -1234,7 +1400,7 @@ const stopSilentRefresh = () => {
                   :icon="Delete"
                   circle plain
                   type="danger"
-                  :disabled="!canDelete(row.state)"
+                  :disabled="row.is_placeholder || !canDelete(row.state)"
                   :loading="actionPending[row.id] === 'delete'"
                   @click="onRowDelete(row)"
                 />
@@ -1289,18 +1455,18 @@ const stopSilentRefresh = () => {
     <!-- ============== 再训练对话框 (修改参数 + 启动) ============== -->
     <el-dialog
       v-model="editStartDialogVisible"
-      :title="`再训练  #${editStartForm.id}`"
+      :title="`再训练任务 #${editStartForm.id}`"
       width="520px"
       destroy-on-close
       :close-on-click-modal="false"
     >
       <el-alert
-        type="info" :closable="false" style="margin-bottom: 16px;"
-        title="可在此调整训练参数 (数据集/基础模型/版本名/轮次/批大小/学习率)."
+        type="info" :closable="false" style="margin-bottom: 12px;"
+        title="可在此调整训练参数 (数据集/基础模型/版本名/轮次/批大小/学习率). 新 model_name 会自动加 _r{时间戳} 后缀, 避免覆盖旧 .pth."
       />
       <el-alert
-        type="warning" :closable="false" style="margin-bottom: 16px;"
-        title="⚠ 原任务 #${editStartForm.id} 的参数不会被修改. 此处填写的参数仅作为「新一轮训练任务」的参数; 新任务的 model_name 会自动加 _r{时间戳} 后缀."
+        type="warning" :closable="false" style="margin-bottom: 12px;"
+        :title="`原任务 #${editStartForm.id} 不会被修改, 此处参数仅用于创建新一轮训练任务. 提交后会立即在列表顶部出现新任务 (PENDING).`"
       />
       <TrainingParamsForm
         :form="editStartForm"
@@ -1337,9 +1503,7 @@ const stopSilentRefresh = () => {
               <div class="hero-base">{{ detailJob.base_model }} · {{ datasetNameOf(detailJob.dataset_id) }}</div>
             </div>
           </div>
-          <el-tag :type="stateType(detailJob.state)" size="small">
-            {{ stateLabel(detailJob.state) }}
-          </el-tag>
+          <StateBadge :state="detailJob.state" size="md" />
         </div>
 
         <!-- 基本信息 -->
@@ -1623,18 +1787,29 @@ const stopSilentRefresh = () => {
 /* ============== 顶部标题 ============== */
 .page-header {
   display: flex;
-  align-items: center;
-  margin-bottom: 12px;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 16px;
   flex-shrink: 0;
 }
 .page-title {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin: 0;
-  font-size: 20px;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+  font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
+}
+.page-title__icon {
+  font-size: 22px;
+  color: var(--brand-primary);
+}
+.page-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 .page-title .subtitle {
   color: var(--text-placeholder);
@@ -1728,6 +1903,38 @@ const stopSilentRefresh = () => {
 }
 /* Element Plus el-table 在 flex 容器中, 默认会自己处理 body 滚动, 不要
    给 __inner-wrapper 强加 overflow:auto, 否则 fixed-right 列会盖住内容列. */
+
+/* ============== 占位行 (乐观插入, 等 worker 写库) ============== */
+/* el-table 通过 row-class-name 给行加 class, 这里用 :deep 穿透到行单元 */
+.jobs-table :deep(.row--placeholder) {
+  background: linear-gradient(90deg,
+    rgba(79, 124, 255, 0.06) 0%,
+    rgba(79, 124, 255, 0.02) 50%,
+    rgba(79, 124, 255, 0.06) 100%) !important;
+  background-size: 200% 100%;
+  /* 等待中的斜体效果 */
+  font-style: italic;
+  color: var(--text-secondary);
+  animation: placeholder-shimmer 2s ease-in-out infinite;
+}
+.jobs-table :deep(.row--placeholder td) {
+  position: relative;
+}
+.jobs-table :deep(.row--placeholder td:first-child::before) {
+  /* 行首加一根左侧色条, 提示该行是占位状态 */
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--gradient-brand);
+  border-radius: 0 3px 3px 0;
+}
+@keyframes placeholder-shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
 
 /* 单元格内边距: 默认 12px 0 偏大, 压缩到 8px 让单行更紧凑; 行高随之 ~38px */
 .jobs-table :deep(.el-table .el-table__cell) {

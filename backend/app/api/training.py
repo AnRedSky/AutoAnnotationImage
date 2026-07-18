@@ -101,18 +101,88 @@ def start_training(
             detail=f"Celery broker (Redis) at {broker_host}:{broker_port} unavailable: {e}. Please start Redis and the Celery worker."
         )
 
+    # ---- 关键: 预创建 TrainingJob 行 (state=PENDING), 消除竞态 ----
+    # 之前只在 worker 启动时才 INSERT, 导致前端提交后立刻 GET /jobs 查不到.
+    #
+    # 本实现:
+    # 1. 客户端预生成 UUID (Celery task_id 标准格式), 用这个 ID 同时:
+    #    a) 预创建 TrainingJob 行, celery_task_id = 这个 UUID
+    #    b) 调用 .apply_async(task_id=...) 强制 Celery 用这个 ID 入队
+    # 2. worker 启动后 _create_job() 用 celery_task_id 查找, 一定能命中
+    #    (因为预创建行在 API 调用前就写好, 且 ID 是同一份)
+    # 3. worker 找到后 UPDATE state=PROGRESS 即可, 不会重复 INSERT
+    #
+    # 这样前端提交后 GET /jobs 立即能查到新任务 (state=PENDING),
+    # worker 启动后该行自动切到 PROGRESS.
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+    from app.database import AsyncSessionLocal
+    from app.models.training_job import TrainingJob
+    from app.workers.tasks import _run_async
+    import uuid
+
+    # 预生成 task_id, 格式与 Celery 一致 (32 位 hex 字符串)
+    celery_task_id = uuid.uuid4().hex
+
+    def _create_pending_job() -> int:
+        async def _do():
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    mysql_insert(TrainingJob).values(
+                        celery_task_id=celery_task_id,
+                        user_id=current_user.id,
+                        dataset_id=dataset_id,
+                        base_model=base_model,
+                        model_name=model_name,
+                        epochs=epochs,
+                        batch_size=batch_size,
+                        learning_rate=learning_rate,
+                        state="PENDING",
+                        progress=0.0,
+                        message="等待 worker 启动...",
+                        created_at=datetime.utcnow(),  # 入库时间, 区别于 started_at (worker 接手)
+                        started_at=None,                 # PENDING 阶段不预设, 等 worker 接手
+                        finished_at=None,
+                    )
+                )
+                await db.commit()
+                # 直接用 inserted_primary_key 拿 id (并发安全)
+                pk = result.inserted_primary_key
+                return pk[0] if pk else None
+        return _run_async(_do())
+
+    job_id = _create_pending_job()
+
     try:
-        task = train_model_task.delay(
-            dataset_id=dataset_id,
-            base_model=base_model,
-            model_name=model_name,
-            user_id=current_user.id,
-            epochs=epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+        # 用 .apply_async(task_id=...) 强制 Celery 用我们预生成的 ID 入队
+        # 这样 worker 端的 task_id 一定等于预创建行里的 celery_task_id
+        task = train_model_task.apply_async(
+            kwargs=dict(
+                dataset_id=dataset_id,
+                base_model=base_model,
+                model_name=model_name,
+                user_id=current_user.id,
+                epochs=epochs,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+            ),
+            task_id=celery_task_id,  # 强制使用预生成的 ID
         )
     except Exception as e:
+        # 入队失败, 回滚预创建的行, 避免脏数据
+        def _rollback_pending() -> None:
+            async def _do():
+                async with AsyncSessionLocal() as db:
+                    from sqlalchemy import delete
+                    await db.execute(
+                        delete(TrainingJob).where(TrainingJob.id == job_id)
+                    )
+                    await db.commit()
+            return _run_async(_do())
+        try:
+            _rollback_pending()
+        except Exception:
+            pass  # 兜底失败也无所谓, 留条脏数据后续清理
         err_msg = str(e)[:200]
         if any(k in err_msg.lower() for k in ["connection", "refused", "redis", "broker", "timeout"]):
             raise HTTPException(
@@ -121,9 +191,13 @@ def start_training(
             )
         raise HTTPException(500, f"Failed to submit training task: {err_msg}")
 
+    # task.id 应等于我们预生成的 celery_task_id
+    assert task.id == celery_task_id, f"Celery task id mismatch: {task.id} != {celery_task_id}"
+
     return TrainStartResponse(
         task_id=task.id,
         celery_task_id=task.id,
+        job_id=job_id,  # 预创建行的 id, 前端 loadJobs 立即能看到
         state="PENDING",
         message="Training task submitted",
     )
@@ -708,6 +782,16 @@ async def start_existing_training_job(
     if mode not in ("restart", "resume"):
         raise HTTPException(400, f"invalid mode: {mode}, must be 'restart' or 'resume'")
 
+    # ---- 顶层 import 集中区 (避免函数内 import 引发 UnboundLocalError) ----
+    # 教训: Python 是函数级作用域, 函数内任何 from-import 都会让同名变量在整个
+    # 函数体内被视作 local. 如果函数顶部代码 (在 import 之前) 引用了同名变量,
+    # 即使 import 在 if 分支内未执行, 也会触发 UnboundLocalError.
+    # 故把模式分支所需的 import 全部提到这里.
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+    from app.database import AsyncSessionLocal
+    from app.workers.tasks import _run_async
+    import uuid as _uuid
+
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
@@ -781,8 +865,72 @@ async def start_existing_training_job(
                 pretrained_model_path = str(pth)
                 pretrained_source_mv_id = active_mv.id
 
+    # ---- 预创建 TrainingJob 行 (mode=restart) ----
+    # 之前只入队不写库, 与 start_training 的"新建"路径存在同样的竞态
+    # 问题: 前端 GET /jobs 在 worker 启动前查不到新行, 用户感觉"再训练没
+    # 生效". 现在采用与 start_training 一致的预创建模式:
+    # - 预生成 celery_task_id (UUID), 用同一 ID 做:
+    #   a) INSERT 一条 PENDING 行 (restart 模式)
+    #   b) .apply_async(task_id=...) 强制入队使用相同 ID
+    # 这样 worker _create_job() 一定能用 celery_task_id 找到这行.
+    #
+    # mode=resume 不预创建: 走的是复用旧 job 行的路径 (见下方 resume 分支)
+    new_job_id: int | None = None
+    celery_task_id_to_use: str | None = None
+
+    if mode == "restart":
+        # 顶层 import 已在函数入口集中引入 (见上方), 此处不再重复导入
+        celery_task_id_to_use = _uuid.uuid4().hex
+
+        def _create_pending_restart_job() -> int | None:
+            """预创建 PENDING 行 (mode=restart)
+            - 与 start_training 不同: 显式传 started_at=None, 避免 SQLAlchemy 自动填
+              default=datetime.utcnow (这会让 PENDING 阶段就显示"已开始", 详见 tasks.py
+              中对 PENDING/started_at 的语义约定)
+            - 容错: 如果 inserted_primary_key 拿不到 (极端情况), 返回 None, 外层会
+              走"预创建失败 → 直接 500"分支, 避免幽灵占位
+            - 重试: aiomysql 偶发 MySQLServerHasGoneAway 时, 一次重试, 仍失败则抛
+            """
+            async def _do():
+                async with AsyncSessionLocal() as sdb:
+                    result = await sdb.execute(
+                        mysql_insert(TrainingJob).values(
+                            celery_task_id=celery_task_id_to_use,
+                            user_id=current_user.id,
+                            dataset_id=final_dataset_id,
+                            base_model=final_base_model,
+                            model_name=new_model_name,
+                            epochs=final_epochs,
+                            batch_size=final_batch_size,
+                            learning_rate=final_learning_rate,
+                            state="PENDING",
+                            progress=0.0,
+                            message="等待 worker 启动...",
+                            created_at=datetime.utcnow(),
+                            started_at=None,
+                            finished_at=None,
+                        )
+                    )
+                    await sdb.commit()
+                    pk = result.inserted_primary_key
+                    return pk[0] if pk else None
+            try:
+                return _run_async(_do())
+            except Exception as _e1:
+                # 重试一次 (偶发 MySQLServerHasGoneAway / 连接池抖动)
+                try:
+                    return _run_async(_do())
+                except Exception as _e2:
+                    # 重试也失败: 抛给外层, 整个 start 接口返回 503, 前端会显示错误
+                    raise _e2
+
+        new_job_id = _create_pending_restart_job()
+        if new_job_id is None:
+            # 防御性兜底: 预创建返回 None, 直接 500, 避免 apply_async 用一个孤儿 task_id
+            raise HTTPException(500, "预创建训练任务行失败 (inserted_primary_key 为空), 请重试")
+
     try:
-        task = train_model_task.delay(
+        apply_kwargs = dict(
             dataset_id=final_dataset_id,
             base_model=final_base_model,
             model_name=new_model_name,
@@ -792,7 +940,27 @@ async def start_existing_training_job(
             learning_rate=final_learning_rate,
             pretrained_model_path=pretrained_model_path,
         )
+        if mode == "restart":
+            # 强制使用预生成的 ID, 与预创建行的 celery_task_id 一致
+            task = train_model_task.apply_async(kwargs=apply_kwargs, task_id=celery_task_id_to_use)
+        else:
+            task = train_model_task.delay(**apply_kwargs)
     except Exception as e:
+        # 入队失败, 回滚预创建的行
+        if new_job_id is not None:
+            def _rollback_restart() -> None:
+                async def _do():
+                    async with AsyncSessionLocal() as sdb:
+                        from sqlalchemy import delete
+                        await sdb.execute(
+                            delete(TrainingJob).where(TrainingJob.id == new_job_id)
+                        )
+                        await sdb.commit()
+                return _run_async(_do())
+            try:
+                _rollback_restart()
+            except Exception:
+                pass
         err_msg = str(e)[:200]
         if any(k in err_msg.lower() for k in ["connection", "refused", "redis", "broker"]):
             raise HTTPException(503, f"Celery broker unavailable: {err_msg}")
@@ -800,11 +968,17 @@ async def start_existing_training_job(
 
     # resume 模式: 立刻把 DB 中的 job 状态从 PAUSED 改回 PENDING,
     # celery_task_id 更新为新 task_id, 这样前端列表能立刻看到状态变化
+    #
+    # 注意: 不要预设 started_at, 让 worker 接手时设置 (worker._create_job
+    # 会写入 started_at = utcnow()). 否则 PENDING 阶段就会显示"开始时间",
+    # 用户会误以为任务已开始.
     if mode == "resume":
         job.state = "PENDING"
         job.progress = 0.0
         job.celery_task_id = task.id
-        job.started_at = datetime.utcnow()
+        # started_at 保留 None, 由 worker 接手时填充
+        # job.started_at 维持原值, 因为语义上是"任务整体首次开始"的时间
+        # (而不是"这一轮 resume 开始"的时间)
         job.finished_at = None
         job.error = None
         # message 保留以显示
@@ -814,12 +988,13 @@ async def start_existing_training_job(
     return TrainingJobActionResult(
         success=True,
         job_id=job_id,
+        new_job_id=new_job_id,  # mode=restart 时为新预创建行的 id
         state="PENDING",
         message=(
             f"Resumed training (model_name={new_model_name})"
             if mode == "resume"
             else (
-                f"New training task created (model_name={new_model_name}, "
+                f"New training task #{new_job_id} created (model_name={new_model_name}, "
                 f"原任务 #{job_id} 保持不变, "
                 f"{'增量训练: 基于 ModelVersion #' + str(pretrained_source_mv_id) if pretrained_source_mv_id else '从头微调 (无激活模型, 使用 ImageNet 预训练)'})"
             )
@@ -858,7 +1033,7 @@ async def update_training_job(
         target_dataset = update_data.get("dataset_id", job.dataset_id)
         target_name = update_data.get("model_name", job.model_name)
         # 找同 dataset + 同 model_name 的其他 job (排除自己)
-        from sqlalchemy import select
+        # select 已在模块顶部 import (line 14), 此处不再重复导入
         dup = (await db.execute(
             select(TrainingJob).where(
                 TrainingJob.id != job_id,

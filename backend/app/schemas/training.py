@@ -20,6 +20,9 @@ class TrainStartRequest(_Base):
 class TrainStartResponse(_Base):
     task_id: str
     celery_task_id: str
+    # 预创建 TrainingJob 行的 id; 前端提交后 GET /jobs 立即能看到
+    # (之前是 worker 启动才写, 存在竞态窗口, 见 api/training.py:104-148)
+    job_id: int | None = None
     state: str = "PENDING"
     message: str = "Training task submitted"
 
@@ -65,6 +68,11 @@ class TrainingJobOut(_Base):
     progress: float = 0.0
     message: Optional[str] = None
     error: Optional[str] = None
+    # 任务入库时间 (PENDING 阶段就有), 与 started_at 区分
+    # - created_at: 任务在 API 端被提交入库的时间, 用来展示"创建日期"
+    # - started_at: worker 真正开始训练的时间, PENDING 为空, 用来展示"开始日期"
+    # - finished_at: 任务进入终态的时间, 用来展示"结束日期"
+    created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     duration_seconds: Optional[float] = None
@@ -93,6 +101,10 @@ class TrainingJobActionResult(_Base):
     state: Optional[str] = None
     message: Optional[str] = None
     task_id: Optional[str] = None  # 仅 start 复用时有值
+    # mode=restart 时: 新预创建 TrainingJob 行的 id, 前端可以据此塞占位
+    # mode=resume 时: 与 job_id 相同 (复用旧行)
+    # mode=其他 (pause/cancel/delete): None
+    new_job_id: Optional[int] = None
 
 
 class TrainingJobUpdate(_Base):

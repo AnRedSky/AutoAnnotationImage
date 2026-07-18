@@ -98,22 +98,32 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     total_epochs = epochs  # 用于 progress meta 携带
 
     # 1. 写 TrainingJob (PENDING -> PROGRESS)
-    # 使用 upsert 模式: 如果已有同名 celery_task_id 的 job (worker 崩溃后重投递场景),
-    # 直接复用并 reset 状态, 避免 IntegrityError 阻塞后续流程
+    # 使用 upsert 模式: 如果已有同名 celery_task_id 的 job (worker 崩溃后重投递场景
+    # 或 API 端预创建的场景, 见 api/training.py:855-899), 直接复用并 reset 状态
+    # 避免 IntegrityError 阻塞后续流程.
     async def _create_job():
         from sqlalchemy import select
         from sqlalchemy.dialects.mysql import insert as mysql_insert
         async with AsyncSessionLocal() as db:
-            # 先查是否已存在 (re-delivery 场景)
+            # 先查是否已存在 (re-delivery / API 预创建场景)
             existing = (await db.execute(
                 select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
             )).scalar_one_or_none()
             if existing is not None:
-                # 重置状态
+                # ---- 区分"API 预创建"和"worker 重投递"两种场景 ----
+                # - API 预创建: row.message == "等待 worker 启动..." 或 "任务已入队, 等待 worker 启动..."
+                #   这是首次启动, 沿用原 message 不替换 (避免覆盖前端展示)
+                # - worker 重投递 (崩溃恢复): row.message != 预创建文案
+                #   此时打上 "Re-running" 标识, 方便排查
+                is_api_precreated = existing.message in (
+                    "等待 worker 启动...",
+                    "任务已入队, 等待 worker 启动...",
+                )
                 existing.state = "PROGRESS"
                 existing.progress = 0.0
                 existing.error = None
-                existing.message = "Re-running (worker restart recovery)"
+                if not is_api_precreated:
+                    existing.message = "Re-running (worker restart recovery)"
                 existing.started_at = started_at
                 existing.finished_at = None
                 existing.duration_seconds = None
