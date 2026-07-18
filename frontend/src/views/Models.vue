@@ -351,14 +351,6 @@ const resetFilters = () => {
 
     <!-- ============== 筛选 + 批量操作 (同一行) ============== -->
     <div class="filter-row">
-      <el-input
-        v-model="filterKeyword"
-        :prefix-icon="Search"
-        clearable
-        placeholder="搜索模型名 / 基础模型"
-        class="filter-keyword"
-        @input="onFilterChange"
-      />
       <el-select
         v-model="filterDatasetId"
         clearable
@@ -373,6 +365,15 @@ const resetFilters = () => {
           :value="ds.id"
         />
       </el-select>
+      <el-input
+        v-model="filterKeyword"
+        :prefix-icon="Search"
+        clearable
+        placeholder="搜索模型名 / 基础模型"
+        class="filter-keyword"
+        @input="onFilterChange"
+      />
+
       <div class="header-actions">
         <span class="selection-tip">
           已选 <strong>{{ selectedIds.length }}</strong> 个版本
