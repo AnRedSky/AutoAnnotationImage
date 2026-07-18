@@ -124,6 +124,12 @@ def start_training(
     celery_task_id = uuid.uuid4().hex
 
     def _create_pending_job() -> int:
+        """预创建 PENDING 行 (mode='new')
+
+        start_training 是 def (同步函数, FastAPI 用 threadpool 跑),
+        所以这里用 def + _run_async 在独立 event loop 里跑 await.
+        (与 start_existing_training_job 是 async def 不同, 后者直接 await)
+        """
         async def _do():
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
@@ -171,6 +177,7 @@ def start_training(
     except Exception as e:
         # 入队失败, 回滚预创建的行, 避免脏数据
         def _rollback_pending() -> None:
+            """start_training 是 def 同步函数, 用 _run_async 跑 await"""
             async def _do():
                 async with AsyncSessionLocal() as db:
                     from sqlalchemy import delete
@@ -789,7 +796,7 @@ async def start_existing_training_job(
     # 故把模式分支所需的 import 全部提到这里.
     from sqlalchemy.dialects.mysql import insert as mysql_insert
     from app.database import AsyncSessionLocal
-    from app.workers.tasks import _run_async
+    # 不再需要 _run_async: 下方 _create_pending_restart_job / _rollback_restart 已改为 async def
     import uuid as _uuid
 
     job = await db.get(TrainingJob, job_id)
@@ -882,7 +889,7 @@ async def start_existing_training_job(
         # 顶层 import 已在函数入口集中引入 (见上方), 此处不再重复导入
         celery_task_id_to_use = _uuid.uuid4().hex
 
-        def _create_pending_restart_job() -> int | None:
+        async def _create_pending_restart_job() -> int | None:
             """预创建 PENDING 行 (mode=restart)
             - 与 start_training 不同: 显式传 started_at=None, 避免 SQLAlchemy 自动填
               default=datetime.utcnow (这会让 PENDING 阶段就显示"已开始", 详见 tasks.py
@@ -890,6 +897,12 @@ async def start_existing_training_job(
             - 容错: 如果 inserted_primary_key 拿不到 (极端情况), 返回 None, 外层会
               走"预创建失败 → 直接 500"分支, 避免幽灵占位
             - 重试: aiomysql 偶发 MySQLServerHasGoneAway 时, 一次重试, 仍失败则抛
+
+            注意: 必须写成 async def, 直接 await _do().
+            早期写成 def + _run_async(_do()) 在 async 上下文里会触发
+            "Cannot run the event loop while another loop is running"
+            (因为 _run_async 内部 asyncio.new_event_loop + run_until_complete
+            与 FastAPI/uvicorn 主 event loop 冲突).
             """
             async def _do():
                 async with AsyncSessionLocal() as sdb:
@@ -915,16 +928,16 @@ async def start_existing_training_job(
                     pk = result.inserted_primary_key
                     return pk[0] if pk else None
             try:
-                return _run_async(_do())
-            except Exception as _e1:
+                return await _do()
+            except Exception:
                 # 重试一次 (偶发 MySQLServerHasGoneAway / 连接池抖动)
                 try:
-                    return _run_async(_do())
+                    return await _do()
                 except Exception as _e2:
                     # 重试也失败: 抛给外层, 整个 start 接口返回 503, 前端会显示错误
                     raise _e2
 
-        new_job_id = _create_pending_restart_job()
+        new_job_id = await _create_pending_restart_job()
         if new_job_id is None:
             # 防御性兜底: 预创建返回 None, 直接 500, 避免 apply_async 用一个孤儿 task_id
             raise HTTPException(500, "预创建训练任务行失败 (inserted_primary_key 为空), 请重试")
@@ -948,17 +961,18 @@ async def start_existing_training_job(
     except Exception as e:
         # 入队失败, 回滚预创建的行
         if new_job_id is not None:
-            def _rollback_restart() -> None:
-                async def _do():
-                    async with AsyncSessionLocal() as sdb:
-                        from sqlalchemy import delete
-                        await sdb.execute(
-                            delete(TrainingJob).where(TrainingJob.id == new_job_id)
-                        )
-                        await sdb.commit()
-                return _run_async(_do())
+            async def _rollback_restart() -> None:
+                """同 _create_pending_restart_job 的原因: 必须在 async 上下文 await,
+                不能用 _run_async (_run_async 内部 new_event_loop 会和 FastAPI 主 loop
+                冲突)"""
+                from sqlalchemy import delete
+                async with AsyncSessionLocal() as sdb:
+                    await sdb.execute(
+                        delete(TrainingJob).where(TrainingJob.id == new_job_id)
+                    )
+                    await sdb.commit()
             try:
-                _rollback_restart()
+                await _rollback_restart()
             except Exception:
                 pass
         err_msg = str(e)[:200]
