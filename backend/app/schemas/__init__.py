@@ -21,3 +21,30 @@ from app.schemas.training import (
     ModelVersionOut,
     TrainingJobOut,
 )
+# v2.0.0: 检测 / 分割
+from app.schemas.detection import (
+    BBoxBase,
+    BBoxCreate,
+    BBoxBatchCreate,
+    BBoxOut,
+    BBoxListOut,
+    DetectionTrainRequest,
+    DetectionTrainResponse,
+)
+from app.schemas.segmentation import (
+    SegmentationMaskBase,
+    SegmentationMaskCreate,
+    SegmentationMaskOut,
+    SegmentationTrainRequest,
+    SegmentationTrainResponse,
+)
+from app.schemas.enums import (
+    TaskType,
+    TASK_TYPE_VALUES,
+    TASK_TYPE_DEFAULT_BASE_MODEL,
+    AnnotationSource,
+    ANNOTATION_SOURCE_VALUES,
+    DetectionTrainState,
+    is_valid_task_type,
+    normalize_task_type,
+)

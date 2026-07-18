@@ -23,7 +23,8 @@ dist/
 
 # Project
 uploads/
-models/
+/models/        # 只忽略项目根目录的 models/ (ML 权重), 不影响 backend/app/models (ORM)
+/backend/models/  # 训练产出 .pth / .onnx
 *.pth
 *.onnx
 *.jpg

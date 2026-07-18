@@ -92,6 +92,7 @@ async def upload_images(
             width, height = None, None
 
         # 写库
+        # v2.0.0: 冗余 task_type 到 image 表, 避免后续每条都 join dataset
         img = Image(
             dataset_id=dataset_id,
             filename=file.filename,
@@ -101,6 +102,7 @@ async def upload_images(
             height=height,
             file_hash=file_hash,
             status="pending",
+            task_type=dataset.task_type,  # 同步数据集的 task_type
         )
         db.add(img)
         results.append({"filename": file.filename, "duplicate": False})
@@ -588,6 +590,7 @@ async def list_images(
                 "dataset_id": img.dataset_id,
                 "filename": img.filename,
                 "status": img.status,
+                "task_type": img.task_type,  # v2.0.0: 冗余字段, 避免前端 join
                 "width": img.width,
                 "height": img.height,
                 "file_size": img.file_size,
@@ -666,6 +669,7 @@ async def get_image_detail(
         "dataset_id": img.dataset_id,
         "filename": img.filename,
         "status": img.status,
+        "task_type": img.task_type,  # v2.0.0
         "width": img.width,
         "height": img.height,
         "file_size": img.file_size,
