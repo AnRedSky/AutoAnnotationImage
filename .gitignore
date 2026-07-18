@@ -33,3 +33,8 @@ models/
 # OS
 .DS_Store
 Thumbs.db
+
+# 运行产物 (按规范不应纳入版本控制)
+backend/backend_log.txt
+logs/
+*.pid
