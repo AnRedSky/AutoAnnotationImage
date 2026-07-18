@@ -1,14 +1,31 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import * as echarts from 'echarts'
 import { statsApi, datasetApi } from '@/api'
+import { useUserStore } from '@/stores/user'
 import {
-  Folder, Picture, CircleCheck, Grid, Promotion, CollectionTag
+  Folder, Picture, CircleCheck, Grid, Promotion, CollectionTag, DataAnalysis, TrendCharts, Sunny, Cloudy
 } from '@element-plus/icons-vue'
+
+const userStore = useUserStore()
 
 const overview = ref<any>({})
 const datasets = ref<any[]>([])
 const datasetId = ref<number | null>(null)
+
+/** 时间感知的问候语 + 图标, 让顶部 hero 更有"日常感" */
+const greeting = computed(() => {
+  const h = new Date().getHours()
+  if (h < 6)  return { text: '夜深了, 注意休息', icon: Cloudy, gradient: 'bg-gradient-night' }
+  if (h < 11) return { text: '早上好', icon: Sunny, gradient: 'bg-gradient-warm' }
+  if (h < 14) return { text: '中午好', icon: Sunny, gradient: 'bg-gradient-warm' }
+  if (h < 18) return { text: '下午好', icon: Sunny, gradient: 'bg-gradient-cool' }
+  return { text: '晚上好', icon: Cloudy, gradient: 'bg-gradient-night' }
+})
+const username = computed(() => userStore.user?.username || '同学')
+const today = new Date().toLocaleDateString('zh-CN', {
+  year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
+})
 const datasetStats = ref<any>(null)
 const confidence = ref<any>(null)
 const timeline = ref<any>(null)
@@ -192,7 +209,47 @@ const updateEfficiencyChart = () => {
 </script>
 
 <template>
-  <div>
+  <div class="dashboard">
+    <!-- 顶部 hero 欢迎区: 渐变背景 + 时间感知问候 + 关键数据 -->
+    <div class="hero-banner" :class="greeting.gradient">
+      <div class="hero-banner__bg" />
+      <div class="hero-banner__content">
+        <div class="hero-banner__left">
+          <div class="hero-banner__greet">
+            <el-icon class="hero-banner__icon"><component :is="greeting.icon" /></el-icon>
+            <span>{{ greeting.text }}, </span>
+            <span class="hero-banner__name">{{ username }}</span>
+          </div>
+          <div class="hero-banner__sub">
+            <span class="hero-banner__date">{{ today }}</span>
+            <span class="hero-banner__sep">·</span>
+            <span>图像智能标注工作台</span>
+          </div>
+          <div class="hero-banner__stats">
+            <div class="hero-banner__stat">
+              <span class="hero-banner__stat-num text-number">{{ overview.datasets || 0 }}</span>
+              <span class="hero-banner__stat-label">数据集</span>
+            </div>
+            <div class="hero-banner__divider" />
+            <div class="hero-banner__stat">
+              <span class="hero-banner__stat-num text-number">{{ overview.images || 0 }}</span>
+              <span class="hero-banner__stat-label">图片</span>
+            </div>
+            <div class="hero-banner__divider" />
+            <div class="hero-banner__stat">
+              <span class="hero-banner__stat-num text-number">{{ overview.model_versions || 0 }}</span>
+              <span class="hero-banner__stat-label">模型</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-banner__right">
+          <div class="hero-banner__chart-icon">
+            <el-icon><TrendCharts /></el-icon>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 顶部 4 个统计卡: 渐变顶部色条 + 右侧图标 -->
     <el-row :gutter="16">
       <el-col :span="6">
@@ -402,5 +459,113 @@ const updateEfficiencyChart = () => {
 .chart-box {
   height: 320px;
   width: 100%;
+}
+
+/* 顶部 hero 欢迎区 */
+.dashboard > .hero-banner { margin-bottom: 16px; }
+.hero-banner {
+  position: relative;
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  color: #fff;
+  min-height: 140px;
+  box-shadow: var(--shadow-md);
+}
+.hero-banner__bg {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(255,255,255,0.15) 0%, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(255,255,255,0.10) 0%, transparent 50%);
+  pointer-events: none;
+}
+.hero-banner__content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 32px;
+  gap: 24px;
+}
+.hero-banner__left { flex: 1 1 auto; min-width: 0; }
+.hero-banner__greet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.hero-banner__icon {
+  font-size: 24px;
+  color: rgba(255, 255, 255, 0.95);
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.1));
+}
+.hero-banner__name {
+  background: linear-gradient(135deg, #fff 0%, #ffe4b5 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 700;
+}
+.hero-banner__sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 4px;
+  margin-bottom: 16px;
+}
+.hero-banner__date { color: rgba(255, 255, 255, 0.95); }
+.hero-banner__sep { opacity: 0.5; }
+.hero-banner__stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.hero-banner__stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.hero-banner__stat-num {
+  font-size: 22px;
+  line-height: 1;
+  color: #fff;
+}
+.hero-banner__stat-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.hero-banner__divider {
+  width: 1px;
+  height: 26px;
+  background: rgba(255, 255, 255, 0.3);
+}
+.hero-banner__right {
+  flex: 0 0 auto;
+}
+.hero-banner__chart-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 36px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+@media (max-width: 768px) {
+  .hero-banner__content { flex-direction: column; align-items: flex-start; padding: 20px; }
+  .hero-banner__chart-icon { display: none; }
+  .hero-banner__greet { font-size: 18px; }
 }
 </style>

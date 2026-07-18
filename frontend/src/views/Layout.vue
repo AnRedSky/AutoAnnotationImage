@@ -108,7 +108,7 @@ const breadcrumbs = computed(() => {
       <!-- 底部状态条 -->
       <transition name="fade-text">
         <div v-show="!collapsed" class="aside-footer">
-          <div class="status-dot" />
+          <span class="status-dot status-dot--success status-dot--pulse" />
           <span>系统运行中</span>
         </div>
       </transition>
@@ -309,18 +309,6 @@ const breadcrumbs = computed(() => {
   color: rgba(255, 255, 255, 0.6);
   position: relative;
   z-index: 1;
-}
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--brand-success);
-  box-shadow: 0 0 0 3px rgba(0, 196, 140, 0.2);
-  animation: pulse 2s infinite;
-}
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 3px rgba(0, 196, 140, 0.2); }
-  50% { box-shadow: 0 0 0 6px rgba(0, 196, 140, 0); }
 }
 
 /* ============ 头部 ============ */

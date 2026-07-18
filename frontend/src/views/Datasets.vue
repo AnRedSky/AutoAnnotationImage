@@ -189,14 +189,43 @@ const closeUpload = async () => {
 
 <template>
   <div class="page-flex">
+    <!-- 页面标题 + 总数 + 新建按钮 -->
     <div class="page-header">
-      <el-button type="primary" :icon="Plus" @click="createOpen = true">新建数据集</el-button>
-      <span style="color: #909399; font-size: 13px; margin-left: 12px;">
-        共 {{ data.length }} 个数据集
-      </span>
+      <div>
+        <h2 class="page-title">
+          <el-icon class="page-title__icon"><Folder /></el-icon>
+          <span>数据集管理</span>
+          <span class="page-title__count text-faint">· {{ data.length }} 个</span>
+        </h2>
+        <p class="page-desc text-soft">
+          创建、分类、训练图像数据集; 一键启动 AI 预标注, 大幅减少人工标注工作量
+        </p>
+      </div>
+      <el-button type="primary" :icon="Plus" @click="createOpen = true" round>
+        新建数据集
+      </el-button>
     </div>
 
     <el-table v-loading="loading" :data="pagedData" border stripe class="data-table">
+      <template #empty>
+        <div class="empty-state">
+          <div class="empty-state__icon empty-state__icon--brand">
+            <el-icon><Folder /></el-icon>
+          </div>
+          <div class="empty-state__title">{{ data.length === 0 ? '还没有数据集' : '没有匹配的数据集' }}</div>
+          <div class="empty-state__desc">
+            {{ data.length === 0
+              ? '创建第一个数据集, 上传图片并启动 AI 预标注, 整个流程一键完成'
+              : '尝试调整搜索关键词或清空筛选条件'
+            }}
+          </div>
+          <div v-if="data.length === 0" class="empty-state__actions">
+            <el-button type="primary" :icon="Plus" round @click="createOpen = true">
+              立即创建
+            </el-button>
+          </div>
+        </div>
+      </template>
       <el-table-column type="index" :index="indexMethod" label="#" width="42" />
       <el-table-column prop="name" label="名称" min-width="160">
         <template #default="{ row }">
@@ -334,18 +363,46 @@ const closeUpload = async () => {
   min-height: 0;
 }
 .page-header {
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
   flex-shrink: 0;
 }
+.page-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.page-title__icon {
+  font-size: 22px;
+  color: var(--brand-primary);
+}
+.page-title__count {
+  font-size: 14px;
+  font-weight: 400;
+  margin-left: 4px;
+}
+.page-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 /* 表格区: 占满剩余高度, 表格自身管滚动, 不挤压分页栏 */
 .data-table {
   flex: 1 1 0;
   min-height: 0;
   /* el-table 自身是 display: table, 不接受 flex:1; 用 height: 100% 占满 */
   height: 100% !important;
+  border-radius: var(--radius-md) !important;
+  overflow: hidden;
 }
 /* 分页栏: flex 自然钉在 page-flex 底部, 配合 sticky 视觉兜底 */
 .pager {
@@ -359,5 +416,13 @@ const closeUpload = async () => {
   position: sticky;
   bottom: 0;
   z-index: 5;
+}
+/* 表格空状态: 用我们统一的 empty-state 替代 Element Plus 默认空态 */
+.data-table :deep(.el-table__empty-block) {
+  min-height: 320px;
+  background: var(--bg-soft);
+}
+.data-table :deep(.el-table__empty-text) {
+  line-height: 1.6;
 }
 </style>

@@ -11,7 +11,7 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close, Lightning, View } from '@element-plus/icons-vue'
+import { Check, Close, Lightning, View, ArrowLeft } from '@element-plus/icons-vue'
 import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi } from '@/api'
 
 const route = useRoute()
@@ -37,6 +37,27 @@ const sessionStats = ref({ confirmed: 0, corrected: 0, total_time_ms: 0 })
 // 严格模式: 默认使用项目训练的 fine-tune 模型, 严禁默认走基础模型
 // (基础模型 ImageNet 输出的 class_532 等不在项目类目, 会被前端归一为「未知」)
 const useFinetune = ref(true)
+
+/**
+ * 浏览历史栈 (按访问顺序记录看过的 image id, 支持「上一张 / 下一张」双向导航)
+ * - historyIds:   所有看过的图片 id 列表
+ * - historyCursor: 当前所在位置 (默认 -1, 表示还没加载过)
+ *
+ * 行为:
+ * - 「下一张」: 已在栈顶 → 调后端拉新图 (排除整个 history) 推入栈尾, cursor 移到栈顶
+ *             在栈中间 → 直接 cursor++ 拿历史图 (不调后端)
+ * - 「上一张」: cursor--, 从 history 直接拿, 调后端 detail 拉最新数据 (状态可能已变)
+ * - 标准浏览器行为: 在历史中间点「上一张」再点「下一张」, 应该回到原位置 (不拉新图)
+ * - 清空时机: 切换 dataset 时
+ */
+const historyIds = ref<number[]>([])
+const historyCursor = ref(-1)
+/**
+ * 是否已到末尾 (栈顶时后端 list 返回空, 没有更多待标注图)
+ * - true 时「下一张」按钮 disabled
+ * - false 时恢复可用 (典型触发: 上一张回到中间 / 启动 AI 预标注完 / 提交标注后)
+ */
+const noMore = ref(false)
 
 onMounted(async () => {
   try {
@@ -97,6 +118,12 @@ const refreshFinetuneModels = async () => {
 watch(datasetId, async (v) => {
   if (!v) return
   sessionStats.value = { confirmed: 0, corrected: 0, total_time_ms: 0 }
+  // 切换 dataset 时, 清空浏览历史 (新 dataset 的 id 集合不同)
+  historyIds.value = []
+  historyCursor.value = -1
+  noMore.value = false
+  image.value = null
+  candidates.value = []
   try {
     const cats: any = await datasetApi.categories(v)
     categories.value = cats?.items || cats || []
@@ -133,43 +160,120 @@ async function refreshStats() {
   } catch {}
 }
 
+/**
+ * 按 id 加载图片并填充 candidates / startTs
+ * 不动 historyCursor, 由调用方控制 (loadNext / loadPrev)
+ */
+const fillImage = (item: any) => {
+  image.value = item
+  const aiPred = item.ai_prediction
+  if (aiPred && Array.isArray(aiPred.top5)) {
+    // 修复: 后端 ai_service 返回的字段是 confidence, 不是 conf
+    candidates.value = aiPred.top5.map((c: any) => ({ label: c.label, confidence: c.confidence }))
+  } else {
+    candidates.value = []
+  }
+  startTs.value = Date.now()
+}
+
+/**
+ * 「下一张」逻辑:
+ * 1. 在历史栈中间 → cursor++ 直接拿历史图, 不发请求 (浏览器行为)
+ * 2. 已在栈顶 → 调后端 list (排除整个 history) 拉新图, 推入栈尾
+ *    - 若后端无图 (全部 pending 已拿完): 提示"已经是最后一张了", 「下一张」按钮 disabled
+ */
 const loadNext = async () => {
   if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
+
+  // 情况 1: 历史栈中间, 直接前进 (浏览器行为)
+  if (historyCursor.value < historyIds.value.length - 1) {
+    historyCursor.value++
+    const id = historyIds.value[historyCursor.value]
+    loading.value = true
+    try {
+      const detail: any = await imageApi.detail(id)
+      fillImage(detail)
+    } catch (e: any) {
+      ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message))
+    } finally {
+      loading.value = false
+    }
+    return
+  }
+
+  // 情况 2: 栈顶, 拉新图
   loading.value = true
   try {
-    // 关键: 排除当前图片, 避免连续点击返回同一张
-    const excludeId = image.value?.id
+    // 排除整个 history (防止连续点下一张回到已看过的图)
+    const excludeIdsParam = historyIds.value.length > 0
+      ? historyIds.value.join(',')
+      : undefined
     const resp: any = await imageApi.list(datasetId.value, {
       status: 'pending',
       page: 1,
       page_size: 1,
-      exclude_id: excludeId,
+      exclude_ids: excludeIdsParam,
     })
     const items = resp?.items || []
     const item = items[0]
     if (!item) {
-      image.value = null
-      candidates.value = []
-      if (excludeId) {
-        ElMessage.info('已加载完所有待标注图片, 可点击「启动 AI 预标注」继续')
+      // 栈顶 + 后端无新图 = 已到底
+      noMore.value = true
+      if (historyIds.value.length > 0) {
+        ElMessage.warning({
+          message: '已经是最后一张了, 没有更多待标注图片。可点击「启动 AI 预标注」让 AI 继续标注。',
+          duration: 3500,
+          showClose: true,
+        })
+      } else {
+        ElMessage.info('当前数据集没有待标注的图片')
       }
       return
     }
-    image.value = item
-    const aiPred = item.ai_prediction
-    if (aiPred && Array.isArray(aiPred.top5)) {
-      // 修复: 后端 ai_service 返回的字段是 confidence, 不是 conf
-      candidates.value = aiPred.top5.map((c: any) => ({ label: c.label, confidence: c.confidence }))
-    } else {
-      candidates.value = []
-    }
-    startTs.value = Date.now()
+    // 拉到新图, 重置 noMore (用户能看到"还有更多"的信号)
+    noMore.value = false
+    // 推入历史栈
+    historyIds.value.push(item.id)
+    historyCursor.value = historyIds.value.length - 1
+    fillImage(item)
   } catch (e: any) {
     ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
     loading.value = false
   }
 }
+
+/**
+ * 「上一张」逻辑:
+ * - cursor > 0: cursor--, 从 history 拿图, 调 detail 拉最新数据
+ * - cursor = 0: 提示"已经是第一张"
+ */
+const loadPrev = async () => {
+  if (historyCursor.value <= 0) {
+    ElMessage.info('已经是第一张了')
+    return
+  }
+  historyCursor.value--
+  // 离开栈顶, 重置 noMore (再点下一张时, 栈中间直接拿 history, 不需要重新判断)
+  noMore.value = false
+  const prevId = historyIds.value[historyCursor.value]
+  loading.value = true
+  try {
+    // 走 detail 拉最新数据 (状态/AI 预测可能已变)
+    const detail: any = await imageApi.detail(prevId)
+    fillImage(detail)
+  } catch (e: any) {
+    // 图片可能已被删, 回滚 cursor
+    historyIds.value.splice(historyCursor.value, 1)
+    historyCursor.value++
+    ElMessage.error('加载上一张失败: ' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 上一张按钮是否可用 (仅在历史栈非首位时可点) */
+const canGoPrev = computed(() => historyCursor.value > 0)
 
 const runAutoAnnotate = async () => {
   if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
@@ -209,17 +313,30 @@ const runAutoAnnotate = async () => {
         model_id: selectedModelId.value || undefined,
       })
       // 刷新激活模型 (可能后端回退到默认激活)
+      // 注意: getActive 返回 { items: [...] }, 修复前 r?.model 为 undefined 会把激活模型清空
       try {
         const r: any = await modelApi.getActive(datasetId.value)
-        activeModel.value = r?.model || null
+        const refreshed = r?.items?.[0] || r?.model || null
+        // 只在后端真正变更了激活模型时更新, 避免 No pending images 等情况把已有的 activeModel 清掉
+        if (refreshed) {
+          activeModel.value = refreshed
+        }
       } catch {}
       if (resp.used_finetune) {
         ElMessage.success(
           `[Fine-tune ${resp.model_name}] 共 ${resp.total} 张, 命中 ${resp.auto_labeled} 张, 需人工 ${resp.need_human} 张, 平均置信度 ${(resp.avg_confidence * 100).toFixed(1)}%`
         )
+      } else if (resp.message) {
+        // 后端早 return: 没有 pending 图片 (数据集全部已标)
+        // 优先显示用户在下拉框里实际选中的模型名 (与后端实际推理的 model 一致),
+        // 回退到 activeModel.name, 最后回退到 resp.model_name, 最后 'Fine-tune'
+        const selected = finetuneModels.value.find((m) => m.id === selectedModelId.value)
+        const labelName = selected?.name || activeModel.value?.name || resp.model_name || 'Fine-tune'
+        ElMessage.info(`[${labelName}] ${resp.message}`)
       } else {
+        // 真正的回退: use_finetune=True 但后端找不到 fine-tune → 自动回退到 ImageNet
         ElMessage.warning(
-          `[回退 → 基础模型 ${resp.model_name}] ${resp.warning || '当前没有激活的 fine-tune 模型, 已回退到 ImageNet 预训练'}`
+          `[回退 → 基础模型 ${resp.model_name || 'ImageNet'}] ${resp.warning || '当前没有激活的 fine-tune 模型, 已回退到 ImageNet 预训练'}`
         )
       }
     } else {
@@ -235,6 +352,8 @@ const runAutoAnnotate = async () => {
       )
     }
     await refreshStats()
+    // AI 预标注后, 部分图被标为 ai_labeled, 剩下的 pending 列表可能变化 → 重置 noMore 让用户重新点「下一张」看
+    noMore.value = false
     await loadNext()
   } catch (e: any) {
     ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
@@ -259,6 +378,10 @@ const submit = async (labelId: number, labelName: string, isConfirm: boolean) =>
     sessionStats.value.total_time_ms += cost
     if (isConfirm) sessionStats.value.confirmed++
     else sessionStats.value.corrected++
+    // 标注成功后重置 noMore: 该图 status 已变, 后端可能返回新的"非当前 history"图
+    noMore.value = false
+    // 不需要动 historyIds: 该图 status 已变, 下一张「下一张」自然不会再返回
+    // (但用「上一张」回看还能再看到, 拿的是最新状态)
     await refreshStats()
     loadNext()
   } catch (e: any) {
@@ -516,9 +639,25 @@ const currentModelLabel = computed(() => {
           >
             <el-option v-for="c in categories" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
-          <el-button style="margin-top: 8px; width: 100%;" type="danger" plain :icon="Close" @click="loadNext">
-            下一张
-          </el-button>
+          <div style="margin-top: 8px; display: flex; gap: 8px;">
+            <el-button
+              style="flex: 1;"
+              :icon="ArrowLeft"
+              :disabled="!canGoPrev"
+              @click="loadPrev"
+            >上一张</el-button>
+            <el-button
+              style="flex: 1;"
+              :type="noMore ? 'info' : 'danger'"
+              :plain="!noMore"
+              :icon="Close"
+              :disabled="noMore"
+              @click="loadNext"
+            >{{ noMore ? '已是最后一张' : '下一张' }}</el-button>
+          </div>
+          <div v-if="noMore" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
+            所有待标注图片已加载完毕，可点击「启动 AI 预标注」继续
+          </div>
           <div v-if="datasetId" style="margin-top: 8px; text-align: center;">
             <el-link type="primary" :icon="View" @click="viewDataset">
               去数据集详情浏览全部图片

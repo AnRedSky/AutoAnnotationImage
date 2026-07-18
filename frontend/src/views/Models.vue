@@ -337,10 +337,16 @@ const resetFilters = () => {
 
     <!-- ============== 顶部标题 ============== -->
     <div class="page-header">
-      <h2 class="page-title">
-        <span>模型版本管理</span>
-        <span class="subtitle">Models</span>
-      </h2>
+      <div>
+        <h2 class="page-title">
+          <el-icon class="page-title__icon"><Grid /></el-icon>
+          <span>模型版本管理</span>
+          <span class="subtitle">Models</span>
+        </h2>
+        <p class="page-desc text-soft">
+          浏览、激活、对比各次训练产出的模型版本; 激活后即可用于 AI 预标注
+        </p>
+      </div>
     </div>
 
     <!-- ============== 筛选 + 批量操作 (同一行) ============== -->
@@ -419,6 +425,22 @@ const resetFilters = () => {
 
     <el-table v-loading="loading" :data="pagedData" border stripe class="data-table"
       @selection-change="onSelectionChange">
+      <template #empty>
+        <div class="empty-state">
+          <div class="empty-state__icon empty-state__icon--brand">
+            <el-icon><Grid /></el-icon>
+          </div>
+          <div class="empty-state__title">
+            {{ filterKeyword ? '没有匹配的模型' : '还没有模型版本' }}
+          </div>
+          <div class="empty-state__desc">
+            {{ filterKeyword
+              ? '尝试调整搜索关键词'
+              : '到「训练任务」页选定数据集并启动训练, 完成后模型会自动出现在这里'
+            }}
+          </div>
+        </div>
+      </template>
       <el-table-column type="index" :index="indexMethod" label="#" width="42" />
       <el-table-column type="selection" width="40" />
       <el-table-column prop="name" label="模型名" min-width="200">
@@ -751,18 +773,29 @@ const resetFilters = () => {
 /* ============== 顶部标题 ============== */
 .page-header {
   display: flex;
-  align-items: center;
-  margin-bottom: 12px;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 16px;
   flex-shrink: 0;
 }
 .page-title {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin: 0;
-  font-size: 20px;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+  font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
+}
+.page-title__icon {
+  font-size: 22px;
+  color: var(--brand-primary);
+}
+.page-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 .page-title .subtitle {
   color: var(--text-placeholder);

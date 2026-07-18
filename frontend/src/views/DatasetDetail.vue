@@ -640,7 +640,7 @@ watch(() => route.params.id, () => load())
             :content="`置信度阈值: 决定一张图被自动标注的最低可信度。>= ${(threshold * 100).toFixed(0)}% 将直接标注, 其余保留为「待标注」由人工复核`"
           >
             <div class="threshold-row threshold-row--inline">
-              <span class="threshold-label">阈值</span>
+              <span class="threshold-label">置信度阈值</span>
               <el-slider v-model="threshold" :min="0.1" :max="1.0" :step="0.05" :show-tooltip="true"
                 :format-tooltip="(v: number) => `阈值 ${(v * 100).toFixed(0)}%`"
                 class="threshold-slider threshold-slider--inline" />
@@ -946,7 +946,14 @@ watch(() => route.params.id, () => load())
           </div>
         </div>
         <div class="preview-summary__model">
-          测评模型: <b>{{ previewResult.model_name || '(空)' }}</b>
+          测评模型:
+          <b v-if="previewResult.used_finetune && previewResult.finetune_name">
+            {{ previewResult.finetune_name }}
+            <span style="color: #909399; font-weight: normal; font-size: 12px;">
+              (基础模型 {{ previewResult.base_model || previewResult.model_name }})
+            </span>
+          </b>
+          <b v-else>{{ previewResult.model_name || '(空)' }}</b>
           <el-tag
             v-if="previewResult.used_finetune" type="success" size="small" effect="plain"
             style="margin-left: 8px;"
