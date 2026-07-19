@@ -38,7 +38,9 @@ dependencies = [
     # Detection & Segmentation (v2.0.0)
     "ultralytics==8.0.196",
     "opencv-python==4.9.0.80",
-    "pycocotools==2.0.7",
+    # pycocotools (>=2.0.7): 当前未使用 (COCO-seg 导出用 polygon, 不依赖 RLE)
+    # 避免在 Windows 上从源码编译失败, 留待 v2.2.0 真实 RLE 改造时再加
+    # "pycocotools==2.0.7",
     # Async Tasks
     "celery==5.3.6",
     "redis==5.0.3",
