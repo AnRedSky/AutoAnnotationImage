@@ -91,6 +91,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 
 // ============== Props / Emits ==============
 interface BBox {
