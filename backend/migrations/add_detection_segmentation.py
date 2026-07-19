@@ -51,6 +51,12 @@ ADD_COLUMN_STATEMENTS = [
      "ALTER TABLE model_version ADD COLUMN pixel_accuracy FLOAT NULL"),
     ("model_version", "dice_score",
      "ALTER TABLE model_version ADD COLUMN dice_score FLOAT NULL"),
+
+    # v2.0.0 S3.2: training_jobs.task_type (区分 classification / detection / segmentation)
+    ("training_jobs", "task_type",
+     "ALTER TABLE training_jobs ADD COLUMN task_type VARCHAR(32) NOT NULL DEFAULT 'classification'"),
+    ("training_jobs", "idx_training_jobs_task_type",
+     "CREATE INDEX idx_training_jobs_task_type ON training_jobs (task_type)"),
 ]
 
 
@@ -125,6 +131,7 @@ async def main():
     print("- 新表: bbox_annotation, segmentation_mask")
     print("- image.task_type (默认 classification)")
     print("- model_version.task_type + 5 个新指标字段")
+    print("- training_jobs.task_type (S3.2: 区分 classification / detection / segmentation)")
 
 
 if __name__ == "__main__":

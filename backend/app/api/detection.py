@@ -1,12 +1,16 @@
 """
-Detection API: BBox 标注 CRUD (v2.0.0 目标检测)
-================================================
+Detection API: BBox 标注 CRUD + 训练/自动标注 (v2.0.0 目标检测)
+==================================================================
 
-端点 (4 个):
-- POST   /api/detection/annotations/save      单图保存/替换全部 bbox
-- GET    /api/detection/annotations/{image_id}  拉取单图全部 bbox
-- DELETE /api/detection/annotations/{bbox_id}  删除单条 bbox
-- POST   /api/detection/annotations/batch      批量写入 (AI 预标注结果入库)
+端点 (8 个):
+- POST   /api/detection/annotations/save           单条 BBox 保存
+- POST   /api/detection/annotations/replace         单图 BBox 全量替换
+- GET    /api/detection/annotations/{image_id}      拉取单图全部 bbox
+- DELETE /api/detection/annotations/{bbox_id}       单条删除
+- POST   /api/detection/annotations/batch           批量入库 (S3 占位)
+- POST   /api/detection/train                       启动 YOLOv8 训练 (Celery)
+- POST   /api/detection/auto-annotate               启动自动标注 (Celery)
+- GET    /api/detection/jobs/{job_id}/progress      拉取训练/标注进度 (轮询/SSE)
 
 约束:
 - bbox 坐标统一存归一化 0-1 (与 YOLO txt 一致, 详见 bbox_service)
@@ -14,8 +18,11 @@ Detection API: BBox 标注 CRUD (v2.0.0 目标检测)
 - category_id 必须属于同一 dataset
 - 物理删除由 Image CASCADE 自动级联 (S1 已在 ORM 配置)
 """
+import json
+import asyncio
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -23,14 +30,19 @@ from app.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
 from app.models.image import Image
+from app.models.dataset import Dataset
 from app.models.category import Category
 from app.models.bbox_annotation import BBoxAnnotation
+from app.models.training_job import TrainingJob
+from app.models.model_version import ModelVersion
 from app.schemas.detection import (
     BBoxCreate, BBoxOut, BBoxListOut,
     BBoxBatchCreate, BBoxBatchSaveResult,
+    DetectionTrainRequest, DetectionTrainResponse,
 )
 from app.schemas.enums import TaskType, AnnotationSource
 from app.services.bbox_service import validate_normalized_bbox
+from app.core.redis_client import redis_client
 
 router = APIRouter()
 
@@ -260,4 +272,207 @@ async def batch_save_bboxes(
         message="BBox batch save endpoint placeholder; "
                 "real bulk import is in S3 Celery worker.",
         image_ids=sorted(validated_image_ids),
+    )
+
+
+# ============== S3.2 训练 / 自动标注 / 进度 ==============
+
+# Redis 健康检查: 训练和自动标注都需要 Celery worker, 没有 Redis 就立刻 503
+def _check_celery_available() -> None:
+    """检测 Redis 是否可达. 不可达则 503, 避免任务在 .delay() 处长时间阻塞."""
+    try:
+        redis_client.ping()
+    except Exception as e:
+        raise HTTPException(
+            503,
+            f"Redis 不可用, 任务无法入队: {e}",
+        )
+
+
+@router.post("/train", response_model=DetectionTrainResponse)
+async def start_detection_train(
+    payload: DetectionTrainRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    启动 YOLOv8 训练任务 (异步, Celery)
+
+    流程:
+    1. 校验数据集 (detection 类型 + 当前用户拥有)
+    2. 预创建 TrainingJob (PENDING) 给前端立刻看到任务
+    3. .delay() 投递到 Celery, worker 接手后转 PROGRESS
+    4. 训练完成自动写 ModelVersion + 关联 model_version_id
+    """
+    _check_celery_available()
+
+    # 1) 校验 dataset
+    ds = await db.get(Dataset, payload.dataset_id)
+    if not ds:
+        raise HTTPException(404, f"Dataset id={payload.dataset_id} not found")
+    if ds.task_type != TaskType.DETECTION.value:
+        raise HTTPException(
+            400,
+            f"Dataset id={payload.dataset_id} task_type="
+            f"{ds.task_type!r}, expected 'detection'",
+        )
+    # 权限: 仅 owner 可训练 (v1.0.0 已有约定)
+    if ds.owner_id and ds.owner_id != current_user.id:
+        raise HTTPException(403, "仅数据集 owner 可启动训练")
+
+    # 2) model_alias 兜底
+    model_alias = payload.model_name.strip() or f"{payload.base_model}_run"
+
+    # 3) .delay() 投递到 Celery, worker 内部建/复用 TrainingJob
+    from app.workers.detection_tasks import train_detection_task
+    try:
+        async_result = train_detection_task.delay(
+            dataset_id=payload.dataset_id,
+            user_id=current_user.id,
+            model_name=payload.base_model,
+            model_alias=model_alias,
+            epochs=payload.epochs,
+            imgsz=payload.imgsz,
+            batch=payload.batch_size,
+            device="cpu",  # 论文 demo 默认 CPU
+        )
+    except Exception as e:
+        raise HTTPException(503, f"Celery .delay() 失败: {e}")
+
+    return DetectionTrainResponse(
+        task_id=async_result.id,
+        celery_task_id=async_result.id,
+        job_id=0,  # worker 接手后由 tasks 内 SQL 写回; 前端用 task_id 查
+        state="PENDING",
+        message="任务已入队, 等待 worker 启动...",
+    )
+
+
+@router.post("/auto-annotate")
+async def start_auto_annotate(
+    dataset_id: int = Query(..., description="detection 数据集 id"),
+    model_version_id: int = Query(..., description="用于推理的 ModelVersion id"),
+    conf_threshold: float = Query(0.25, ge=0.0, le=1.0),
+    iou_threshold: float = Query(0.45, ge=0.0, le=1.0),
+    imgsz: int = Query(320, ge=64, le=1280),
+    device: str = Query("cpu"),
+    overwrite_existing: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    启动自动标注 (YOLOv8 推理 + 入库 BBoxAnnotation)
+    """
+    _check_celery_available()
+    ds = await db.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(404, f"Dataset id={dataset_id} not found")
+    if ds.task_type != TaskType.DETECTION.value:
+        raise HTTPException(400, f"非 detection 数据集: {ds.task_type}")
+    mv = await db.get(ModelVersion, model_version_id)
+    if not mv:
+        raise HTTPException(404, f"ModelVersion id={model_version_id} not found")
+    if mv.task_type != TaskType.DETECTION.value:
+        raise HTTPException(
+            400, f"ModelVersion task_type={mv.task_type!r}, expected 'detection'",
+        )
+
+    from app.workers.detection_tasks import auto_annotate_detection_task
+    try:
+        async_result = auto_annotate_detection_task.delay(
+            dataset_id=dataset_id,
+            user_id=current_user.id,
+            model_version_id=model_version_id,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            imgsz=imgsz,
+            device=device,
+            overwrite_existing=overwrite_existing,
+        )
+    except Exception as e:
+        raise HTTPException(503, f"Celery .delay() 失败: {e}")
+
+    return {
+        "task_id": async_result.id,
+        "state": "PENDING",
+        "message": "自动标注任务已入队, 等待 worker 启动...",
+    }
+
+
+@router.get("/jobs/{job_id}/progress")
+async def get_job_progress(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    拉取 TrainingJob 进度 (兼容老接口, JSON 轮询)
+    """
+    job = await db.get(TrainingJob, job_id)
+    if not job:
+        raise HTTPException(404, f"TrainingJob id={job_id} not found")
+    return {
+        "id": job.id,
+        "celery_task_id": job.celery_task_id,
+        "task_type": job.task_type,
+        "state": job.state,
+        "progress": job.progress,
+        "message": job.message,
+        "error": job.error,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "duration_seconds": job.duration_seconds,
+        "data_total": job.data_total,
+        "data_train": job.data_train,
+        "data_val": job.data_val,
+        "num_classes": job.num_classes,
+        "class_names": job.class_names,
+        "model_version_id": job.model_version_id,
+    }
+
+
+@router.get("/jobs/{job_id}/stream")
+async def stream_job_progress(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    SSE 进度推送: 每秒轮询 TrainingJob, 终态自动断开
+    """
+    job = await db.get(TrainingJob, job_id)
+    if not job:
+        raise HTTPException(404, f"TrainingJob id={job_id} not found")
+
+    async def event_gen():
+        last_state = None
+        last_progress = -1.0
+        # 最多 1 小时 (防止僵尸连接)
+        for _ in range(3600):
+            # 重新查一次
+            j = await db.get(TrainingJob, job_id)
+            if not j:
+                break
+            if j.state != last_state or j.progress != last_progress:
+                payload = {
+                    "id": j.id,
+                    "state": j.state,
+                    "progress": j.progress,
+                    "message": j.message,
+                    "current_epoch": getattr(j, "current_epoch", None),
+                }
+                yield f"data: {json.dumps(payload, default=str)}\n\n"
+                last_state = j.state
+                last_progress = j.progress
+            if j.state in ("SUCCESS", "FAILURE", "REVOKED"):
+                break
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )

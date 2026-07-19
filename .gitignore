@@ -23,14 +23,27 @@ dist/
 
 # Project
 uploads/
-/models/                    # 项目根目录的 ML 权重 (历史, 未使用)
-/backend/models/            # 训练产出 .pth / hf_cache (运行时下载)
-/backend/models/**/*.pth    # 单文件兜底
-/backend/models/**/*.onnx
-/backend/models/hf_cache/   # HuggingFace / timm 预训练模型缓存
+# 项目根目录的 ML 权重 (历史, 未使用)
+/models/
+/models/*.pth
+/models/*.onnx
+/models/hf_cache/
+
+# 训练产物 (backend/models 目录是 ORM 模型代码 + 训练产物混杂区, 必须精确忽略)
+# ORM 模型 (bbox_annotation.py / image.py / segmentation_mask.py / 等) 必须入库
+/backend/models/*.pth
+/backend/models/*.onnx
+/backend/models/*.safetensors
+/backend/models/hf_cache/
+/backend/models/runs/
+/backend/models/yolo_data/
+
+# 兜底: 任何位置的模型文件
 *.pth
 *.onnx
 *.safetensors
+
+# 图片 (排除前端 public 下的合法资源)
 *.jpg
 *.png
 !frontend/public/

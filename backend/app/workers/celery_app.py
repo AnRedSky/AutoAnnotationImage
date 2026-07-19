@@ -13,7 +13,10 @@ celery_app = Celery(
     backend=settings.CELERY_BACKEND,
     # include 让 worker 启动时自动 import 任务模块，
     # 这样 @celery_app.task 装饰器就会运行并把任务注册到 celery_app.tasks
-    include=["app.workers.tasks"],
+    include=[
+        "app.workers.tasks",
+        "app.workers.detection_tasks",  # v2.0.0 目标检测
+    ],
 )
 
 celery_app.conf.update(

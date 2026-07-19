@@ -24,6 +24,11 @@ class TrainingJob(Base):
     dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=False)
     base_model = Column(String(64), nullable=False)
     model_name = Column(String(64), nullable=False)
+    # v2.0.0: 任务类型 (classification / detection / segmentation)
+    # 沿用 detection_task.task_type 枚举值, classification 为 v1.0.0 默认
+    task_type = Column(
+        String(32), default="classification", nullable=False, index=True,
+    )
     epochs = Column(Integer, default=20)
     batch_size = Column(Integer, default=32)
     learning_rate = Column(Float, default=1e-4)

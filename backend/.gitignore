@@ -37,13 +37,12 @@ logs/
 *.db
 *.sqlite3
 
-# 模型与数据
+# 模型与数据 (精确路径, 避免误忽略 backend/app/models/*.py ORM 代码)
 /models/*.pth
 /models/*.onnx
-/models/hf_cache/   # HuggingFace / timm 预训练模型缓存
+/models/hf_cache/
 uploads/
 data/raw/
 data/processed/
-models/
 # 系统
 Thumbs.db
