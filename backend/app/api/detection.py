@@ -24,7 +24,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from app.database import get_db
 from app.core.deps import get_current_user
@@ -214,6 +214,25 @@ async def list_image_bboxes(
         .order_by(BBoxAnnotation.id.asc())
     )).scalars().all()
     return BBoxListOut(image_id=image_id, items=rows)
+
+
+@router.delete("/annotations/clear/{image_id}")
+async def clear_image_bboxes(
+    image_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    清空单图全部 BBox 标注
+    - 配合前端 DetectionAnnotator 的「重画」流程: 先 clear 旧的, 再 save 新的
+    - 必须声明在 /annotations/{bbox_id} 之前, 避免 FastAPI 把 'clear' 解析成 bbox_id
+    """
+    img = await _ensure_detection_image(image_id, db)
+    result = await db.execute(
+        delete(BBoxAnnotation).where(BBoxAnnotation.image_id == image_id)
+    )
+    await db.commit()
+    return {"image_id": image_id, "cleared": result.rowcount, "success": True}
 
 
 @router.delete("/annotations/{bbox_id}")
