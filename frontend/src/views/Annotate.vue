@@ -716,6 +716,8 @@ const currentTaskType = computed(() => {
                 :disabled="annotatorSaving"
                 @save="saveDetectionBBoxes"
                 @cancel="loadDetectionAnnotations(image.id)"
+                @next="loadNext"
+                @prev="loadPrev"
               />
             </template>
             <template v-else-if="image.task_type === 'segmentation'">

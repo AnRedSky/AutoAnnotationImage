@@ -1,13 +1,15 @@
 <!--
-  DetectionAnnotator.vue
-  =====================
-  目标检测 bbox 画布组件 (v2.1.0)
+  DetectionAnnotator.vue (v2.2.0 增强版)
+  ==========================================
+  目标检测 bbox 画布组件
 
   职责:
   - 加载原图到 canvas (含 HiDPI 自适应)
   - 鼠标拖拽绘制新 bbox (mousedown -> mousemove -> mouseup)
   - 渲染已有 bbox 列表 (颜色按 category_id 分配)
   - 支持选中 / 删除 / 改类别 bbox
+  - 拖拽整体 bbox + 8 handle 缩放 (v2.2.0 新增)
+  - 键盘快捷键: Delete 删除选中, d/e 切模式, n/p 上下张, Ctrl+Z 撤销 (v2.2.0 新增)
   - 通过 emit('change', bboxes) 抛出当前 bbox 列表, 由父组件 (Annotate.vue) 负责持久化
 
   设计原则:
@@ -27,24 +29,35 @@
     update:modelValue  bbox 列表变更
     save               触发父组件保存 (父组件拿当前 modelValue 调后端 API)
     cancel             撤销未保存的变更 (父组件可重读 server-side bbox)
+    next               请求跳到下一张图 (n 键)
+    prev               请求跳到上一张图 (p 键)
 -->
 <template>
   <div class="det-annotator">
     <!-- 工具栏 -->
     <div class="toolbar">
       <el-button-group size="small">
-        <el-button :type="mode === 'draw' ? 'primary' : 'default'" @click="mode = 'draw'">
-          <el-icon><EditPen /></el-icon>绘制
+        <el-button :type="mode === 'draw' ? 'primary' : 'default'" @click="setMode('draw')">
+          <el-icon><EditPen /></el-icon>绘制 (D)
         </el-button>
-        <el-button :type="mode === 'edit' ? 'primary' : 'default'" @click="mode = 'edit'">
-          <el-icon><Select /></el-icon>编辑
+        <el-button :type="mode === 'edit' ? 'primary' : 'default'" @click="setMode('edit')">
+          <el-icon><Select /></el-icon>编辑 (E)
+        </el-button>
+        <el-button @click="undo" :disabled="!canUndo">
+          <el-icon><RefreshLeft /></el-icon>撤销 (Ctrl+Z)
+        </el-button>
+        <el-button @click="redo" :disabled="!canRedo">
+          <el-icon><RefreshRight /></el-icon>重做 (Ctrl+Shift+Z)
         </el-button>
         <el-button @click="clearDraft">清空未保存</el-button>
       </el-button-group>
       <span class="hint">
-        {{ mode === 'draw'
-            ? '在图片上按住鼠标左键拖拽, 释放后完成一个 bbox'
-            : '点击已有 bbox 可选中删除 / 改类别' }}
+        <template v-if="mode === 'draw'">
+          拖拽鼠标画新 bbox · 切换下一张 (N) · 上一张 (P)
+        </template>
+        <template v-else>
+          点击选中 · Delete 键删除 · 拖动 body 平移 · 拖 8 个 handle 缩放
+        </template>
       </span>
     </div>
 
@@ -76,6 +89,27 @@
       </el-select>
     </div>
 
+    <!-- 选中 bbox 时的类别修改下拉 (编辑模式) -->
+    <div class="cat-bar" v-else-if="selectedIndex !== null">
+      <span>选中 bbox #{{ selectedIndex + 1 }} 类别:</span>
+      <el-select
+        :model-value="selectedCategoryId"
+        @update:model-value="(v: number | null) => changeSelectedCategory(v)"
+        size="small" style="width: 200px;" filterable
+      >
+        <el-option
+          v-for="c in categories" :key="c.id" :value="c.id"
+          :label="c.name"
+        >
+          <span class="cat-dot" :style="{ background: colorOf(c.id) }"></span>
+          {{ c.name }}
+        </el-option>
+      </el-select>
+      <el-button size="small" type="danger" plain @click="removeSelected">
+        <el-icon><Delete /></el-icon>删除 (Del)
+      </el-button>
+    </div>
+
     <!-- bbox 列表 (用于在编辑模式选择 / 改类别 / 删除) -->
     <div class="bbox-list" v-if="modelValue && modelValue.length > 0">
       <div class="list-title">当前 bbox ({{ modelValue.length }})</div>
@@ -99,14 +133,22 @@
         保存 ({{ modelValue?.length || 0 }})
       </el-button>
       <el-button @click="$emit('cancel')">取消</el-button>
+      <span class="shortcut-hint">
+        <el-tag size="small" effect="plain">D 绘制</el-tag>
+        <el-tag size="small" effect="plain">E 编辑</el-tag>
+        <el-tag size="small" effect="plain">N 下一张</el-tag>
+        <el-tag size="small" effect="plain">P 上一张</el-tag>
+        <el-tag size="small" effect="plain">Del 删除</el-tag>
+        <el-tag size="small" effect="plain">Ctrl+Z 撤销</el-tag>
+      </span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Check, EditPen, Select } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Check, EditPen, Select, Delete, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
 
 // ============== Props / Emits ==============
 interface BBox {
@@ -135,6 +177,8 @@ const emit = defineEmits<{
   (e: 'update:modelValue', v: BBox[]): void
   (e: 'save', bboxes: BBox[]): void
   (e: 'cancel'): void
+  (e: 'next'): void
+  (e: 'prev'): void
 }>()
 
 // ============== State ==============
@@ -149,9 +193,57 @@ const canvasSize = ref<{ w: number; h: number }>({ w: 0, h: 0 })
 // 绘制中临时状态
 const drawing = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
 
+// 拖动 / 缩放 中临时状态 (v2.2.0 新增)
+interface DragState {
+  kind: 'move' | 'resize'
+  handle?: ResizeHandle  // 仅 resize 时
+  idx: number
+  start: { x: number; y: number }  // canvas 像素
+  orig: BBox  // 归一化
+}
+const dragging = ref<DragState | null>(null)
+
+// 鼠标 hover 在 handle 上 (用于改变 cursor)
+const hoverHandle = ref<ResizeHandle | null>(null)
+
+type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+
+// 撤销栈 (v2.2.0 新增, 仅跟踪 modelValue 变更)
+interface HistoryEntry { bboxes: BBox[] }
+const undoStack = ref<HistoryEntry[]>([])
+const redoStack = ref<HistoryEntry[]>([])
+const MAX_HISTORY = 20
+function snapshot() {
+  undoStack.value.push({ bboxes: JSON.parse(JSON.stringify(props.modelValue || [])) })
+  if (undoStack.value.length > MAX_HISTORY) undoStack.value.shift()
+  redoStack.value = []
+}
+const canUndo = computed(() => undoStack.value.length > 0)
+const canRedo = computed(() => redoStack.value.length > 0)
+function undo() {
+  if (!canUndo.value) return
+  redoStack.value.push({ bboxes: JSON.parse(JSON.stringify(props.modelValue || [])) })
+  const prev = undoStack.value.pop()!
+  emit('update:modelValue', prev.bboxes)
+  ElMessage.success('已撤销')
+}
+function redo() {
+  if (!canRedo.value) return
+  undoStack.value.push({ bboxes: JSON.parse(JSON.stringify(props.modelValue || [])) })
+  const next = redoStack.value.pop()!
+  emit('update:modelValue', next.bboxes)
+  ElMessage.success('已重做')
+}
+
 // dirty: modelValue 与初始化时不一致视为有未保存改动
 const initial = ref<string>(JSON.stringify(props.modelValue || []))
 const dirty = computed(() => JSON.stringify(props.modelValue || []) !== initial.value)
+
+// 选中 bbox 的 category_id (用于编辑模式下拉双向绑定)
+const selectedCategoryId = computed(() => {
+  if (selectedIndex.value === null) return null
+  return props.modelValue?.[selectedIndex.value]?.category_id ?? null
+})
 
 // ============== 类别调色板 (固定 8 色, 按 category_id hash) ==============
 const PALETTE = [
@@ -178,10 +270,15 @@ watch(
   { immediate: true }
 )
 
-// 监听 imageUrl 变化, 重新加载图片
+// 监听 imageUrl 变化, 重新加载图片; 加载时清空选中 + 撤销栈
 watch(
   () => props.imageUrl,
-  () => loadImage()
+  () => {
+    selectedIndex.value = null
+    undoStack.value = []
+    redoStack.value = []
+    loadImage()
+  }
 )
 onMounted(() => loadImage())
 
@@ -219,62 +316,200 @@ function pixelToNorm(p: { x: number; y: number }): { x: number; y: number } {
     y: Math.max(0, Math.min(1, p.y / canvasSize.value.h)),
   }
 }
+function normToPixel(n: { x: number; y: number }): { x: number; y: number } {
+  return { x: n.x * canvasSize.value.w, y: n.y * canvasSize.value.h }
+}
+
+// ============== Handle 命中检测 (v2.2.0 新增) ==============
+const HANDLE_SIZE = 6  // 像素
+function getHandles(b: BBox): Record<ResizeHandle, { x: number; y: number }> {
+  // 返回 8 个 handle 的像素坐标
+  const x1 = b.x_min * canvasSize.value.w
+  const y1 = b.y_min * canvasSize.value.h
+  const x2 = b.x_max * canvasSize.value.w
+  const y2 = b.y_max * canvasSize.value.h
+  const xm = (x1 + x2) / 2
+  const ym = (y1 + y2) / 2
+  return {
+    nw: { x: x1, y: y1 }, n: { x: xm, y: y1 }, ne: { x: x2, y: y1 },
+    e: { x: x2, y: ym }, se: { x: x2, y: y2 }, s: { x: xm, y: y2 },
+    sw: { x: x1, y: y2 }, w: { x: x1, y: ym },
+  }
+}
+function hitTestHandle(p: { x: number; y: number }, b: BBox): ResizeHandle | null {
+  const handles = getHandles(b)
+  for (const [name, pos] of Object.entries(handles) as [ResizeHandle, { x: number; y: number }][]) {
+    if (Math.abs(p.x - pos.x) <= HANDLE_SIZE && Math.abs(p.y - pos.y) <= HANDLE_SIZE) {
+      return name
+    }
+  }
+  return null
+}
+function handleCursor(h: ResizeHandle | null): string {
+  if (!h) return 'default'
+  const map: Record<ResizeHandle, string> = {
+    nw: 'nwse-resize', se: 'nwse-resize',
+    ne: 'nesw-resize', sw: 'nesw-resize',
+    n: 'ns-resize', s: 'ns-resize',
+    e: 'ew-resize', w: 'ew-resize',
+  }
+  return map[h]
+}
 
 // ============== 鼠标事件处理 ==============
 function onMouseDown(e: MouseEvent) {
+  const p = eventToImage(e)
   if (mode.value === 'draw') {
-    const p = eventToImage(e)
     drawing.value = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }
-  } else {
-    // edit: 命中检测
-    const p = pixelToNorm(eventToImage(e))
-    const hitIdx = findHitIndex(p)
-    selectIndex(hitIdx)
+    return
+  }
+  // edit 模式
+  const pn = pixelToNorm(p)
+  // 1) 先查 handle (仅在选中 bbox 上查)
+  if (selectedIndex.value !== null) {
+    const sel = props.modelValue?.[selectedIndex.value]
+    if (sel) {
+      const h = hitTestHandle(p, sel)
+      if (h) {
+        dragging.value = {
+          kind: 'resize', handle: h, idx: selectedIndex.value,
+          start: p, orig: { ...sel },
+        }
+        return
+      }
+    }
+  }
+  // 2) 命中 body -> 选中 + 准备拖动
+  const hitIdx = findHitIndex(pn)
+  selectIndex(hitIdx)
+  if (hitIdx !== null) {
+    const sel = props.modelValue?.[hitIdx]
+    if (sel) {
+      dragging.value = {
+        kind: 'move', idx: hitIdx,
+        start: p, orig: { ...sel },
+      }
+    }
   }
 }
 function onMouseMove(e: MouseEvent) {
-  if (!drawing.value) return
-  const p = eventToImage(e)
-  drawing.value.x1 = p.x
-  drawing.value.y1 = p.y
-  draw()
+  if (drawing.value) {
+    const p = eventToImage(e)
+    drawing.value.x1 = p.x
+    drawing.value.y1 = p.y
+    draw()
+    return
+  }
+  if (dragging.value) {
+    const p = eventToImage(e)
+    handleDrag(p)
+    draw()
+    return
+  }
+  // hover: 仅在 edit 模式 + 选中 bbox 时检测 handle
+  if (mode.value === 'edit' && selectedIndex.value !== null) {
+    const p = eventToImage(e)
+    const sel = props.modelValue?.[selectedIndex.value]
+    const h = sel ? hitTestHandle(p, sel) : null
+    if (h !== hoverHandle.value) {
+      hoverHandle.value = h
+      if (canvasRef.value) canvasRef.value.style.cursor = handleCursor(h)
+    }
+  } else {
+    if (canvasRef.value) canvasRef.value.style.cursor = mode.value === 'draw' ? 'crosshair' : 'default'
+  }
 }
 function onMouseUp(_e: MouseEvent) {
-  if (!drawing.value) return
-  const d = drawing.value
-  drawing.value = null
-  // 归一化 + 排序
-  const xMin = Math.min(d.x0, d.x1) / canvasSize.value.w
-  const yMin = Math.min(d.y0, d.y1) / canvasSize.value.h
-  const xMax = Math.max(d.x0, d.x1) / canvasSize.value.w
-  const yMax = Math.max(d.y0, d.y1) / canvasSize.value.h
-  // 过滤太小的拖拽 (像素 < 5)
-  const wPx = Math.abs(d.x1 - d.x0)
-  const hPx = Math.abs(d.y1 - d.y0)
-  if (wPx < 5 || hPx < 5) {
-    draw(); return
+  if (drawing.value) {
+    const d = drawing.value
+    drawing.value = null
+    // 归一化 + 排序
+    const xMin = Math.min(d.x0, d.x1) / canvasSize.value.w
+    const yMin = Math.min(d.y0, d.y1) / canvasSize.value.h
+    const xMax = Math.max(d.x0, d.x1) / canvasSize.value.w
+    const yMax = Math.max(d.y0, d.y1) / canvasSize.value.h
+    // 过滤太小的拖拽 (像素 < 5)
+    const wPx = Math.abs(d.x1 - d.x0)
+    const hPx = Math.abs(d.y1 - d.y0)
+    if (wPx < 5 || hPx < 5) {
+      draw(); return
+    }
+    // 类别必须选
+    if (defaultCategoryId.value == null) {
+      ElMessage.warning('请先在下方选一个类别')
+      draw(); return
+    }
+    snapshot()
+    const next = [
+      ...(props.modelValue || []),
+      {
+        x_min: round(xMin),
+        y_min: round(yMin),
+        x_max: round(xMax),
+        y_max: round(yMax),
+        category_id: defaultCategoryId.value,
+      },
+    ]
+    emit('update:modelValue', next)
+    draw()
+    return
   }
-  // 类别必须选
-  if (defaultCategoryId.value == null) {
-    ElMessage.warning('请先在下方选一个类别')
-    draw(); return
+  if (dragging.value) {
+    dragging.value = null
+    draw()
   }
-  const next = [
-    ...(props.modelValue || []),
-    {
-      x_min: round(xMin),
-      y_min: round(yMin),
-      x_max: round(xMax),
-      y_max: round(yMax),
-      category_id: defaultCategoryId.value,
-    },
-  ]
-  emit('update:modelValue', next)
-  draw()
 }
+
+function handleDrag(cur: { x: number; y: number }) {
+  const d = dragging.value!
+  const list = [...(props.modelValue || [])]
+  const b = { ...d.orig }
+  if (d.kind === 'move') {
+    const dx = (cur.x - d.start.x) / canvasSize.value.w
+    const dy = (cur.y - d.start.y) / canvasSize.value.h
+    const w = b.x_max - b.x_min
+    const h = b.y_max - b.y_min
+    let nx = d.orig.x_min + dx
+    let ny = d.orig.y_min + dy
+    nx = Math.max(0, Math.min(1 - w, nx))
+    ny = Math.max(0, Math.min(1 - h, ny))
+    b.x_min = round(nx)
+    b.y_min = round(ny)
+    b.x_max = round(nx + w)
+    b.y_max = round(ny + h)
+  } else if (d.kind === 'resize' && d.handle) {
+    // 把 orig 转像素坐标
+    const o1 = normToPixel({ x: d.orig.x_min, y: d.orig.y_min })
+    const o2 = normToPixel({ x: d.orig.x_max, y: d.orig.y_max })
+    let nx1 = o1.x, ny1 = o1.y, nx2 = o2.x, ny2 = o2.y
+    if (d.handle.includes('w')) nx1 = cur.x
+    if (d.handle.includes('e')) nx2 = cur.x
+    if (d.handle.includes('n')) ny1 = cur.y
+    if (d.handle.includes('s')) ny2 = cur.y
+    // 防止反向 (最小 5 像素)
+    if (nx2 - nx1 < 5) {
+      if (d.handle.includes('w')) nx1 = nx2 - 5
+      else nx2 = nx1 + 5
+    }
+    if (ny2 - ny1 < 5) {
+      if (d.handle.includes('n')) ny1 = ny2 - 5
+      else ny2 = ny1 + 5
+    }
+    // 限制在画布内
+    nx1 = Math.max(0, nx1); ny1 = Math.max(0, ny1)
+    nx2 = Math.min(canvasSize.value.w, nx2); ny2 = Math.min(canvasSize.value.h, ny2)
+    b.x_min = round(nx1 / canvasSize.value.w)
+    b.y_min = round(ny1 / canvasSize.value.h)
+    b.x_max = round(nx2 / canvasSize.value.w)
+    b.y_max = round(ny2 / canvasSize.value.h)
+  }
+  list[d.idx] = b
+  emit('update:modelValue', list)
+}
+
 function findHitIndex(p: { x: number; y: number }): number | null {
   const list = props.modelValue || []
-  for (let i = 0; i < list.length; i++) {
+  for (let i = list.length - 1; i >= 0; i--) {  // 倒序, 上层优先
     const b = list[i]
     if (p.x >= b.x_min && p.x <= b.x_max && p.y >= b.y_min && p.y <= b.y_max) {
       return i
@@ -289,28 +524,78 @@ function selectIndex(i: number | null) {
 function removeAt(i: number) {
   const list = [...(props.modelValue || [])]
   list.splice(i, 1)
+  snapshot()
   emit('update:modelValue', list)
   if (selectedIndex.value === i) selectedIndex.value = null
   else if (selectedIndex.value != null && selectedIndex.value > i) selectedIndex.value -= 1
   draw()
 }
+function removeSelected() {
+  if (selectedIndex.value === null) return
+  removeAt(selectedIndex.value)
+}
+function changeSelectedCategory(catId: number | null) {
+  if (selectedIndex.value === null || catId == null) return
+  const list = [...(props.modelValue || [])]
+  list[selectedIndex.value] = { ...list[selectedIndex.value], category_id: catId }
+  snapshot()
+  emit('update:modelValue', list)
+  draw()
+}
 function clearDraft() {
   if (!props.modelValue || props.modelValue.length === 0) return
-  ElMessageBoxConfirm('清空所有 bbox? (未保存)').then(() => {
+  ElMessageBox.confirm('清空所有 bbox? (未保存)', '确认', {
+    type: 'warning',
+    confirmButtonText: '清空',
+    cancelButtonText: '取消',
+  }).then(() => {
+    snapshot()
     emit('update:modelValue', [])
     selectedIndex.value = null
     draw()
   }).catch(() => {})
 }
 
-// 简化: 内联 ElMessageBox.confirm (避免再 import)
-function ElMessageBoxConfirm(msg: string): Promise<void> {
-  return ElMessageBox.confirm(msg, '确认', {
-    type: 'warning',
-    confirmButtonText: '清空',
-    cancelButtonText: '取消',
-  }).then(() => undefined).catch(() => { throw new Error('cancel') })
+function setMode(m: 'draw' | 'edit') {
+  mode.value = m
+  if (m === 'draw') {
+    selectedIndex.value = null
+    if (canvasRef.value) canvasRef.value.style.cursor = 'crosshair'
+  } else {
+    if (canvasRef.value) canvasRef.value.style.cursor = 'default'
+  }
 }
+
+// ============== 键盘快捷键 (v2.2.0 新增) ==============
+function onKey(e: KeyboardEvent) {
+  // 避免在 input/textarea 内触发
+  const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) {
+    return
+  }
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key === 'z' && !e.shiftKey) {
+      e.preventDefault(); undo(); return
+    }
+    if ((e.key === 'z' && e.shiftKey) || e.key === 'y') {
+      e.preventDefault(); redo(); return
+    }
+  }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (selectedIndex.value !== null) {
+      e.preventDefault()
+      removeSelected()
+    }
+    return
+  }
+  const k = e.key.toLowerCase()
+  if (k === 'd') setMode('draw')
+  else if (k === 'e') setMode('edit')
+  else if (k === 'n') emit('next')
+  else if (k === 'p') emit('prev')
+}
+onMounted(() => window.addEventListener('keydown', onKey))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 // ============== 保存 / 取消 ==============
 function onSave() {
@@ -351,16 +636,34 @@ function draw() {
     const color = colorOf(b.category_id)
     const selected = selectedIndex.value === i
     ctx.strokeStyle = color
-    ctx.lineWidth = selected ? 4 : 2
+    ctx.lineWidth = selected ? 3 : 2
     ctx.strokeRect(x, y, w, h)
     // 标签
     ctx.fillStyle = color
-    ctx.fillRect(x, y - 18, 8 + ctx.measureText(`#${i + 1} ${catName(b.category_id)}`).width, 18)
+    const label = `#${i + 1} ${catName(b.category_id)}`
+    const labelW = 8 + ctx.measureText(label).width
+    ctx.fillRect(x, y - 18, labelW, 18)
     ctx.fillStyle = '#fff'
     ctx.font = '12px sans-serif'
     ctx.textAlign = 'left'
-    ctx.fillText(`#${i + 1} ${catName(b.category_id)}`, x + 4, y - 4)
+    ctx.fillText(label, x + 4, y - 4)
   })
+  // 选中 bbox 的 8 个 handle (v2.2.0 新增)
+  if (mode.value === 'edit' && selectedIndex.value !== null) {
+    const sel = list[selectedIndex.value]
+    if (sel) {
+      const handles = getHandles(sel)
+      for (const [name, pos] of Object.entries(handles) as [ResizeHandle, { x: number; y: number }][]) {
+        const isHover = hoverHandle.value === name
+        ctx.fillStyle = isHover ? '#ff5722' : '#fff'
+        ctx.strokeStyle = '#409eff'
+        ctx.lineWidth = 2
+        const s = isHover ? HANDLE_SIZE + 1 : HANDLE_SIZE
+        ctx.fillRect(pos.x - s / 2, pos.y - s / 2, s, s)
+        ctx.strokeRect(pos.x - s / 2, pos.y - s / 2, s, s)
+      }
+    }
+  }
   // 绘制中
   if (drawing.value) {
     const d = drawing.value
@@ -458,5 +761,13 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 8px;
   margin-top: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.shortcut-hint {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
 }
 </style>
