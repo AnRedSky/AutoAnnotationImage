@@ -572,10 +572,12 @@ const currentModelLabel = computed(() => {
 
 // S7 新增: 当前 dataset 的 task_type 元信息, 用于在顶部展示任务类型徽章
 // 找不到 dataset 时回退到 classification, 保持向后兼容
-const currentTaskType = computed(() => {
+const currentTaskTypeRaw = computed(() => {
   const ds = datasets.value.find((d: any) => d.id === datasetId.value)
-  return getTaskTypeMeta(ds?.task_type || 'classification')
+  return ds?.task_type || 'classification'
 })
+// v2.3.0 S10: 检测任务 IoU 阈值 (NMS), 仅 detection 时显示
+const iouThreshold = ref(0.45)
 </script>
 
 <template>
@@ -628,8 +630,11 @@ const currentTaskType = computed(() => {
             {{ currentTaskType.label }}
           </el-tag>
         </el-form-item>
-        <el-form-item >
-          <!-- 固定宽度容器: 防止 fine-tune / 基础模型 切换时表单 reflow 导致其他控件左右跳动 -->
+        <!-- v2.3.0 S10: 模型选择区按 task_type 分派
+             classification: useFinetune 开关 + fine-tune/基础模型下拉 (原有)
+             detection:     IoU 阈值 (新增)
+             segmentation:  不显示 -->
+        <el-form-item v-if="currentTaskTypeRaw === 'classification'">
           <div class="model-select-slot">
             <!-- fine-tune 模式下: 显示项目训练的微调模型 (默认=激活的) -->
             <el-tooltip
@@ -682,11 +687,16 @@ const currentTaskType = computed(() => {
           <el-slider v-model="threshold" :min="0.1" :max="1.0" :step="0.05" style="width: 160px;"
             :format-tooltip="(v: number) => `${(v * 100).toFixed(0)}%`" />
         </el-form-item>
-        <el-form-item label="是否使用项目训练模型">
+        <el-form-item v-if="currentTaskTypeRaw === 'classification'" label="是否使用项目训练模型">
           <!-- 严格模式: 默认开启 fine-tune, 基础模型只作冷启动排查 -->
           <el-switch v-model="useFinetune"
             active-text="是" inactive-text="否"
             inline-prompt style="--el-switch-on-color: #67c23a;" />
+        </el-form-item>
+        <!-- v2.3.0 S10: 检测任务专属 IoU 阈值 (NMS) -->
+        <el-form-item v-if="currentTaskTypeRaw === 'detection'" label="IoU 阈值 (NMS)">
+          <el-slider v-model="iouThreshold" :min="0.1" :max="0.95" :step="0.05" style="width: 160px;"
+            :format-tooltip="(v: number) => v.toFixed(2)" />
         </el-form-item>
         <el-form-item>
           <el-tooltip
@@ -744,37 +754,7 @@ const currentTaskType = computed(() => {
                  - segmentation: SegmentationAnnotator (canvas 画刷画 mask)
                  - classification: 沿用原 img + AI 候选 (不变) -->
             <template v-if="image.task_type === 'detection'">
-              <!-- v2.2.0 S9.3: 跨图 bbox 复制建议 -->
-              <el-alert
-                v-if="copySuggestions.length > 0"
-                type="info" :closable="true" show-icon
-                style="margin-bottom: 8px;"
-                @close="copySuggestions = []"
-              >
-                <template #title>
-                  <span>智能建议: 同数据集 {{ copySuggestionSourceCount }} 张已标注图中,</span>
-                  <span style="margin: 0 6px;">{{ copySuggestions.length }} 个类别</span>
-                  <span>可基于平均位置复制</span>
-                </template>
-                <div style="margin-top: 4px;">
-                  <el-tag
-                    v-for="s in copySuggestions" :key="s.category_id"
-                    size="small" type="info" effect="plain"
-                    style="margin-right: 4px;"
-                  >
-                    {{ catName(s.category_id) }} ×{{ s.source_count }}
-                  </el-tag>
-                  <el-button
-                    type="primary" size="small" :icon="MagicStick"
-                    style="margin-left: 8px;"
-                    @click="applyCopySuggestions"
-                  >应用建议</el-button>
-                  <el-button
-                    type="default" size="small" text
-                    @click="copySuggestions = []"
-                  >忽略</el-button>
-                </div>
-              </el-alert>
+              <!-- v2.3.0 S10: 跨图建议从画布上方移到右侧, 避免占画布空间 -->
               <DetectionAnnotator
                 :image-url="imageApi.fileUrl(image.id)"
                 :image-id="image.id"
@@ -819,8 +799,10 @@ const currentTaskType = computed(() => {
         </el-card>
       </el-col>
       <el-col :span="10">
-        <!-- v2.1.0: AI Top-5 候选仅在 classification 任务显示
-             检测 / 分割任务由 DetectionAnnotator / SegmentationAnnotator 负责标注 -->
+        <!-- v2.3.0 S10: 右侧面板按 task_type 分派
+             - classification: AI 候选 (原)
+             - detection:     操作面板 (跨图建议 + 上一张/下一张 + 进度 + AI 预标注)
+             - segmentation:  暂未实现占位 -->
         <el-card v-if="!image || image.task_type === 'classification'" title="AI 候选标签（Top-5）">
           <el-empty v-if="!loading && candidates.length === 0 && !image" description="请选择数据集" :image-size="80" />
           <el-empty v-else-if="candidates.length === 0" description="该图无 AI 预测, 请直接选择其他类别" :image-size="60" />
@@ -903,6 +885,92 @@ const currentTaskType = computed(() => {
             </el-link>
           </div>
         </el-card>
+
+        <!-- v2.3.0 S10: 检测任务右侧操作面板 -->
+        <el-card v-if="image && image.task_type === 'detection'" title="检测操作面板">
+          <!-- 跨图 bbox 复制建议 -->
+          <el-alert
+            v-if="copySuggestions.length > 0"
+            type="info" :closable="true" show-icon
+            style="margin-bottom: 12px;"
+            @close="copySuggestions = []"
+          >
+            <template #title>
+              <div style="font-size: 12px; line-height: 1.6;">
+                <strong>智能建议</strong>: 基于同数据集 {{ copySuggestionSourceCount }} 张已标注图,
+                <strong>{{ copySuggestions.length }}</strong> 个类别可复制
+              </div>
+            </template>
+            <div style="margin-top: 6px;">
+              <el-tag
+                v-for="s in copySuggestions" :key="s.category_id"
+                size="small" type="info" effect="plain"
+                style="margin-right: 4px; margin-bottom: 4px;"
+              >
+                {{ catName(s.category_id) }} ×{{ s.source_count }}
+              </el-tag>
+              <div style="margin-top: 8px; display: flex; gap: 6px;">
+                <el-button
+                  type="primary" size="small" :icon="MagicStick"
+                  @click="applyCopySuggestions"
+                >应用建议</el-button>
+                <el-button size="small" text @click="copySuggestions = []">忽略</el-button>
+              </div>
+            </div>
+          </el-alert>
+
+          <!-- 主导航: 上一张 / 下一张 -->
+          <div class="op-section">
+            <div class="op-section-title">图片导航</div>
+            <div style="display: flex; gap: 8px; margin-top: 6px;">
+              <el-button
+                style="flex: 1;" :icon="ArrowLeft"
+                @click="loadPrev"
+              >上一张 (P)</el-button>
+              <el-button
+                style="flex: 1;"
+                :type="noMore ? 'info' : 'primary'"
+                :plain="!noMore" :icon="ArrowLeft"
+                :disabled="noMore"
+                @click="loadNext"
+              >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
+            </div>
+            <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
+              当前: <strong>{{ image.filename }}</strong> · ID #{{ image.id }}
+            </div>
+          </div>
+
+          <!-- 当前 bbox 列表 -->
+          <div class="op-section">
+            <div class="op-section-title">
+              当前 bbox ({{ bboxList.length }})
+            </div>
+            <el-empty v-if="bboxList.length === 0" description="尚未画任何 bbox" :image-size="50" />
+            <div v-else style="margin-top: 6px; max-height: 200px; overflow-y: auto;">
+              <el-tag
+                v-for="(b, idx) in bboxList" :key="b.id || idx"
+                size="small" effect="plain"
+                style="margin: 2px 4px 2px 0;"
+                closable
+                @close="removeBBoxAt(idx)"
+              >
+                #{{ idx + 1 }} {{ catName(b.category_id) }}
+              </el-tag>
+            </div>
+          </div>
+
+          <!-- 任务专属提示 -->
+          <div class="op-section">
+            <el-link type="primary" :icon="View" @click="viewDataset">
+              去数据集详情浏览全部图片
+            </el-link>
+          </div>
+        </el-card>
+
+        <!-- v2.3.0 S10: 分割任务占位 -->
+        <el-card v-else-if="image && image.task_type === 'segmentation'" title="分割操作面板">
+          <el-empty description="分割任务操作面板待 S9.5 完善" :image-size="60" />
+        </el-card>
       </el-col>
     </el-row>
   </div>
@@ -910,6 +978,34 @@ const currentTaskType = computed(() => {
 
 <style scoped>
 .stat-card { text-align: center; }
+/* v2.3.0 S10: 检测操作面板 section 样式 */
+.op-section {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #ebeef5;
+}
+.op-section:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.op-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #606266;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+}
+.op-section-title::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 12px;
+  background: #409eff;
+  margin-right: 6px;
+  border-radius: 2px;
+}
 .annotate-canvas {
   display: flex;
   flex-direction: column;

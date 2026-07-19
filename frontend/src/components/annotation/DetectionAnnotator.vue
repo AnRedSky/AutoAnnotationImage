@@ -73,6 +73,18 @@
         @mouseup="onMouseUp"
         @mouseleave="onMouseUp"
       />
+      <!-- v2.3.0 S10: 画布坐标浮标 (左下角) -->
+      <div class="coord-overlay">
+        <span v-if="cursorPos">
+          x: <b>{{ cursorPos.x.toFixed(0) }}</b> ({{ (cursorPos.nx * 100).toFixed(1) }}%)
+          &nbsp;y: <b>{{ cursorPos.y.toFixed(0) }}</b> ({{ (cursorPos.ny * 100).toFixed(1) }}%)
+        </span>
+        <span v-else>移入画布查看坐标</span>
+      </div>
+      <!-- v2.3.0 S10: 画布尺寸 (右下角) -->
+      <div class="size-overlay">
+        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}%
+      </div>
     </div>
 
     <!-- 类别下拉 (绘制模式时设置下一个 bbox 的默认类别) -->
@@ -205,6 +217,15 @@ const dragging = ref<DragState | null>(null)
 
 // 鼠标 hover 在 handle 上 (用于改变 cursor)
 const hoverHandle = ref<ResizeHandle | null>(null)
+
+// v2.3.0 S10: 鼠标坐标浮标
+const cursorPos = ref<{ x: number; y: number; nx: number; ny: number } | null>(null)
+// 缩放比例 (显示用, 0-100%, 1.0=100%)
+const scalePercent = computed(() => {
+  const dw = props.imageWidth || 0
+  if (!dw || !canvasSize.value.w) return '100'
+  return ((canvasSize.value.w / dw) * 100).toFixed(0)
+})
 
 type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
 
@@ -420,6 +441,8 @@ function onMouseMove(e: MouseEvent) {
   }
 }
 function onMouseUp(_e: MouseEvent) {
+  // v2.3.0 S10: 离画布时清空坐标浮标
+  cursorPos.value = null
   if (drawing.value) {
     const d = drawing.value
     drawing.value = null
