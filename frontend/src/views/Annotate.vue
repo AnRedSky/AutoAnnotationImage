@@ -645,8 +645,8 @@ const detAnnot = computed(() => detAnnotRef.value || {})
         </el-form-item>
         <!-- S7 新增: 当前 dataset 任务类型徽章 (数据集旁边) -->
         <el-form-item v-if="datasetId" label="任务类型">
-          <el-tag :type="currentTaskType.type" effect="plain" size="small">
-            {{ currentTaskType.label }}
+          <el-tag :type="getTaskTypeMeta(currentTaskTypeRaw).type" effect="plain" size="small">
+            {{ getTaskTypeMeta(currentTaskTypeRaw).label }}
           </el-tag>
         </el-form-item>
         <!-- v2.3.0 S10: 模型选择区按 task_type 分派
