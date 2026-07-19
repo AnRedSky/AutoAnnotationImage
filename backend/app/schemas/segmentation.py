@@ -52,6 +52,9 @@ class SegmentationTrainRequest(BaseModel):
     crop_size: int = 256
     pretrained_model_path: str = ""
 
+    # 关掉 Pydantic v2 默认的 model_ 命名空间保护, 避免 model_name/model_id 警告
+    model_config = ConfigDict(protected_namespaces=())
+
 
 class SegmentationTrainResponse(BaseModel):
     task_id: str

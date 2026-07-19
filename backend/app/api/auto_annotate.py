@@ -12,7 +12,7 @@ Auto-Annotate API: AI 预标注独立接口
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -35,6 +35,9 @@ class AutoAnnotateRequest(BaseModel):
     model_name: str = "efficientnet_b0"
     confidence_threshold: float = 0.6
     async_mode: bool = False  # True 走 Celery, False 走同步
+
+    # 关掉 Pydantic v2 默认的 model_ 命名空间保护, 避免 model_name 警告
+    model_config = ConfigDict(protected_namespaces=())
 
 
 class AutoAnnotateResponse(BaseModel):
