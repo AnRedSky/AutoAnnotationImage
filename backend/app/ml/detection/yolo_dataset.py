@@ -66,19 +66,18 @@ async def build_class_index_map(
 # ============== 工具: 图片源路径 ==============
 
 def _resolve_image_path(image: ImageModel) -> Path:
-    """ImageModel.file_path → 绝对路径
+    """ImageModel.storage_path → 绝对路径
 
-    - 兼容 file_path 已是绝对路径 (本地存储)
-    - 相对路径则相对 storage_service 的 uploads 根目录
-    - 文件不存在时 raise FileNotFoundError (上层捕获)
+    兼容 image.storage_path 是相对路径 (如 'ds_1/abc.png') 或绝对路径.
+    相对路径: 拼 storage_service.base_dir (settings.UPLOAD_DIR) 的绝对路径
+    文件不存在时 raise FileNotFoundError (上层捕获)
     """
-    fp = image.file_path
-    p = Path(fp)
+    sp = image.storage_path
+    p = Path(sp)
     if p.is_absolute():
         return p
-    # 相对路径: 拼 storage_service.base_path
-    base = Path(storage_service.base_path).resolve()
-    return (base / fp).resolve()
+    base = Path(storage_service.base_dir).resolve()
+    return (base / sp).resolve()
 
 
 # ============== 拆分 train/val ==============
@@ -224,6 +223,8 @@ async def export_yolo_dataset(
 
     # 5) 逐图写文件
     skipped = 0
+    written_train = 0
+    written_val = 0
     for i, img in enumerate(images, start=1):
         try:
             src = _resolve_image_path(img)
@@ -233,7 +234,20 @@ async def export_yolo_dataset(
                     progress_cb("export.skip", i, len(images),
                                 f"missing: {src}")
                 continue
+            # 该图有标注?  无标注也跳过 (YOLO 训练不需要无标注图)
+            img_anns = ann_by_img.get(img.id, [])
+            img_anns = [a for a in img_anns if a.category_id is not None]
+            if not img_anns:
+                skipped += 1
+                if progress_cb:
+                    progress_cb("export.skip", i, len(images),
+                                f"no annotations: img_id={img.id}")
+                continue
             split = "train" if img.id in train_set else "val"
+            if split == "train":
+                written_train += 1
+            else:
+                written_val += 1
             # 5.1) 链接/拷贝图片
             dst_img = workdir / "images" / split / src.name
             try:
@@ -241,10 +255,7 @@ async def export_yolo_dataset(
             except OSError:
                 shutil.copy2(src, dst_img)
             # 5.2) 写 YOLO txt
-            lines = annotations_to_yolo_lines(
-                ann_by_img.get(img.id, []),
-                class_index_map,
-            )
+            lines = annotations_to_yolo_lines(img_anns, class_index_map)
             dst_lbl = workdir / "labels" / split / f"{src.stem}.txt"
             dst_lbl.write_text("\n".join(lines) + ("\n" if lines else ""),
                                encoding="utf-8")
@@ -267,8 +278,8 @@ async def export_yolo_dataset(
         encoding="utf-8",
     )
 
-    train_count = sum(1 for i in img_ids if i in train_set)
-    val_count = sum(1 for i in img_ids if i in val_set)
+    train_count = written_train
+    val_count = written_val
     if progress_cb:
         progress_cb("export.done", len(images), len(images),
                     f"train={train_count} val={val_count} skipped={skipped}")

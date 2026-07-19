@@ -44,5 +44,7 @@ logs/
 uploads/
 data/raw/
 data/processed/
+# 演示/合成数据 (由 scripts/prepare_*_demo.py 生成, 不入版本库)
+demo/data/
 # 系统
 Thumbs.db
