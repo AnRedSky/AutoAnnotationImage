@@ -677,6 +677,83 @@ async def detection_stats(
     }
 
 
+# ============== 跨图复制建议 (v2.2.0 S9.3) ==============
+
+@router.get("/copy-suggestion/{image_id}")
+async def copy_suggestion(
+    image_id: int,
+    min_source_count: int = Query(2, ge=1, description="至少几张图有同类别 bbox 才算建议"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    跨图 bbox 复制建议: 目标图的 task_type='detection', 返回按 category_id 分组的平均 bbox.
+    实现:
+      1) 查目标图所在 dataset
+      2) 拉该 dataset 中已确认/已修正 (status in human_confirmed/human_corrected) 的其他图上
+         同 dataset 的所有 BBoxAnnotation
+      3) 按 category_id 分组, 计算 avg(x_min, y_min, x_max, y_max)
+      4) 仅返回 source_count >= min_source_count 的类别 (避免噪声)
+    返回: [{category_id, avg_x_min, avg_y_min, avg_x_max, avg_y_max, source_count}]
+    """
+    target_img = await db.get(Image, image_id)
+    if not target_img:
+        raise HTTPException(404, f"Image id={image_id} not found")
+    if target_img.task_type != TaskType.DETECTION.value:
+        raise HTTPException(
+            400,
+            f"Image task_type={target_img.task_type!r}, expected 'detection'",
+        )
+
+    # 同 dataset 的所有已确认/已修正图
+    confirmed_rows = (await db.execute(
+        select(BBoxAnnotation)
+        .join(Image, BBoxAnnotation.image_id == Image.id)
+        .where(
+            Image.dataset_id == target_img.dataset_id,
+            Image.task_type == TaskType.DETECTION.value,
+            Image.id != image_id,  # 排除目标图自身
+            Image.status.in_(["human_confirmed", "human_corrected"]),
+        )
+    )).scalars().all()
+
+    # 按 category_id 分组
+    from collections import defaultdict
+    bucket: dict = defaultdict(list)
+    for b in confirmed_rows:
+        if b.category_id is None:
+            continue
+        bucket[b.category_id].append(b)
+
+    suggestions = []
+    for cat_id, items in bucket.items():
+        if len(items) < min_source_count:
+            continue
+        n = len(items)
+        avg_x_min = sum(b.x_min for b in items) / n
+        avg_y_min = sum(b.y_min for b in items) / n
+        avg_x_max = sum(b.x_max for b in items) / n
+        avg_y_max = sum(b.y_max for b in items) / n
+        suggestions.append({
+            "category_id": cat_id,
+            "avg_x_min": round(avg_x_min, 4),
+            "avg_y_min": round(avg_y_min, 4),
+            "avg_x_max": round(avg_x_max, 4),
+            "avg_y_max": round(avg_y_max, 4),
+            "source_count": n,
+        })
+
+    # 按 source_count desc 排序
+    suggestions.sort(key=lambda x: x["source_count"], reverse=True)
+
+    return {
+        "image_id": image_id,
+        "dataset_id": target_img.dataset_id,
+        "suggestions": suggestions,
+        "total_source_images": len({b.image_id for b in confirmed_rows}),
+    }
+
+
 @router.post("/models/{model_id}/deactivate")
 async def deactivate_detection_model(
     model_id: int,

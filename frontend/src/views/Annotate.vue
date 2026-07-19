@@ -202,6 +202,7 @@ const fillImage = (item: any) => {
   // 按 task_type 拉取已有标注
   if (item?.id && item.task_type === 'detection') {
     loadDetectionAnnotations(item.id)
+    loadCopySuggestion(item.id)
   } else if (item?.id && item.task_type === 'segmentation') {
     loadSegmentationMask(item.id)
   }
@@ -223,6 +224,43 @@ const loadDetectionAnnotations = async (imageId: number) => {
     bboxList.value = []
     // 静默失败: 没标就是没标
   }
+}
+
+// v2.2.0 S9.3: 跨图 bbox 复制建议
+const copySuggestions = ref<Array<{
+  category_id: number
+  avg_x_min: number; avg_y_min: number
+  avg_x_max: number; avg_y_max: number
+  source_count: number
+}>>([])
+const copySuggestionSourceCount = ref(0)
+const loadCopySuggestion = async (imageId: number) => {
+  copySuggestions.value = []
+  copySuggestionSourceCount.value = 0
+  try {
+    const r: any = await detectionApi.copySuggestion(imageId)
+    copySuggestions.value = r?.suggestions || []
+    copySuggestionSourceCount.value = r?.total_source_images || 0
+  } catch (e: any) {
+    // 静默失败
+  }
+}
+const applyCopySuggestions = () => {
+  if (copySuggestions.value.length === 0) return
+  // 追加到 bboxList (避免覆盖已有标注)
+  const newBoxes = copySuggestions.value.map((s) => ({
+    x_min: s.avg_x_min, y_min: s.avg_y_min,
+    x_max: s.avg_x_max, y_max: s.avg_y_max,
+    category_id: s.category_id,
+  }))
+  bboxList.value = [...bboxList.value, ...newBoxes]
+  ElMessage.success(`已应用 ${newBoxes.length} 个建议 bbox, 可在画布上微调`)
+  copySuggestions.value = []
+}
+// 类别名查表 (弹窗 tag 用)
+function catName(catId: number): string {
+  const c = categories.find((x: any) => x.id === catId)
+  return c?.name || `cls_${catId}`
 }
 
 /** 加载某图的已有 mask (作为初始 mask 渲染到画布) */
@@ -706,6 +744,37 @@ const currentTaskType = computed(() => {
                  - segmentation: SegmentationAnnotator (canvas 画刷画 mask)
                  - classification: 沿用原 img + AI 候选 (不变) -->
             <template v-if="image.task_type === 'detection'">
+              <!-- v2.2.0 S9.3: 跨图 bbox 复制建议 -->
+              <el-alert
+                v-if="copySuggestions.length > 0"
+                type="info" :closable="true" show-icon
+                style="margin-bottom: 8px;"
+                @close="copySuggestions = []"
+              >
+                <template #title>
+                  <span>智能建议: 同数据集 {{ copySuggestionSourceCount }} 张已标注图中,</span>
+                  <span style="margin: 0 6px;">{{ copySuggestions.length }} 个类别</span>
+                  <span>可基于平均位置复制</span>
+                </template>
+                <div style="margin-top: 4px;">
+                  <el-tag
+                    v-for="s in copySuggestions" :key="s.category_id"
+                    size="small" type="info" effect="plain"
+                    style="margin-right: 4px;"
+                  >
+                    {{ catName(s.category_id) }} ×{{ s.source_count }}
+                  </el-tag>
+                  <el-button
+                    type="primary" size="small" :icon="MagicStick"
+                    style="margin-left: 8px;"
+                    @click="applyCopySuggestions"
+                  >应用建议</el-button>
+                  <el-button
+                    type="default" size="small" text
+                    @click="copySuggestions = []"
+                  >忽略</el-button>
+                </div>
+              </el-alert>
               <DetectionAnnotator
                 :image-url="imageApi.fileUrl(image.id)"
                 :image-id="image.id"

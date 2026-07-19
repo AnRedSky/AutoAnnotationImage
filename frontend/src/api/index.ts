@@ -440,6 +440,9 @@ export const detectionApi = {
   // ---- 统计 (v2.2.0 S9.2) ----
   stats: (datasetId: number) =>
     http.get(`/detection/stats/${datasetId}`),
+  // ---- 跨图复制建议 (v2.2.0 S9.3) ----
+  copySuggestion: (imageId: number) =>
+    http.get(`/detection/copy-suggestion/${imageId}`),
   // ---- 训练 ----
   startTrain: (data: {
     dataset_id: number
