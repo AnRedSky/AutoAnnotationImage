@@ -413,6 +413,13 @@ const currentModelLabel = computed(() => {
   }
   return `${modelName.value} (基础模型)`
 })
+
+// S7 新增: 当前 dataset 的 task_type 元信息, 用于在顶部展示任务类型徽章
+// 找不到 dataset 时回退到 classification, 保持向后兼容
+const currentTaskType = computed(() => {
+  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
+  return getTaskTypeMeta(ds?.task_type || 'classification')
+})
 </script>
 
 <template>
@@ -458,6 +465,12 @@ const currentModelLabel = computed(() => {
           <el-select v-model="datasetId" placeholder="请选择" class="app-select" filterable>
             <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
+        </el-form-item>
+        <!-- S7 新增: 当前 dataset 任务类型徽章 (数据集旁边) -->
+        <el-form-item v-if="datasetId" label="任务类型">
+          <el-tag :type="currentTaskType.type" effect="plain" size="small">
+            {{ currentTaskType.label }}
+          </el-tag>
         </el-form-item>
         <el-form-item >
           <!-- 固定宽度容器: 防止 fine-tune / 基础模型 切换时表单 reflow 导致其他控件左右跳动 -->

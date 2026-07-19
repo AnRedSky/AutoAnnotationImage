@@ -5,6 +5,7 @@ import { Grid, CircleCheck, Aim, TrendCharts, Delete, Search, Refresh,
   VideoPlay, VideoPause
 } from '@element-plus/icons-vue'
 import { modelApi } from '@/api'
+import { TASK_TYPE_OPTIONS, getTaskTypeMeta } from '@/utils/taskType'
 
 const data = ref<any[]>([])
 const loading = ref(false)
@@ -21,6 +22,8 @@ const batchDeleting = ref(false)
 const filterKeyword = ref('')
 // 数据集下拉筛选: '' 表示全部
 const filterDatasetId = ref<number | ''>('')
+// 任务类型下拉筛选: '' 表示全部, 与后端 dataset.task_type 对齐
+const filterTaskType = ref<string>('')
 
 // 分页 (client-side, 后端 list 当前不分页)
 const page = ref(1)
@@ -69,6 +72,11 @@ const filteredData = computed(() => {
     // 数据集下拉
     if (filterDatasetId.value !== '' && m.dataset_id !== filterDatasetId.value) {
       return false
+    }
+    // 任务类型下拉 (S7 新增, 旧数据没 task_type 时回退到 classification)
+    if (filterTaskType.value) {
+      const t = m.task_type || 'classification'
+      if (t !== filterTaskType.value) return false
     }
     return true
   })
@@ -365,6 +373,21 @@ const resetFilters = () => {
           :value="ds.id"
         />
       </el-select>
+      <!-- S7 新增: 任务类型筛选 (默认全部) -->
+      <el-select
+        v-model="filterTaskType"
+        clearable
+        placeholder="按任务类型筛选"
+        class="app-select filter-task-type"
+        @change="onFilterChange"
+      >
+        <el-option label="全部任务类型" value="" />
+        <el-option
+          v-for="opt in TASK_TYPE_OPTIONS" :key="opt.value"
+          :label="opt.label"
+          :value="opt.value"
+        />
+      </el-select>
       <el-input
         v-model="filterKeyword"
         :prefix-icon="Search"
@@ -457,6 +480,18 @@ const resetFilters = () => {
       <el-table-column prop="base_model" label="基础模型" min-width="120" align="center">
         <template #default="{ row }">
           <el-tag size="small" type="info" effect="plain">{{ row.base_model }}</el-tag>
+        </template>
+      </el-table-column>
+      <!-- S7 新增: 任务类型列 (旧数据没 task_type 字段时回退 classification) -->
+      <el-table-column label="任务类型" width="120" align="center">
+        <template #default="{ row }">
+          <el-tag
+            :type="getTaskTypeMeta(row.task_type || 'classification').type"
+            effect="plain"
+            size="small"
+          >
+            {{ getTaskTypeMeta(row.task_type || 'classification').label }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="is_active" label="状态" width="120" align="center">
@@ -820,6 +855,8 @@ const resetFilters = () => {
   flex-wrap: wrap;             /* 控件多时换行, 避免单行过挤 */
 }
 .filter-keyword { width: 240px; flex-shrink: 0; }
+/* S7 新增: 任务类型筛选下拉固定宽度, 防止 reflow */
+.filter-task-type { width: 160px; flex-shrink: 0; }
 .header-actions {
   display: flex;
   align-items: center;

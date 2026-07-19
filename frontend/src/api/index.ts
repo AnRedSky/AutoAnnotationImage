@@ -418,3 +418,191 @@ export const statsApi = {
     http.get(`/stats/timeline/${datasetId}`, { params: { days } }),
   annotatorEfficiency: () => http.get('/stats/annotator-efficiency')
 }
+
+// ============== v2.0.0 S3+: 目标检测 ==============
+/**
+ * 目标检测 API 客户端 (与后端 /api/detection/* 端点对齐)
+ * 包含: bbox 标注 CRUD / YOLO 训练 / 自动标注 / SSE 进度 / 训练历史
+ */
+export const detectionApi = {
+  // ---- bbox 标注 ----
+  listBBoxes: (imageId: number) =>
+    http.get(`/detection/annotations/${imageId}`),
+  saveBBox: (imageId: number, data: {
+    x_min: number; y_min: number; x_max: number; y_max: number;
+    category_id: number; confidence?: number; source?: string;
+  }) => http.post('/detection/annotations/save', data, {
+    params: { image_id: imageId },
+  }),
+  removeBBox: (id: number) => http.delete(`/detection/annotations/${id}`),
+  clearBBoxes: (imageId: number) =>
+    http.delete(`/detection/annotations/clear/${imageId}`),
+  // ---- 训练 ----
+  startTrain: (data: {
+    dataset_id: number
+    model_name?: string         // yolov8n/s/m/l/x
+    model_alias?: string        // 落盘 ModelVersion.name
+    epochs?: number
+    imgsz?: number
+    batch?: number
+    val_ratio?: number
+    device?: string
+  }) => http.post('/detection/train', data),
+  // ---- 自动标注 ----
+  startAutoAnnotate: (data: {
+    dataset_id: number
+    model_version_id: number
+    conf_threshold?: number
+    iou_threshold?: number
+    imgsz?: number
+    device?: string
+    overwrite_existing?: boolean
+  }) => http.post('/detection/auto-annotate', data),
+  // ---- 进度 (旧: 轮询; 新: SSE) ----
+  progress: (taskId: string) => http.get(`/detection/progress/${taskId}`),
+  history: (taskId: string) => http.get(`/detection/history/${taskId}`),
+  // ---- 模型版本管理 ----
+  listModels: (params?: { dataset_id?: number; task_type?: string }) =>
+    http.get('/detection/models/', { params: params || {} }),
+  activateModel: (id: number) => http.post(`/detection/models/${id}/activate`),
+  // ---- SSE 实时进度 (复用 trainingApi.streamProgress 同源设计) ----
+  streamProgress: (
+    taskId: string,
+    callbacks: {
+      onMessage: (data: any) => void
+      onComplete?: () => void
+      onError?: (err: Error) => void
+    }
+  ): (() => void) => {
+    const baseURL = (http.defaults.baseURL as string) || ''
+    const token = localStorage.getItem('token') || ''
+    const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+    const url = `${baseURL}/detection/progress/stream/${taskId}${qs}`
+
+    const controller = new AbortController()
+    let finished = false
+    const finish = (code: 'complete' | 'error', err?: Error) => {
+      if (finished) return
+      finished = true
+      if (code === 'complete') callbacks.onComplete?.()
+      else if (err) callbacks.onError?.(err)
+      try { controller.abort() } catch {}
+    }
+    ;(async () => {
+      let res: Response
+      try {
+        res = await fetch(url, {
+          method: 'GET', signal: controller.signal,
+          headers: { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' },
+        })
+      } catch (e: any) {
+        if (e?.name !== 'AbortError') finish('error', e instanceof Error ? e : new Error(String(e)))
+        return
+      }
+      if (!res.ok || !res.body) {
+        finish('error', new Error(`SSE 连接失败: HTTP ${res.status}`))
+        return
+      }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      try {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let idx: number
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const rawFrame = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            if (!rawFrame || rawFrame.startsWith(':')) continue
+            let eventName = 'message'
+            const dataLines: string[] = []
+            for (const line of rawFrame.split('\n')) {
+              if (line.startsWith(':')) continue
+              if (line.startsWith('event:')) eventName = line.slice(6).trim()
+              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+            }
+            if (!dataLines.length) continue
+            let payload: any
+            try { payload = JSON.parse(dataLines.join('\n')) } catch { continue }
+            callbacks.onMessage(payload)
+            if (eventName === 'end' || ['SUCCESS', 'FAILURE', 'REVOKED'].includes(payload?.state)) {
+              finish('complete'); return
+            }
+          }
+        }
+        finish('complete')
+      } catch (e: any) {
+        if (e?.name !== 'AbortError') finish('error', e instanceof Error ? e : new Error(String(e)))
+      }
+    })()
+    return () => { if (!finished) { finished = true; try { controller.abort() } catch {} } }
+  },
+}
+
+// ============== v2.0.0 S5+: 图像分割 ==============
+/**
+ * 图像分割 API 客户端 (与后端 /api/segmentation/* 端点对齐)
+ * 包含: mask CRUD / DeepLabV3+ 训练 / 自动标注 / 进度查询
+ */
+export const segmentationApi = {
+  // ---- mask CRUD ----
+  uploadMask: (imageId: number, file: File, source = 'human') => {
+    const form = new FormData()
+    form.append('file', file)
+    return http.post(`/segmentation/masks/upload/${imageId}`, form, {
+      params: { source },
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  getMask: (imageId: number, download = false) =>
+    http.get(`/segmentation/masks/${imageId}`, { params: download ? { download: 'true' } : {} }),
+  removeMask: (maskId: number) => http.delete(`/segmentation/masks/${maskId}`),
+  listMasks: (imageIds: number[]) =>
+    http.get('/segmentation/masks/list', { params: { image_ids: imageIds.join(',') } }),
+  // ---- 训练 ----
+  startTrain: (data: {
+    dataset_id: number
+    backbone?: string            // deeplabv3_resnet50 / 101
+    model_alias?: string
+    epochs?: number
+    batch_size?: number
+    crop_size?: number
+    learning_rate?: number
+    device?: string
+    val_ratio?: number
+  }) => http.post('/segmentation/train', data),
+  // ---- 自动标注 ----
+  startAutoAnnotate: (data: {
+    dataset_id: number
+    model_version_id: number
+    device?: string
+    overwrite_existing?: boolean
+  }) => http.post('/segmentation/auto-annotate', data),
+  // ---- 进度 ----
+  progress: (taskId: string) => http.get(`/segmentation/progress/${taskId}`),
+  history: (taskId: string) => http.get(`/segmentation/history/${taskId}`),
+  // ---- 模型版本管理 ----
+  listModels: (params?: { dataset_id?: number; task_type?: string }) =>
+    http.get('/segmentation/models/', { params: params || {} }),
+  activateModel: (id: number) => http.post(`/segmentation/models/${id}/activate`),
+}
+
+// ============== v2.0.0 S6+: 导出扩展 ==============
+/**
+ * 检测/分割专用导出 URL 构造
+ * - 返回可直接用于 <a href> / window.open 的完整 URL
+ * - token 走 query (与 exportApi.coco / .yolo 风格保持一致)
+ */
+export const exportApiV2 = {
+  yoloDet: (datasetId: number, valRatio = 0.2) =>
+    `${http.defaults.baseURL}/export/yolo-det/${datasetId}?val_ratio=${valRatio}&${authQuery()}`,
+  cocoDet: (datasetId: number, includePending = false) =>
+    `${http.defaults.baseURL}/export/coco-det/${datasetId}?include_pending=${includePending}&${authQuery()}`,
+  vocSeg: (datasetId: number, valRatio = 0.2, includePending = false) =>
+    `${http.defaults.baseURL}/export/voc-seg/${datasetId}?val_ratio=${valRatio}` +
+    `&include_pending=${includePending}&${authQuery()}`,
+  cocoSeg: (datasetId: number, includePending = false) =>
+    `${http.defaults.baseURL}/export/coco-seg/${datasetId}?include_pending=${includePending}&${authQuery()}`,
+}

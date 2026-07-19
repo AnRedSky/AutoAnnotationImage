@@ -6,6 +6,7 @@ import {
   List as ListIcon, DataLine, Search, InfoFilled
 } from '@element-plus/icons-vue'
 import { trainingApi, datasetApi, autoAnnotateApi } from '@/api'
+import { getDefaultBaseModel, getTaskTypeMeta } from '@/utils/taskType'
 import * as echarts from 'echarts'
 import TrainingParamsForm, { type TrainingParams } from '@/components/TrainingParamsForm.vue'
 import StateBadge from '@/components/StateBadge.vue'
@@ -336,6 +337,29 @@ const createForm = ref({
   learning_rate: 0.0001,
 })
 
+// S7 新增: 当前选中数据集的 task_type, 用于按任务类型切换默认 base_model
+const createFormTaskType = ref<string>('classification')
+// S7 新增: 任务类型 -> base_model 候选列表 (UI 直接枚举, 避免每次请求后端)
+// - classification: timm ImageNet 6 个
+// - detection:     yolov8n/s/m/l/x (ultralytics 标准)
+// - segmentation:  deeplabv3_resnet50 / deeplabv3_resnet101 (torchvision)
+const BASE_MODELS_BY_TASK: Record<string, string[]> = {
+  classification: BASE_MODELS.map((m) => m.name),
+  detection: ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x'],
+  segmentation: ['deeplabv3_resnet50', 'deeplabv3_resnet101'],
+}
+/** 当前 task_type 对应的 base_model 下拉选项 (空数组兜底) */
+const createFormBaseOptions = computed(
+  () => BASE_MODELS_BY_TASK[createFormTaskType.value] || BASE_MODELS_BY_TASK.classification
+)
+
+/** 根据当前 task_type 重置 createForm.base_model 和 model_name */
+const resetCreateFormByTaskType = (taskType: string) => {
+  const newBase = getDefaultBaseModel(taskType)
+  createForm.value.base_model = newBase
+  createForm.value.model_name = genDefaultModelName(newBase)
+}
+
 const openCreateDialog = () => {
   // 每次打开重置默认值 (含自动生成的 model_name)
   createForm.value = {
@@ -346,8 +370,38 @@ const openCreateDialog = () => {
     batch_size: 32,
     learning_rate: 0.0001,
   }
+  createFormTaskType.value = 'classification'
   createDialogVisible.value = true
 }
+
+/**
+ * S7 新增: 监听 createForm.dataset_id 变化
+ * - 根据 dataset.task_type 动态切换 base_model 默认值
+ * - model_name 同步重生成, 避免与切换后的 base_model 命名空间冲突
+ */
+watch(
+  () => createForm.value.dataset_id,
+  async (newId) => {
+    if (!newId) {
+      createFormTaskType.value = 'classification'
+      resetCreateFormByTaskType('classification')
+      return
+    }
+    try {
+      // 优先用本地缓存, 减少一次请求; 否则拉 detail
+      let ds: any = datasets.value.find((d: any) => d.id === newId)
+      if (!ds) {
+        ds = await datasetApi.get(newId)
+      }
+      const t = ds?.task_type || 'classification'
+      createFormTaskType.value = t
+      resetCreateFormByTaskType(t)
+    } catch {
+      createFormTaskType.value = 'classification'
+      resetCreateFormByTaskType('classification')
+    }
+  }
+)
 
 /**
  * 训练任务入队的统一占位逻辑 (新建/再训练 共用)
@@ -1520,12 +1574,32 @@ const stopSilentRefresh = () => {
       destroy-on-close
       :close-on-click-modal="false"
     >
+      <!-- S7 改造: base-models 按当前 task_type 动态切换
+           - classification: timm 6 个 (含 framework/params 完整元信息)
+           - detection/segmentation: 字符串数组, 临时构造成 BaseModelOption 格式 -->
       <TrainingParamsForm
         :form="createForm"
         :datasets="DATASET_OPTIONS"
-        :base-models="BASE_MODELS"
+        :base-models="createFormBaseOptions.map((name) => ({
+          name,
+          framework: createFormTaskType === 'classification' ? 'timm'
+                   : createFormTaskType === 'detection' ? 'ultralytics'
+                   : 'torchvision',
+          params: '',
+          taskTypes: [createFormTaskType],
+          description: '',
+        }))"
         @form-change="(p) => onParamsChange(createForm, p)"
       />
+      <!-- S7 新增: 任务类型提示 -->
+      <el-tag
+        v-if="createFormTaskType"
+        :type="getTaskTypeMeta(createFormTaskType).type"
+        effect="plain"
+        style="margin-top: 4px;"
+      >
+        任务类型: {{ getTaskTypeMeta(createFormTaskType).label }}
+      </el-tag>
       <el-alert
         title="提示: 训练任务启动后会进入 Celery 队列, 需要 worker 在跑才能真正开始执行"
         type="info" :closable="false" show-icon
