@@ -11,7 +11,7 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close, Lightning, View, ArrowLeft } from '@element-plus/icons-vue'
+import { Check, Close, Lightning, View, ArrowLeft, MagicStick, EditPen, Select, Delete, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
 import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi, detectionApi, segmentationApi } from '@/api'
 import { getTaskTypeMeta } from '@/utils/taskType'
 import DetectionAnnotator from '@/components/annotation/DetectionAnnotator.vue'
@@ -261,6 +261,21 @@ const applyCopySuggestions = () => {
 function catName(catId: number): string {
   const c = categories.find((x: any) => x.id === catId)
   return c?.name || `cls_${catId}`
+}
+// v2.3.1 S10: 类别调色板 (与 DetectionAnnotator 一致)
+const DET_PALETTE = [
+  '#f56c6c', '#67c23a', '#409eff', '#e6a23c',
+  '#909399', '#9b59b6', '#1abc9c', '#ff5722',
+]
+function catColor(catId: number | null | undefined): string {
+  if (catId == null) return '#909399'
+  return DET_PALETTE[Math.abs(Number(catId)) % DET_PALETTE.length]
+}
+/** v2.3.1 S10: 取消未保存的修改 (从服务器重读) */
+const cancelDetectionDraft = async () => {
+  if (!image.value?.id) return
+  await loadDetectionAnnotations(image.value.id)
+  ElMessage.success('已撤销未保存修改')
 }
 
 /** 加载某图的已有 mask (作为初始 mask 渲染到画布) */
@@ -754,8 +769,9 @@ const iouThreshold = ref(0.45)
                  - segmentation: SegmentationAnnotator (canvas 画刷画 mask)
                  - classification: 沿用原 img + AI 候选 (不变) -->
             <template v-if="image.task_type === 'detection'">
-              <!-- v2.3.0 S10: 跨图建议从画布上方移到右侧, 避免占画布空间 -->
+              <!-- v2.3.1 S10: DetectionAnnotator 极简版, 操作全在右侧面板 -->
               <DetectionAnnotator
+                ref="detAnnotRef"
                 :image-url="imageApi.fileUrl(image.id)"
                 :image-id="image.id"
                 :image-width="image.width || 0"
@@ -886,9 +902,94 @@ const iouThreshold = ref(0.45)
           </div>
         </el-card>
 
-        <!-- v2.3.0 S10: 检测任务右侧操作面板 -->
+        <!-- v2.3.1 S10: 检测任务右侧操作面板 (所有标注相关操作统一在这里) -->
         <el-card v-if="image && image.task_type === 'detection'" title="检测操作面板">
-          <!-- 跨图 bbox 复制建议 -->
+          <!-- Section 1: 工具模式 (绘制/编辑) -->
+          <div class="op-section">
+            <div class="op-section-title">工具模式</div>
+            <el-button-group style="margin-top: 6px; display: flex;">
+              <el-button
+                style="flex: 1;" :icon="EditPen"
+                :type="detAnnot.mode?.value === 'draw' ? 'primary' : 'default'"
+                @click="detAnnot.setMode?.('draw')"
+              >绘制 (D)</el-button>
+              <el-button
+                style="flex: 1;" :icon="Select"
+                :type="detAnnot.mode?.value === 'edit' ? 'warning' : 'default'"
+                @click="detAnnot.setMode?.('edit')"
+              >编辑 (E)</el-button>
+            </el-button-group>
+            <div style="margin-top: 4px; font-size: 11px; color: #909399;">
+              <template v-if="detAnnot.mode?.value === 'draw'">在画布上拖拽画新 bbox</template>
+              <template v-else>点击选中, 拖动 body 平移, 8 handle 缩放</template>
+            </div>
+          </div>
+
+          <!-- Section 2: 默认类别 (绘制模式时, 新 bbox 的类别) -->
+          <div class="op-section" v-if="detAnnot.mode?.value === 'draw'">
+            <div class="op-section-title">新 bbox 类别</div>
+            <el-select
+              v-model="detAnnot.defaultCategoryId"
+              placeholder="选择类别" size="small"
+              style="width: 100%; margin-top: 6px;" filterable
+            >
+              <el-option
+                v-for="c in categories" :key="c.id" :value="c.id" :label="c.name"
+              >
+                <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
+                {{ c.name }}
+              </el-option>
+            </el-select>
+          </div>
+
+          <!-- Section 3: 选中 bbox 的属性 (编辑模式时) -->
+          <div class="op-section" v-if="detAnnot.mode?.value === 'edit' && detAnnot.selectedIndex?.value !== null">
+            <div class="op-section-title">
+              选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
+            </div>
+            <el-select
+              :model-value="detAnnot.selectedIndex.value !== null ? bboxList[detAnnot.selectedIndex.value]?.category_id : null"
+              @update:model-value="(v: number | null) => detAnnot.changeSelectedCategory?.(v)"
+              size="small" style="width: 100%; margin-top: 6px;" filterable
+            >
+              <el-option
+                v-for="c in categories" :key="c.id" :value="c.id" :label="c.name"
+              >
+                <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
+                {{ c.name }}
+              </el-option>
+            </el-select>
+            <div style="display: flex; gap: 6px; margin-top: 6px;">
+              <el-button
+                size="small" type="danger" plain style="flex: 1;"
+                :icon="Delete"
+                @click="detAnnot.removeSelected?.()"
+              >删除 (Del)</el-button>
+            </div>
+          </div>
+
+          <!-- Section 4: 撤销/重做/清空 -->
+          <div class="op-section">
+            <div class="op-section-title">历史操作</div>
+            <div style="display: flex; gap: 6px; margin-top: 6px;">
+              <el-button
+                size="small" :icon="RefreshLeft" style="flex: 1;"
+                :disabled="!detAnnot.canUndo?.value"
+                @click="detAnnot.undo?.()"
+              >撤销</el-button>
+              <el-button
+                size="small" :icon="RefreshRight" style="flex: 1;"
+                :disabled="!detAnnot.canRedo?.value"
+                @click="detAnnot.redo?.()"
+              >重做</el-button>
+            </div>
+            <el-button
+              size="small" type="warning" plain style="margin-top: 6px; width: 100%;"
+              @click="detAnnot.clearDraft?.()"
+            >清空未保存</el-button>
+          </div>
+
+          <!-- Section 5: 跨图 bbox 复制建议 -->
           <el-alert
             v-if="copySuggestions.length > 0"
             type="info" :closable="true" show-icon
@@ -919,7 +1020,7 @@ const iouThreshold = ref(0.45)
             </div>
           </el-alert>
 
-          <!-- 主导航: 上一张 / 下一张 -->
+          <!-- Section 6: 图片导航 -->
           <div class="op-section">
             <div class="op-section-title">图片导航</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
@@ -930,7 +1031,7 @@ const iouThreshold = ref(0.45)
               <el-button
                 style="flex: 1;"
                 :type="noMore ? 'info' : 'primary'"
-                :plain="!noMore" :icon="ArrowLeft"
+                :plain="!noMore"
                 :disabled="noMore"
                 @click="loadNext"
               >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
@@ -940,22 +1041,45 @@ const iouThreshold = ref(0.45)
             </div>
           </div>
 
-          <!-- 当前 bbox 列表 -->
+          <!-- Section 7: 当前 bbox 列表 -->
           <div class="op-section">
             <div class="op-section-title">
               当前 bbox ({{ bboxList.length }})
             </div>
             <el-empty v-if="bboxList.length === 0" description="尚未画任何 bbox" :image-size="50" />
-            <div v-else style="margin-top: 6px; max-height: 200px; overflow-y: auto;">
+            <div v-else style="margin-top: 6px; max-height: 180px; overflow-y: auto;">
               <el-tag
                 v-for="(b, idx) in bboxList" :key="b.id || idx"
                 size="small" effect="plain"
-                style="margin: 2px 4px 2px 0;"
+                :type="detAnnot.selectedIndex?.value === idx ? 'primary' : 'info'"
+                style="margin: 2px 4px 2px 0; cursor: pointer;"
+                @click="detAnnot.selectByIndex?.(idx)"
                 closable
                 @close="removeBBoxAt(idx)"
               >
+                <span class="cat-dot" :style="{ background: catColor(b.category_id) }"></span>
                 #{{ idx + 1 }} {{ catName(b.category_id) }}
               </el-tag>
+            </div>
+          </div>
+
+          <!-- Section 8: 保存/取消 -->
+          <div class="op-section">
+            <div class="op-section-title">提交</div>
+            <div style="display: flex; gap: 8px; margin-top: 6px;">
+              <el-button
+                type="primary" :icon="Check" style="flex: 1;"
+                :disabled="!detAnnot.dirty?.value || bboxList.length === 0"
+                @click="detAnnot.save?.()"
+              >保存 ({{ bboxList.length }})</el-button>
+              <el-button
+                :icon="Close" style="flex: 1;"
+                :disabled="!detAnnot.dirty?.value"
+                @click="cancelDetectionDraft"
+              >取消</el-button>
+            </div>
+            <div v-if="detAnnot.dirty?.value" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
+              ● 有未保存的修改
             </div>
           </div>
 

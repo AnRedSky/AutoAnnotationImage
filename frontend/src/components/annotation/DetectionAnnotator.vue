@@ -1,21 +1,28 @@
 <!--
-  DetectionAnnotator.vue (v2.2.0 增强版)
+  DetectionAnnotator.vue (v2.3.1 极简版)
   ==========================================
-  目标检测 bbox 画布组件
+  目标检测 bbox 画布组件 (只负责画布渲染 + 鼠标交互)
+
+  v2.3.1 S10 重构:
+  - 移除所有标注相关操作 UI (draw/edit 切换、撤销/重做、保存/取消、类别下拉、bbox 列表、快捷键提示)
+  - 统一由父组件 (Annotate.vue 右侧操作面板) 触发
+  - 通过 defineExpose 暴露 setMode / undo / redo / clearDraft / removeSelected / changeSelectedCategory / selectByIndex
+    + defaultCategoryId / mode / canUndo / canRedo / selectedIndex 供父组件读
 
   职责:
-  - 加载原图到 canvas (含 HiDPI 自适应)
+  - 加载原图到 canvas (含缩放)
   - 鼠标拖拽绘制新 bbox (mousedown -> mousemove -> mouseup)
   - 渲染已有 bbox 列表 (颜色按 category_id 分配)
-  - 支持选中 / 删除 / 改类别 bbox
-  - 拖拽整体 bbox + 8 handle 缩放 (v2.2.0 新增)
-  - 键盘快捷键: Delete 删除选中, d/e 切模式, n/p 上下张, Ctrl+Z 撤销 (v2.2.0 新增)
-  - 通过 emit('change', bboxes) 抛出当前 bbox 列表, 由父组件 (Annotate.vue) 负责持久化
+  - 选中 / 删除 / 改类别 bbox (通过父组件调方法)
+  - 拖拽整体 bbox + 8 handle 缩放
+  - 画布坐标浮标 + 尺寸提示
+  - 键盘快捷键: Delete 删选中, Ctrl+Z/Y 撤销/重做, d/e 切模式 (保留, 跟画布操作强耦合)
 
   设计原则:
-  - 零业务耦合: 不直接调 API, 不引 store; 数据全靠 props 传入, 操作全靠 emit
-  - 坐标存储: 归一化 (0-1), 与后端 BBoxAnnotation.x_min/y_min/x_max/y_max 一致
+  - 零业务耦合: 不直接调 API, 不引 store
+  - 坐标存储: 归一化 (0-1), 与后端 BBoxAnnotation 一致
   - 渲染坐标系: 实际像素 (canvas size), 由组件内部转换
+  - 上下文菜单/标注相关操作按钮 → 全部移到父组件 (v2.3.1 目标)
 
   Props:
     imageUrl:    原图 URL (必填)
@@ -27,41 +34,19 @@
 
   Emits:
     update:modelValue  bbox 列表变更
-    save               触发父组件保存 (父组件拿当前 modelValue 调后端 API)
-    cancel             撤销未保存的变更 (父组件可重读 server-side bbox)
-    next               请求跳到下一张图 (n 键)
-    prev               请求跳到上一张图 (p 键)
+    save               触发父组件保存
+    cancel             撤销未保存的变更
+    next               请求跳到下一张图
+    prev               请求跳到上一张图
+
+  Expose (v2.3.1 新增):
+    setMode(m) / mode / canUndo / canRedo / undo() / redo() / clearDraft()
+    removeSelected() / changeSelectedCategory(catId) / selectByIndex(i) / selectedIndex
+    defaultCategoryId
 -->
 <template>
   <div class="det-annotator">
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <el-button-group size="small">
-        <el-button :type="mode === 'draw' ? 'primary' : 'default'" @click="setMode('draw')">
-          <el-icon><EditPen /></el-icon>绘制 (D)
-        </el-button>
-        <el-button :type="mode === 'edit' ? 'primary' : 'default'" @click="setMode('edit')">
-          <el-icon><Select /></el-icon>编辑 (E)
-        </el-button>
-        <el-button @click="undo" :disabled="!canUndo">
-          <el-icon><RefreshLeft /></el-icon>撤销 (Ctrl+Z)
-        </el-button>
-        <el-button @click="redo" :disabled="!canRedo">
-          <el-icon><RefreshRight /></el-icon>重做 (Ctrl+Shift+Z)
-        </el-button>
-        <el-button @click="clearDraft">清空未保存</el-button>
-      </el-button-group>
-      <span class="hint">
-        <template v-if="mode === 'draw'">
-          拖拽鼠标画新 bbox · 切换下一张 (N) · 上一张 (P)
-        </template>
-        <template v-else>
-          点击选中 · Delete 键删除 · 拖动 body 平移 · 拖 8 个 handle 缩放
-        </template>
-      </span>
-    </div>
-
-    <!-- 画布区域 -->
+    <!-- 画布区域 (只渲染, 不带任何操作 UI) -->
     <div ref="wrapRef" class="canvas-wrap">
       <canvas
         ref="canvasRef"
@@ -73,7 +58,7 @@
         @mouseup="onMouseUp"
         @mouseleave="onMouseUp"
       />
-      <!-- v2.3.0 S10: 画布坐标浮标 (左下角) -->
+      <!-- 画布坐标浮标 (左下角) -->
       <div class="coord-overlay">
         <span v-if="cursorPos">
           x: <b>{{ cursorPos.x.toFixed(0) }}</b> ({{ (cursorPos.nx * 100).toFixed(1) }}%)
@@ -81,78 +66,14 @@
         </span>
         <span v-else>移入画布查看坐标</span>
       </div>
-      <!-- v2.3.0 S10: 画布尺寸 (右下角) -->
+      <!-- 画布尺寸 (右下角) -->
       <div class="size-overlay">
         {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}%
       </div>
-    </div>
-
-    <!-- 类别下拉 (绘制模式时设置下一个 bbox 的默认类别) -->
-    <div class="cat-bar" v-if="mode === 'draw'">
-      <span>新 bbox 类别:</span>
-      <el-select v-model="defaultCategoryId" placeholder="选择类别" size="small" style="width: 200px;" filterable>
-        <el-option
-          v-for="c in categories" :key="c.id" :value="c.id"
-          :label="c.name"
-        >
-          <span class="cat-dot" :style="{ background: colorOf(c.id) }"></span>
-          {{ c.name }}
-        </el-option>
-      </el-select>
-    </div>
-
-    <!-- 选中 bbox 时的类别修改下拉 (编辑模式) -->
-    <div class="cat-bar" v-else-if="selectedIndex !== null">
-      <span>选中 bbox #{{ selectedIndex + 1 }} 类别:</span>
-      <el-select
-        :model-value="selectedCategoryId"
-        @update:model-value="(v: number | null) => changeSelectedCategory(v)"
-        size="small" style="width: 200px;" filterable
-      >
-        <el-option
-          v-for="c in categories" :key="c.id" :value="c.id"
-          :label="c.name"
-        >
-          <span class="cat-dot" :style="{ background: colorOf(c.id) }"></span>
-          {{ c.name }}
-        </el-option>
-      </el-select>
-      <el-button size="small" type="danger" plain @click="removeSelected">
-        <el-icon><Delete /></el-icon>删除 (Del)
-      </el-button>
-    </div>
-
-    <!-- bbox 列表 (用于在编辑模式选择 / 改类别 / 删除) -->
-    <div class="bbox-list" v-if="modelValue && modelValue.length > 0">
-      <div class="list-title">当前 bbox ({{ modelValue.length }})</div>
-      <el-tag
-        v-for="(b, idx) in modelValue" :key="b.id || idx"
-        :type="selectedIndex === idx ? 'primary' : 'info'"
-        :effect="selectedIndex === idx ? 'dark' : 'plain'"
-        class="bbox-tag"
-        @click="selectIndex(idx)"
-        closable
-        @close="removeAt(idx)"
-      >
-        <span class="cat-dot" :style="{ background: colorOf(b.category_id) }"></span>
-        #{{ idx + 1 }} {{ catName(b.category_id) }}
-      </el-tag>
-    </div>
-
-    <!-- 操作按钮 -->
-    <div class="actions">
-      <el-button type="primary" :icon="Check" :disabled="!dirty" @click="onSave">
-        保存 ({{ modelValue?.length || 0 }})
-      </el-button>
-      <el-button @click="$emit('cancel')">取消</el-button>
-      <span class="shortcut-hint">
-        <el-tag size="small" effect="plain">D 绘制</el-tag>
-        <el-tag size="small" effect="plain">E 编辑</el-tag>
-        <el-tag size="small" effect="plain">N 下一张</el-tag>
-        <el-tag size="small" effect="plain">P 上一张</el-tag>
-        <el-tag size="small" effect="plain">Del 删除</el-tag>
-        <el-tag size="small" effect="plain">Ctrl+Z 撤销</el-tag>
-      </span>
+      <!-- 模式徽章 (左下角上方, 实时显示当前模式) -->
+      <div class="mode-overlay" :class="`mode-${mode}`">
+        {{ mode === 'draw' ? '绘制模式 (D)' : '编辑模式 (E)' }}
+      </div>
     </div>
   </div>
 </template>
@@ -160,7 +81,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, EditPen, Select, Delete, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
 
 // ============== Props / Emits ==============
 interface BBox {
@@ -205,22 +125,21 @@ const canvasSize = ref<{ w: number; h: number }>({ w: 0, h: 0 })
 // 绘制中临时状态
 const drawing = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
 
-// 拖动 / 缩放 中临时状态 (v2.2.0 新增)
+// 拖动 / 缩放 中临时状态
 interface DragState {
   kind: 'move' | 'resize'
-  handle?: ResizeHandle  // 仅 resize 时
+  handle?: ResizeHandle
   idx: number
-  start: { x: number; y: number }  // canvas 像素
-  orig: BBox  // 归一化
+  start: { x: number; y: number }
+  orig: BBox
 }
 const dragging = ref<DragState | null>(null)
 
-// 鼠标 hover 在 handle 上 (用于改变 cursor)
+// 鼠标 hover 在 handle 上
 const hoverHandle = ref<ResizeHandle | null>(null)
 
-// v2.3.0 S10: 鼠标坐标浮标
+// 画布坐标浮标
 const cursorPos = ref<{ x: number; y: number; nx: number; ny: number } | null>(null)
-// 缩放比例 (显示用, 0-100%, 1.0=100%)
 const scalePercent = computed(() => {
   const dw = props.imageWidth || 0
   if (!dw || !canvasSize.value.w) return '100'
@@ -229,7 +148,7 @@ const scalePercent = computed(() => {
 
 type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
 
-// 撤销栈 (v2.2.0 新增, 仅跟踪 modelValue 变更)
+// 撤销栈
 interface HistoryEntry { bboxes: BBox[] }
 const undoStack = ref<HistoryEntry[]>([])
 const redoStack = ref<HistoryEntry[]>([])
@@ -256,17 +175,16 @@ function redo() {
   ElMessage.success('已重做')
 }
 
-// dirty: modelValue 与初始化时不一致视为有未保存改动
+// dirty
 const initial = ref<string>(JSON.stringify(props.modelValue || []))
 const dirty = computed(() => JSON.stringify(props.modelValue || []) !== initial.value)
 
-// 选中 bbox 的 category_id (用于编辑模式下拉双向绑定)
 const selectedCategoryId = computed(() => {
   if (selectedIndex.value === null) return null
   return props.modelValue?.[selectedIndex.value]?.category_id ?? null
 })
 
-// ============== 类别调色板 (固定 8 色, 按 category_id hash) ==============
+// 调色板
 const PALETTE = [
   '#f56c6c', '#67c23a', '#409eff', '#e6a23c',
   '#909399', '#9b59b6', '#1abc9c', '#ff5722',
@@ -280,7 +198,7 @@ function catName(catId: number | null | undefined): string {
   return c?.name || `cls_${catId}`
 }
 
-// 监听 categories 变化, 默认选第一个
+// 监听 categories 变化
 watch(
   () => props.categories,
   (cats) => {
@@ -291,7 +209,6 @@ watch(
   { immediate: true }
 )
 
-// 监听 imageUrl 变化, 重新加载图片; 加载时清空选中 + 撤销栈
 watch(
   () => props.imageUrl,
   () => {
@@ -303,12 +220,10 @@ watch(
 )
 onMounted(() => loadImage())
 
-// ============== 图片加载 + canvas 尺寸 ==============
 function loadImage() {
   if (!props.imageUrl) return
   imgEl.crossOrigin = 'anonymous'
   imgEl.onload = () => {
-    // 限定画布: 最大 600 宽, 等比缩放
     const maxW = 600
     const scale = Math.min(1, maxW / (imgEl.naturalWidth || props.imageWidth || 1))
     canvasSize.value = {
@@ -317,13 +232,10 @@ function loadImage() {
     }
     nextTick(() => draw())
   }
-  imgEl.onerror = () => {
-    ElMessage.error('图片加载失败')
-  }
+  imgEl.onerror = () => ElMessage.error('图片加载失败')
   imgEl.src = props.imageUrl
 }
 
-// ============== 鼠标事件 -> 坐标转换 ==============
 function eventToImage(e: MouseEvent): { x: number; y: number } {
   if (!canvasRef.value) return { x: 0, y: 0 }
   const rect = canvasRef.value.getBoundingClientRect()
@@ -341,10 +253,8 @@ function normToPixel(n: { x: number; y: number }): { x: number; y: number } {
   return { x: n.x * canvasSize.value.w, y: n.y * canvasSize.value.h }
 }
 
-// ============== Handle 命中检测 (v2.2.0 新增) ==============
-const HANDLE_SIZE = 6  // 像素
+const HANDLE_SIZE = 6
 function getHandles(b: BBox): Record<ResizeHandle, { x: number; y: number }> {
-  // 返回 8 个 handle 的像素坐标
   const x1 = b.x_min * canvasSize.value.w
   const y1 = b.y_min * canvasSize.value.h
   const x2 = b.x_max * canvasSize.value.w
@@ -377,16 +287,13 @@ function handleCursor(h: ResizeHandle | null): string {
   return map[h]
 }
 
-// ============== 鼠标事件处理 ==============
 function onMouseDown(e: MouseEvent) {
   const p = eventToImage(e)
   if (mode.value === 'draw') {
     drawing.value = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }
     return
   }
-  // edit 模式
   const pn = pixelToNorm(p)
-  // 1) 先查 handle (仅在选中 bbox 上查)
   if (selectedIndex.value !== null) {
     const sel = props.modelValue?.[selectedIndex.value]
     if (sel) {
@@ -400,9 +307,8 @@ function onMouseDown(e: MouseEvent) {
       }
     }
   }
-  // 2) 命中 body -> 选中 + 准备拖动
   const hitIdx = findHitIndex(pn)
-  selectIndex(hitIdx)
+  selectByIndex(hitIdx)
   if (hitIdx !== null) {
     const sel = props.modelValue?.[hitIdx]
     if (sel) {
@@ -414,22 +320,21 @@ function onMouseDown(e: MouseEvent) {
   }
 }
 function onMouseMove(e: MouseEvent) {
+  const p = eventToImage(e)
+  const np = pixelToNorm(p)
+  cursorPos.value = { x: p.x, y: p.y, nx: np.x, ny: np.y }
   if (drawing.value) {
-    const p = eventToImage(e)
     drawing.value.x1 = p.x
     drawing.value.y1 = p.y
     draw()
     return
   }
   if (dragging.value) {
-    const p = eventToImage(e)
     handleDrag(p)
     draw()
     return
   }
-  // hover: 仅在 edit 模式 + 选中 bbox 时检测 handle
   if (mode.value === 'edit' && selectedIndex.value !== null) {
-    const p = eventToImage(e)
     const sel = props.modelValue?.[selectedIndex.value]
     const h = sel ? hitTestHandle(p, sel) : null
     if (h !== hoverHandle.value) {
@@ -441,35 +346,27 @@ function onMouseMove(e: MouseEvent) {
   }
 }
 function onMouseUp(_e: MouseEvent) {
-  // v2.3.0 S10: 离画布时清空坐标浮标
   cursorPos.value = null
   if (drawing.value) {
     const d = drawing.value
     drawing.value = null
-    // 归一化 + 排序
     const xMin = Math.min(d.x0, d.x1) / canvasSize.value.w
     const yMin = Math.min(d.y0, d.y1) / canvasSize.value.h
     const xMax = Math.max(d.x0, d.x1) / canvasSize.value.w
     const yMax = Math.max(d.y0, d.y1) / canvasSize.value.h
-    // 过滤太小的拖拽 (像素 < 5)
     const wPx = Math.abs(d.x1 - d.x0)
     const hPx = Math.abs(d.y1 - d.y0)
-    if (wPx < 5 || hPx < 5) {
-      draw(); return
-    }
-    // 类别必须选
+    if (wPx < 5 || hPx < 5) { draw(); return }
     if (defaultCategoryId.value == null) {
-      ElMessage.warning('请先在下方选一个类别')
+      ElMessage.warning('请先在右侧选一个类别')
       draw(); return
     }
     snapshot()
     const next = [
       ...(props.modelValue || []),
       {
-        x_min: round(xMin),
-        y_min: round(yMin),
-        x_max: round(xMax),
-        y_max: round(yMax),
+        x_min: round(xMin), y_min: round(yMin),
+        x_max: round(xMax), y_max: round(yMax),
         category_id: defaultCategoryId.value,
       },
     ]
@@ -501,7 +398,6 @@ function handleDrag(cur: { x: number; y: number }) {
     b.x_max = round(nx + w)
     b.y_max = round(ny + h)
   } else if (d.kind === 'resize' && d.handle) {
-    // 把 orig 转像素坐标
     const o1 = normToPixel({ x: d.orig.x_min, y: d.orig.y_min })
     const o2 = normToPixel({ x: d.orig.x_max, y: d.orig.y_max })
     let nx1 = o1.x, ny1 = o1.y, nx2 = o2.x, ny2 = o2.y
@@ -509,7 +405,6 @@ function handleDrag(cur: { x: number; y: number }) {
     if (d.handle.includes('e')) nx2 = cur.x
     if (d.handle.includes('n')) ny1 = cur.y
     if (d.handle.includes('s')) ny2 = cur.y
-    // 防止反向 (最小 5 像素)
     if (nx2 - nx1 < 5) {
       if (d.handle.includes('w')) nx1 = nx2 - 5
       else nx2 = nx1 + 5
@@ -518,7 +413,6 @@ function handleDrag(cur: { x: number; y: number }) {
       if (d.handle.includes('n')) ny1 = ny2 - 5
       else ny2 = ny1 + 5
     }
-    // 限制在画布内
     nx1 = Math.max(0, nx1); ny1 = Math.max(0, ny1)
     nx2 = Math.min(canvasSize.value.w, nx2); ny2 = Math.min(canvasSize.value.h, ny2)
     b.x_min = round(nx1 / canvasSize.value.w)
@@ -532,7 +426,7 @@ function handleDrag(cur: { x: number; y: number }) {
 
 function findHitIndex(p: { x: number; y: number }): number | null {
   const list = props.modelValue || []
-  for (let i = list.length - 1; i >= 0; i--) {  // 倒序, 上层优先
+  for (let i = list.length - 1; i >= 0; i--) {
     const b = list[i]
     if (p.x >= b.x_min && p.x <= b.x_max && p.y >= b.y_min && p.y <= b.y_max) {
       return i
@@ -540,7 +434,7 @@ function findHitIndex(p: { x: number; y: number }): number | null {
   }
   return null
 }
-function selectIndex(i: number | null) {
+function selectByIndex(i: number | null) {
   selectedIndex.value = i
   draw()
 }
@@ -589,26 +483,18 @@ function setMode(m: 'draw' | 'edit') {
   }
 }
 
-// ============== 键盘快捷键 (v2.2.0 新增) ==============
+// 键盘快捷键 (保留画布强相关: Delete / Ctrl+Z / d/e)
 function onKey(e: KeyboardEvent) {
-  // 避免在 input/textarea 内触发
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) {
     return
   }
   if (e.ctrlKey || e.metaKey) {
-    if (e.key === 'z' && !e.shiftKey) {
-      e.preventDefault(); undo(); return
-    }
-    if ((e.key === 'z' && e.shiftKey) || e.key === 'y') {
-      e.preventDefault(); redo(); return
-    }
+    if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return }
+    if ((e.key === 'z' && e.shiftKey) || e.key === 'y') { e.preventDefault(); redo(); return }
   }
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (selectedIndex.value !== null) {
-      e.preventDefault()
-      removeSelected()
-    }
+    if (selectedIndex.value !== null) { e.preventDefault(); removeSelected() }
     return
   }
   const k = e.key.toLowerCase()
@@ -620,7 +506,7 @@ function onKey(e: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onKey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
-// ============== 保存 / 取消 ==============
+// 保存 / 取消
 function onSave() {
   if (!props.modelValue || props.modelValue.length === 0) {
     ElMessage.warning('至少画一个 bbox')
@@ -630,15 +516,13 @@ function onSave() {
   emit('save', props.modelValue)
 }
 
-// ============== 渲染 ==============
+// 渲染
 function draw() {
   const c = canvasRef.value
   if (!c) return
   const ctx = c.getContext('2d')
   if (!ctx) return
-  // 清屏
   ctx.clearRect(0, 0, c.width, c.height)
-  // 原图
   if (imgEl.complete && imgEl.naturalWidth > 0) {
     ctx.drawImage(imgEl, 0, 0, c.width, c.height)
   } else {
@@ -649,7 +533,6 @@ function draw() {
     ctx.textAlign = 'center'
     ctx.fillText('图片加载中…', c.width / 2, c.height / 2)
   }
-  // 已有 bbox
   const list = props.modelValue || []
   list.forEach((b, i) => {
     const x = b.x_min * c.width
@@ -661,7 +544,6 @@ function draw() {
     ctx.strokeStyle = color
     ctx.lineWidth = selected ? 3 : 2
     ctx.strokeRect(x, y, w, h)
-    // 标签
     ctx.fillStyle = color
     const label = `#${i + 1} ${catName(b.category_id)}`
     const labelW = 8 + ctx.measureText(label).width
@@ -671,7 +553,6 @@ function draw() {
     ctx.textAlign = 'left'
     ctx.fillText(label, x + 4, y - 4)
   })
-  // 选中 bbox 的 8 个 handle (v2.2.0 新增)
   if (mode.value === 'edit' && selectedIndex.value !== null) {
     const sel = list[selectedIndex.value]
     if (sel) {
@@ -687,7 +568,6 @@ function draw() {
       }
     }
   }
-  // 绘制中
   if (drawing.value) {
     const d = drawing.value
     const x = Math.min(d.x0, d.x1)
@@ -704,17 +584,36 @@ function draw() {
 
 function round(v: number) { return Math.round(v * 10000) / 10000 }
 
-// modelValue 变化时重绘
 watch(
   () => props.modelValue,
   () => draw(),
   { deep: true }
 )
 
-// ============== 生命周期清理 ==============
 onBeforeUnmount(() => {
   imgEl.onload = null
   imgEl.onerror = null
+})
+
+// ============== v2.3.1 S10: 暴露给父组件 (右侧操作面板) ==============
+defineExpose({
+  setMode,
+  undo,
+  redo,
+  clearDraft,
+  removeSelected,
+  changeSelectedCategory,
+  selectByIndex,
+  save: onSave,
+  mode,
+  canUndo,
+  canRedo,
+  selectedIndex,
+  defaultCategoryId,
+  dirty,
+  categories: computed(() => props.categories),
+  colorOf,
+  catName,
 })
 </script>
 
@@ -724,16 +623,6 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 8px;
   width: 100%;
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.toolbar .hint {
-  color: #909399;
-  font-size: 12px;
 }
 .canvas-wrap {
   position: relative;
@@ -752,45 +641,53 @@ onBeforeUnmount(() => {
   cursor: crosshair;
   user-select: none;
 }
-.cat-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-.bbox-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-.list-title {
+/* 坐标浮标 (左下角) */
+.coord-overlay {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border-radius: 4px;
   font-size: 12px;
-  color: #909399;
-  margin-right: 4px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  pointer-events: none;
+  z-index: 5;
 }
-.bbox-tag {
-  cursor: pointer;
+.coord-overlay b {
+  color: #67c23a;
+  font-weight: 600;
+  margin: 0 2px;
 }
-.cat-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 4px;
-  vertical-align: middle;
+/* 画布尺寸 (右下角) */
+.size-overlay {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 10px;
+  background: rgba(64, 158, 255, 0.85);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 5;
 }
-.actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
-  align-items: center;
-  flex-wrap: wrap;
+/* 模式徽章 (左下角上方) */
+.mode-overlay {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 5;
+  background: rgba(64, 158, 255, 0.85);
+  color: #fff;
 }
-.shortcut-hint {
-  display: flex;
-  gap: 4px;
-  margin-left: auto;
-  flex-wrap: wrap;
+.mode-overlay.mode-edit {
+  background: rgba(230, 162, 60, 0.85);
 }
 </style>
