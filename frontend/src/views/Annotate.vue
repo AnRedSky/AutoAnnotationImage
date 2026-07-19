@@ -257,9 +257,9 @@ const applyCopySuggestions = () => {
   ElMessage.success(`已应用 ${newBoxes.length} 个建议 bbox, 可在画布上微调`)
   copySuggestions.value = []
 }
-// 类别名查表 (弹窗 tag 用)
+// 类别名查表 (弹窗 tag 用) -- script setup 顶层 ref 必须用 .value
 function catName(catId: number): string {
-  const c = categories.find((x: any) => x.id === catId)
+  const c = categories.value.find((x: any) => x.id === catId)
   return c?.name || `cls_${catId}`
 }
 // v2.3.1 S10: 类别调色板 (与 DetectionAnnotator 一致)
@@ -874,7 +874,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <el-select v-if="categories.length > 0" placeholder="选择其他类别（修正）" style="width: 100%;"
             filterable
             @change="(id: number) => {
-              const cat = categories.find(c => c.id === id)
+              const cat = categories.value.find(c => c.id === id)
               if (cat) submit(cat.id, cat.name, false)
             }"
           >
