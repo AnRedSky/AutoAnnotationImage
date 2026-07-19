@@ -353,9 +353,35 @@ const saveSegmentationMask = async (file: File) => {
  * 2. 已在栈顶 → 调后端 list (排除整个 history) 拉新图, 推入栈尾
  *    - 若后端无图 (全部 pending 已拿完): 提示"已经是最后一张了", 「下一张」按钮 disabled
  */
+/**
+ * v2.3.2: 切图前自动保存检测标注 (避免用户画了 bbox 没点保存就跳走)
+ * - dirty + 是检测任务 -> 调 onSave (emit save -> saveDetectionBBoxes)
+ * - 静默, 不弹窗, 失败回 toast
+ * - 分类任务不用调 (submit 即保存)
+ */
+const autoSaveBeforeSwitch = async (): Promise<boolean> => {
+  if (currentTaskTypeRaw.value !== 'detection') return true
+  if (!detAnnotRef.value) return true
+  if (!detAnnotRef.value.dirty?.value) return true
+  try {
+    annotatorSaving.value = true
+    const cur = detAnnotRef.value.modelValue || []
+    await saveDetectionBBoxes(cur)
+    detAnnotRef.value.resetInitial?.()  // 通知组件把"初始"重置, 让 dirty=false
+    return true
+  } catch (e: any) {
+    ElMessage.error('自动保存失败: ' + (e?.response?.data?.detail || e?.message))
+    return false
+  } finally {
+    annotatorSaving.value = false
+  }
+}
+
 const loadNext = async () => {
   if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
-
+  // v2.3.2: 切图前自动保存当前图 dirty
+  const ok = await autoSaveBeforeSwitch()
+  if (!ok) return
   // 情况 1: 历史栈中间, 直接前进 (浏览器行为)
   if (historyCursor.value < historyIds.value.length - 1) {
     historyCursor.value++
@@ -424,6 +450,9 @@ const loadPrev = async () => {
     ElMessage.info('已经是第一张了')
     return
   }
+  // v2.3.2: 切图前自动保存
+  const ok = await autoSaveBeforeSwitch()
+  if (!ok) return
   historyCursor.value--
   // 离开栈顶, 重置 noMore (再点下一张时, 栈中间直接拿 history, 不需要重新判断)
   noMore.value = false
@@ -445,6 +474,26 @@ const loadPrev = async () => {
 
 /** 上一张按钮是否可用 (仅在历史栈非首位时可点) */
 const canGoPrev = computed(() => historyCursor.value > 0)
+
+/**
+ * v2.3.2: 「启动 AI 预标注」按钮按 task_type 分派
+ * - classification -> runAutoAnnotate (走 fine-tune / ImageNet 预训练)
+ * - detection -> runDetectionAutoAnnotate (走 fine-tune / 预训练 yolov8n/s/m/l/x)
+ * - segmentation -> 暂不接入 (提示去训练页)
+ */
+const onStartAutoLabelClick = async () => {
+  if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
+  const tt = currentTaskTypeRaw.value
+  if (tt === 'classification') {
+    await runAutoAnnotate()
+  } else if (tt === 'detection') {
+    await runDetectionAutoAnnotate()
+  } else if (tt === 'segmentation') {
+    ElMessage.info('分割任务的 AI 预标注请到「训练任务」页启动')
+  } else {
+    ElMessage.warning('未知任务类型: ' + tt)
+  }
+}
 
 const runAutoAnnotate = async () => {
   if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
@@ -533,6 +582,64 @@ const runAutoAnnotate = async () => {
   }
 }
 
+/**
+ * v2.3.2: 检测任务的 AI 预标注 (用预训练 yolov8n/s/m/l/x, 不依赖已训练 ModelVersion)
+ * 与分类 runAutoAnnotate 平行, 单独函数
+ */
+const runDetectionAutoAnnotate = async () => {
+  if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
+  if (!useFinetune.value) {
+    try {
+      await ElMessageBox.confirm(
+        [
+          `当前使用「预训练 ${detectionModelName.value}」(COCO 80 类).`,
+          '仅当数据集类目名与 COCO 类目重合时, 才会写入 BBoxAnnotation.',
+          '建议: 训练项目 fine-tune 模型后再做预标注, 准确率更高.',
+          '',
+          '是否继续?',
+        ].join('\n'),
+        '预训练模型预标注确认',
+        { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return
+    }
+  } else if (finetuneModels.value.length === 0) {
+    ElMessage.warning('当前项目还没有训练好的 fine-tune 模型! 请先训练一个再回这里做预标注.')
+    return
+  }
+  autoLabeling.value = true
+  try {
+    let resp: any
+    if (useFinetune.value) {
+      resp = await detectionApi.startAutoAnnotate({
+        dataset_id: datasetId.value,
+        model_version_id: selectedModelId.value,
+        conf_threshold: threshold.value,
+        iou_threshold: iouThreshold.value,
+      })
+    } else {
+      resp = await detectionApi.startAutoAnnotatePretrained({
+        dataset_id: datasetId.value,
+        model_name: detectionModelName.value,
+        conf_threshold: threshold.value,
+        iou_threshold: iouThreshold.value,
+      })
+    }
+    const matched = resp.matched_coco_classes || []
+    ElMessage.info(
+      `[预训练 ${detectionModelName.value}] 任务已入队, 等待 Celery worker 启动...` +
+      (matched.length
+        ? ` 匹配 COCO 类: ${matched.join(', ')}`
+        : ' 未匹配任何 COCO 类, 将无结果')
+    )
+  } catch (e: any) {
+    ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    autoLabeling.value = false
+  }
+}
+
 const submit = async (labelId: number, labelName: string, isConfirm: boolean) => {
   if (!image.value) return
   const cost = Date.now() - startTs.value
@@ -593,6 +700,9 @@ const currentTaskTypeRaw = computed(() => {
 })
 // v2.3.0 S10: 检测任务 IoU 阈值 (NMS), 仅 detection 时显示
 const iouThreshold = ref(0.45)
+// v2.3.2: 检测任务 AI 预标注模型 (YOLO 系列)
+const DETECTION_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
+const detectionModelName = ref('yolov8n')
 // v2.3.1 S10: 修复 -- 之前模板用 ref="detAnnotRef" 但 script setup 未声明,
 // 导致 detAnnot 在模板里 undefined, 渲染检测面板时抛 "Cannot read properties of undefined (reading 'mode')"
 const detAnnotRef = ref<any>(null)
@@ -717,11 +827,19 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <el-slider v-model="iouThreshold" :min="0.1" :max="0.95" :step="0.05" style="width: 160px;"
             :format-tooltip="(v: number) => v.toFixed(2)" />
         </el-form-item>
+        <!-- v2.3.2: 检测任务 AI 预标注模型选择 (YOLO) -->
+        <el-form-item v-if="currentTaskTypeRaw === 'detection'" label="AI 模型">
+          <el-select v-model="detectionModelName" placeholder="选择 YOLO 模型" size="small" style="width: 160px;">
+            <el-option
+              v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item>
           <el-tooltip
             :content="`当前: ${currentModelLabel}. 启动 AI 预标注会批量推理所有待标注图片, 命中阈值的图自动写入候选标签。`"
             placement="top">
-            <el-button type="primary" :icon="Lightning" :loading="autoLabeling" @click="runAutoAnnotate">
+            <el-button type="primary" :icon="Lightning" :loading="autoLabeling" @click="onStartAutoLabelClick">
               启动 AI 预标注
             </el-button>
           </el-tooltip>

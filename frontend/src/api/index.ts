@@ -464,6 +464,16 @@ export const detectionApi = {
     device?: string
     overwrite_existing?: boolean
   }) => http.post('/detection/auto-annotate', data),
+  // v2.3.2: 用预训练 yolov8n/s/m/l/x (无需 ModelVersion)
+  startAutoAnnotatePretrained: (data: {
+    dataset_id: number
+    model_name: string
+    conf_threshold?: number
+    iou_threshold?: number
+    imgsz?: number
+    device?: string
+    overwrite_existing?: boolean
+  }) => http.post('/detection/auto-annotate-pretrained', data),
   // ---- 进度 (旧: 轮询; 新: SSE) ----
   progress: (taskId: string) => http.get(`/detection/progress/${taskId}`),
   history: (taskId: string) => http.get(`/detection/history/${taskId}`),

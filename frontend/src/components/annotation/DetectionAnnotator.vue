@@ -47,17 +47,27 @@
 <template>
   <div class="det-annotator">
     <!-- 画布区域 (只渲染, 不带任何操作 UI) -->
-    <div ref="wrapRef" class="canvas-wrap">
-      <canvas
-        ref="canvasRef"
-        class="canvas"
-        :width="canvasSize.w"
-        :height="canvasSize.h"
-        @mousedown="onMouseDown"
-        @mousemove="onMouseMove"
-        @mouseup="onMouseUp"
-        @mouseleave="onMouseUp"
-      />
+    <div ref="wrapRef" class="canvas-wrap" @wheel.prevent="onWheel">
+      <div class="canvas-stage" :style="{ width: canvasSize.w + 'px', height: canvasSize.h + 'px', transform: `scale(${zoom})` }">
+        <canvas
+          ref="canvasRef"
+          class="canvas"
+          :width="canvasSize.w"
+          :height="canvasSize.h"
+          @mousedown="onMouseDown"
+          @mousemove="onMouseMove"
+          @mouseup="onMouseUp"
+          @mouseleave="onMouseUp"
+        />
+      </div>
+      <!-- v2.3.2: 缩放控制条 (顶部中间) -->
+      <div class="zoom-overlay">
+        <el-button-group size="small">
+          <el-button @click="zoomOut" :icon="ZoomOut" circle />
+          <el-button @click="zoomReset" plain style="min-width: 64px;">{{ zoomPercent }}%</el-button>
+          <el-button @click="zoomIn" :icon="ZoomIn" circle />
+        </el-button-group>
+      </div>
       <!-- 画布坐标浮标 (左下角) -->
       <div class="coord-overlay">
         <span v-if="cursorPos">
@@ -68,9 +78,9 @@
       </div>
       <!-- 画布尺寸 (右下角) -->
       <div class="size-overlay">
-        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}%
+        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}% · 显示 {{ zoomPercent }}%
       </div>
-      <!-- 模式徽章 (左下角上方, 实时显示当前模式) -->
+      <!-- 模式徽章 (左上角) -->
       <div class="mode-overlay" :class="`mode-${mode}`">
         {{ mode === 'draw' ? '绘制模式 (D)' : '编辑模式 (E)' }}
       </div>
@@ -137,6 +147,31 @@ const dragging = ref<DragState | null>(null)
 
 // 鼠标 hover 在 handle 上
 const hoverHandle = ref<ResizeHandle | null>(null)
+
+// v2.3.2: 画布缩放状态 (CSS transform, 不影响坐标计算)
+const zoom = ref(1.0)
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 8.0
+const zoomPercent = computed(() => Math.round(zoom.value * 100))
+function onWheel(e: WheelEvent) {
+  e.preventDefault()
+  // 鼠标位置局部坐标 (相对 wrapRef 中心)
+  const rect = wrapRef.value?.getBoundingClientRect()
+  if (!rect) return
+  const cx = e.clientX - rect.left
+  const cy = e.clientY - rect.top
+  // 缩放: deltaY < 0 放大
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom.value * factor))
+  if (newZoom === zoom.value) return
+  zoom.value = newZoom
+  // 缩放滚轮坐标: 让鼠标位置"对准" (粗略, 不需要 perfect pan)
+  // wrapRef 已经有 overflow: auto, 用户可滚动查看
+  void cx; void cy
+}
+function zoomIn() { zoom.value = Math.min(MAX_ZOOM, zoom.value * 1.25) }
+function zoomOut() { zoom.value = Math.max(MIN_ZOOM, zoom.value / 1.25) }
+function zoomReset() { zoom.value = 1.0 }
 
 // 画布坐标浮标
 const cursorPos = ref<{ x: number; y: number; nx: number; ny: number } | null>(null)
@@ -213,8 +248,7 @@ watch(
   () => props.imageUrl,
   () => {
     selectedIndex.value = null
-    undoStack.value = []
-    redoStack.value = []
+    resetInitial()  // v2.3.2 修复: 切图后重置 dirty, 避免新图仍显示有未保存改动
     loadImage()
   }
 )
@@ -371,6 +405,8 @@ function onMouseUp(_e: MouseEvent) {
       },
     ]
     emit('update:modelValue', next)
+    // v2.3.2: 画完新 bbox 立即选中, 用户可立即改类别
+    selectByIndex(next.length - 1)
     draw()
     return
   }
@@ -605,6 +641,7 @@ defineExpose({
   changeSelectedCategory,
   selectByIndex,
   save: onSave,
+  resetInitial,  // v2.3.2: 父组件保存后重置 dirty
   mode,
   canUndo,
   canRedo,
@@ -614,6 +651,11 @@ defineExpose({
   categories: computed(() => props.categories),
   colorOf,
   catName,
+  // v2.3.2: 画布缩放控制
+  zoomIn,
+  zoomOut,
+  zoomReset,
+  zoomPercent,
 })
 </script>
 
@@ -629,17 +671,35 @@ defineExpose({
   background: #fafafa;
   border: 1px solid #ebeef5;
   border-radius: 4px;
-  overflow: hidden;
+  overflow: auto;
   display: flex;
   justify-content: center;
-  align-items: center;
+  align-items: flex-start;
   min-height: 360px;
+  max-height: 70vh;
+}
+.canvas-stage {
+  position: relative;
+  transform-origin: top left;
+  flex-shrink: 0;
 }
 .canvas {
   display: block;
   max-width: 100%;
   cursor: crosshair;
   user-select: none;
+}
+/* v2.3.2: 缩放控制条 (顶部中间) */
+.zoom-overlay {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  padding: 2px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
 }
 /* 坐标浮标 (左下角) */
 .coord-overlay {

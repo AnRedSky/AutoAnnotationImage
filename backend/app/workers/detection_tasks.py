@@ -469,3 +469,182 @@ def auto_annotate_detection_task(
             "error": str(e)[:500],
         })
         return {"status": "FAILURE", "error": str(e)[:500]}
+
+
+# ============== v2.3.2: 用 ultralytics 预训练 yolov8n/s/m/l/x 做自动标注 ==============
+# 不依赖 ModelVersion, 用户没训练模型也能用
+PREDEFINED_YOLO_MODELS = {"yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x"}
+
+
+@celery_app.task(bind=True, name="detection.auto_annotate_pretrained")
+def auto_annotate_pretrained_task(
+    self,
+    dataset_id: int,
+    user_id: int,
+    model_name: str = "yolov8n",
+    conf_threshold: float = 0.25,
+    iou_threshold: float = 0.45,
+    imgsz: int = 320,
+    device: str = "cpu",
+    overwrite_existing: bool = False,
+):
+    """
+    v2.3.2: 用 ultralytics 预训练 YOLOv8n/s/m/l/x 做 detection 数据集预标注
+    与 auto_annotate_detection_task 区别: 不需要已训练 ModelVersion,
+    ultralytics 会自动下载预训练权重 (yolov8n.pt 等).
+    """
+    from app.database import AsyncSessionLocal
+    from app.models import Image as ImageModel
+    from app.models.bbox_annotation import BBoxAnnotation
+    from app.models.annotation_log import AnnotationLog
+    from app.models.category import Category
+    from app.ml.detection import predict_image_grouped, YoloTrainError
+    from sqlalchemy import select, delete
+
+    task_id = self.request.id
+
+    if model_name not in PREDEFINED_YOLO_MODELS:
+        return {
+            "status": "FAILURE",
+            "error": f"不支持的预训练模型: {model_name}, 可选 {PREDEFINED_YOLO_MODELS}",
+        }
+
+    try:
+        # 1) 拉全部 detection 图
+        async def _load_images() -> list:
+            async with AsyncSessionLocal() as db:
+                rows = (await db.execute(
+                    select(ImageModel)
+                    .where(
+                        ImageModel.dataset_id == dataset_id,
+                        ImageModel.task_type == "detection",
+                    )
+                    .order_by(ImageModel.id.asc())
+                )).scalars().all()
+                return [(r.id, r.file_path) for r in rows]
+        items = _run_async(_load_images())
+        if not items:
+            return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
+
+        # 2) 拉 Category
+        async def _load_cats() -> list:
+            async with AsyncSessionLocal() as db:
+                rows = (await db.execute(
+                    select(Category)
+                    .where(Category.dataset_id == dataset_id)
+                    .order_by(Category.id.asc())
+                )).scalars().all()
+                return list(rows)
+        cats = _run_async(_load_cats())
+        index_to_cat = {i: c for i, c in enumerate(cats)}
+
+        # 3) 拼图片绝对路径 + 过滤存在
+        from app.services.storage_service import storage_service
+        abs_paths = []
+        valid_ids = []
+        for img_id, fp in items:
+            p = Path(fp)
+            if not p.is_absolute():
+                p = (Path(storage_service.base_path).resolve() / fp).resolve()
+            if p.exists():
+                abs_paths.append(str(p))
+                valid_ids.append(img_id)
+
+        if not abs_paths:
+            return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
+
+        # 4) 加载 ultralytics 预训练权重
+        # ultralytics 会自动下载 yolov8n.pt 到 ~/.cache/ultralytics/
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            return {"status": "FAILURE", "error": f"ultralytics 未安装: {e}"}
+        try:
+            pretrained = YOLO(f"{model_name}.pt")
+            weights_path = str(pretrained.ckpt_path) if hasattr(pretrained, "ckpt_path") else f"{model_name}.pt"
+        except Exception as e:
+            return {"status": "FAILURE", "error": f"加载预训练权重失败: {e}"}
+
+        # 5) 推理 (复用 predict_image_grouped, 与已训练模型走同一条路径)
+        def _progress_cb(p, msg):
+            _set_task_state(self, "PROGRESS", {
+                "progress": round(p, 2),
+                "msg": msg,
+                "total": len(abs_paths),
+            })
+
+        grouped = predict_image_grouped(
+            weights_path=weights_path,
+            image_paths=abs_paths,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            imgsz=imgsz,
+            device=device,
+        )
+
+        # 6) 写 BBoxAnnotation
+        async def _write_results():
+            async with AsyncSessionLocal() as db:
+                auto_labeled = 0
+                no_match = 0
+                for i, (img_id, p) in enumerate(zip(valid_ids, abs_paths)):
+                    boxes = grouped.get(p, [])
+                    if not boxes:
+                        no_match += 1
+                        continue
+                    if overwrite_existing:
+                        await db.execute(
+                            delete(BBoxAnnotation).where(BBoxAnnotation.image_id == img_id)
+                        )
+                    for b in boxes:
+                        cat = index_to_cat.get(b.get("class_index"))
+                        if not cat:
+                            continue
+                        row = BBoxAnnotation(
+                            image_id=img_id,
+                            category_id=cat.id,
+                            x_min=b["x_min"], y_min=b["y_min"],
+                            x_max=b["x_max"], y_max=b["y_max"],
+                            confidence=float(b.get("confidence", 0.0)),
+                            source="pretrained",  # 标记来源
+                            model_name=model_name,
+                        )
+                        db.add(row)
+                    db.add(AnnotationLog(
+                        image_id=img_id,
+                        user_id=user_id,
+                        action="auto_annotate_pretrained",
+                        payload={"model": model_name, "n_boxes": len(boxes)},
+                    ))
+                    auto_labeled += 1
+                await db.commit()
+                return auto_labeled, no_match
+
+        _set_task_state(self, "PROGRESS", {
+            "progress": 0.0, "msg": f"写入 bbox (模型={model_name})...",
+            "total": len(abs_paths),
+        })
+        auto_labeled, no_match = _run_async(_write_results())
+
+        _set_task_state(self, "SUCCESS", {
+            "progress": 1.0, "msg": "完成",
+            "total": len(abs_paths),
+            "auto_labeled": auto_labeled,
+            "no_match": no_match,
+        })
+        return {
+            "status": "SUCCESS",
+            "model_name": model_name,
+            "weights": weights_path,
+            "total": len(abs_paths),
+            "auto_labeled": auto_labeled,
+            "no_match": no_match,
+        }
+
+    except Exception as e:
+        _set_task_state(self, "FAILURE", {
+            "exc_type": type(e).__name__,
+            "exc_message": str(e)[:200],
+            "error": str(e)[:500],
+        })
+        return {"status": "FAILURE", "error": str(e)[:500]}
