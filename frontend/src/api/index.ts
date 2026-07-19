@@ -557,7 +557,10 @@ export const segmentationApi = {
     })
   },
   getMask: (imageId: number, download = false) =>
-    http.get(`/segmentation/masks/${imageId}`, { params: download ? { download: 'true' } : {} }),
+    http.get(`/segmentation/masks/${imageId}`, {
+      params: download ? { download: 'true' } : {},
+      responseType: download ? 'blob' : 'json',
+    }),
   removeMask: (maskId: number) => http.delete(`/segmentation/masks/${maskId}`),
   listMasks: (imageIds: number[]) =>
     http.get('/segmentation/masks/list', { params: { image_ids: imageIds.join(',') } }),

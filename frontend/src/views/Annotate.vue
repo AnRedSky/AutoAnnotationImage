@@ -12,7 +12,10 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Close, Lightning, View, ArrowLeft } from '@element-plus/icons-vue'
-import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi } from '@/api'
+import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi, detectionApi, segmentationApi } from '@/api'
+import { getTaskTypeMeta } from '@/utils/taskType'
+import DetectionAnnotator from '@/components/annotation/DetectionAnnotator.vue'
+import SegmentationAnnotator from '@/components/annotation/SegmentationAnnotator.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,6 +35,20 @@ const finetuneModels = ref<any[]>([]) // 项目训练的 fine-tune models
 const selectedModelId = ref<number | null>(null)  // 当前选中的 fine-tune model id
 const activeModel = ref<any>(null)    // 当前激活的 model (引导用)
 const autoLabeling = ref(false)
+
+// ============== v2.1.0: 检测 / 分割画布数据 ==============
+// detection: 已有 bbox 列表 (归一化坐标, 与后端 BBoxAnnotation 一致)
+const bboxList = ref<Array<{
+  id?: number
+  x_min: number; y_min: number; x_max: number; y_max: number
+  category_id: number; confidence?: number
+}>>([])
+// segmentation: 已有 mask 的 URL (后端 /api/segmentation/masks/{id}?download=true 返回的 PNG blob URL)
+const initialMaskUrl = ref<string | null>(null)
+// segmentation: mask 元信息 (id/width/height), 用于保存时决定 update vs create
+const initialMaskMeta = ref<{ id: number; width: number; height: number } | null>(null)
+// 标注器保存中 (loading 态)
+const annotatorSaving = ref(false)
 const stats = ref<any>(null)
 const sessionStats = ref({ confirmed: 0, corrected: 0, total_time_ms: 0 })
 // 严格模式: 默认使用项目训练的 fine-tune 模型, 严禁默认走基础模型
@@ -163,6 +180,7 @@ async function refreshStats() {
 /**
  * 按 id 加载图片并填充 candidates / startTs
  * 不动 historyCursor, 由调用方控制 (loadNext / loadPrev)
+ * v2.1.0 新增: 根据 task_type 加载 bbox / mask 已有数据
  */
 const fillImage = (item: any) => {
   image.value = item
@@ -174,6 +192,106 @@ const fillImage = (item: any) => {
     candidates.value = []
   }
   startTs.value = Date.now()
+  // 重置画布数据
+  bboxList.value = []
+  if (initialMaskUrl.value) {
+    URL.revokeObjectURL(initialMaskUrl.value)
+    initialMaskUrl.value = null
+  }
+  initialMaskMeta.value = null
+  // 按 task_type 拉取已有标注
+  if (item?.id && item.task_type === 'detection') {
+    loadDetectionAnnotations(item.id)
+  } else if (item?.id && item.task_type === 'segmentation') {
+    loadSegmentationMask(item.id)
+  }
+}
+
+/** 加载某图的已有 bbox 列表 */
+const loadDetectionAnnotations = async (imageId: number) => {
+  try {
+    const r: any = await detectionApi.listBBoxes(imageId)
+    const items = r?.items || r || []
+    bboxList.value = items.map((b: any) => ({
+      id: b.id,
+      x_min: b.x_min, y_min: b.y_min,
+      x_max: b.x_max, y_max: b.y_max,
+      category_id: b.category_id,
+      confidence: b.confidence,
+    }))
+  } catch (e: any) {
+    bboxList.value = []
+    // 静默失败: 没标就是没标
+  }
+}
+
+/** 加载某图的已有 mask (作为初始 mask 渲染到画布) */
+const loadSegmentationMask = async (imageId: number) => {
+  try {
+    // 1) 元数据
+    const r: any = await segmentationApi.getMask(imageId)
+    if (!r || !r.file_exists || !r.id) {
+      initialMaskMeta.value = null
+      initialMaskUrl.value = null
+      return
+    }
+    initialMaskMeta.value = { id: r.id, width: r.width, height: r.height }
+    // 2) 拉 PNG 二进制 (responseType=blob)
+    const resp: any = await segmentationApi.getMask(imageId, true)
+    const blob: Blob | null = resp instanceof Blob ? resp
+      : (resp?.data instanceof Blob ? resp.data : null)
+    if (blob) {
+      if (initialMaskUrl.value) URL.revokeObjectURL(initialMaskUrl.value)
+      initialMaskUrl.value = URL.createObjectURL(blob)
+    } else {
+      initialMaskUrl.value = null
+    }
+  } catch {
+    initialMaskMeta.value = null
+    initialMaskUrl.value = null
+  }
+}
+
+/** 保存 detection bbox 列表: clear 旧 + 批量 save 新 */
+const saveDetectionBBoxes = async (bboxes: any[]) => {
+  if (!image.value?.id) return
+  annotatorSaving.value = true
+  try {
+    // 1) 清空旧 bbox
+    await detectionApi.clearBBoxes(image.value.id)
+    // 2) 批量写入新 bbox
+    for (const b of bboxes) {
+      await detectionApi.saveBBox(image.value.id, {
+        x_min: b.x_min, y_min: b.y_min,
+        x_max: b.x_max, y_max: b.y_max,
+        category_id: b.category_id,
+        confidence: b.confidence ?? null,
+        source: 'human',
+      })
+    }
+    ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
+    // 重新拉一次以同步 id 字段
+    await loadDetectionAnnotations(image.value.id)
+  } catch (e: any) {
+    ElMessage.error('bbox 保存失败: ' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    annotatorSaving.value = false
+  }
+}
+
+/** 保存 segmentation mask: 上传 PNG 文件 (后端自动判断 create vs update) */
+const saveSegmentationMask = async (file: File) => {
+  if (!image.value?.id) return
+  annotatorSaving.value = true
+  try {
+    await segmentationApi.uploadMask(image.value.id, file, 'human')
+    ElMessage.success('mask 已保存')
+    await loadSegmentationMask(image.value.id)
+  } catch (e: any) {
+    ElMessage.error('mask 保存失败: ' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    annotatorSaving.value = false
+  }
 }
 
 /**
@@ -583,19 +701,56 @@ const currentTaskType = computed(() => {
         <el-card :title="image ? `待标注图片 #${image.id}` : '待标注图片'">
           <div v-if="loading" v-loading="true" style="height: 360px;"></div>
           <div v-else-if="image" class="annotate-canvas">
-            <img :src="imageApi.fileUrl(image.id)" alt="待标注"
-              style="max-width: 100%; max-height: 480px;" />
+            <!-- v2.1.0: 按 task_type 分派 annotator
+                 - detection:    DetectionAnnotator (canvas 拖拽画 bbox)
+                 - segmentation: SegmentationAnnotator (canvas 画刷画 mask)
+                 - classification: 沿用原 img + AI 候选 (不变) -->
+            <template v-if="image.task_type === 'detection'">
+              <DetectionAnnotator
+                :image-url="imageApi.fileUrl(image.id)"
+                :image-id="image.id"
+                :image-width="image.width || 0"
+                :image-height="image.height || 0"
+                :categories="categories"
+                v-model="bboxList"
+                :disabled="annotatorSaving"
+                @save="saveDetectionBBoxes"
+                @cancel="loadDetectionAnnotations(image.id)"
+              />
+            </template>
+            <template v-else-if="image.task_type === 'segmentation'">
+              <SegmentationAnnotator
+                :image-url="imageApi.fileUrl(image.id)"
+                :image-id="image.id"
+                :image-width="image.width || 0"
+                :image-height="image.height || 0"
+                :categories="categories"
+                :initial-mask-url="initialMaskUrl"
+                :disabled="annotatorSaving"
+                @save="saveSegmentationMask"
+                @cancel="loadSegmentationMask(image.id)"
+              />
+            </template>
+            <template v-else>
+              <img :src="imageApi.fileUrl(image.id)" alt="待标注"
+                style="max-width: 100%; max-height: 480px;" />
+            </template>
             <div style="color: #999; margin-top: 8px; font-size: 13px;">
               <strong>{{ image.filename }}</strong>
               | 尺寸: {{ image.width }}×{{ image.height }}
               | 大小: {{ ((image.file_size || 0) / 1024).toFixed(1) }} KB
+              <el-tag v-if="image.task_type" size="small" effect="plain" :type="getTaskTypeMeta(image.task_type).type" style="margin-left: 6px;">
+                {{ getTaskTypeMeta(image.task_type).label }}
+              </el-tag>
             </div>
           </div>
           <el-empty v-else description="暂无待标注图片, 可先点「启动 AI 预标注」批量推理" />
         </el-card>
       </el-col>
       <el-col :span="10">
-        <el-card title="AI 候选标签（Top-5）">
+        <!-- v2.1.0: AI Top-5 候选仅在 classification 任务显示
+             检测 / 分割任务由 DetectionAnnotator / SegmentationAnnotator 负责标注 -->
+        <el-card v-if="!image || image.task_type === 'classification'" title="AI 候选标签（Top-5）">
           <el-empty v-if="!loading && candidates.length === 0 && !image" description="请选择数据集" :image-size="80" />
           <el-empty v-else-if="candidates.length === 0" description="该图无 AI 预测, 请直接选择其他类别" :image-size="60" />
           <!-- 关键简化: 基础模型 (ImageNet 预训练) 输出 = 全部 Top-5 都不在项目类目
