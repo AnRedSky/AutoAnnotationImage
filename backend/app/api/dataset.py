@@ -82,6 +82,7 @@ async def list_datasets(
                 "id": d.id,
                 "name": d.name,
                 "description": d.description,
+                "task_type": d.task_type,
                 "image_count": d.image_count,
                 "annotated_count": d.annotated_count,
                 "category_count": d.category_count,
