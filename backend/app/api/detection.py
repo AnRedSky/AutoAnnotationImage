@@ -476,3 +476,92 @@ async def stream_job_progress(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============== S4 模型激活 (detection 专用别名) ==============
+#
+# 沿用 v1.0.0 model.py 的 with_for_update() 行锁模式 (允许多激活并存).
+# 此处加 /api/detection/models/* 路由, 是给"目标检测"工作台用的语义化入口.
+# 内部实现与 /api/models/{id}/activate 完全等价, 仅校验 task_type == "detection".
+
+
+async def _lock_dataset_models(db: AsyncSession, dataset_id: Optional[int]) -> None:
+    """锁住指定 dataset 的所有 ModelVersion 行 (SELECT ... FOR UPDATE)"""
+    stmt = select(ModelVersion)
+    if dataset_id is not None:
+        stmt = stmt.where(ModelVersion.dataset_id == dataset_id)
+    stmt = stmt.with_for_update()
+    (await db.execute(stmt)).scalars().all()
+
+
+@router.post("/models/{model_id}/activate")
+async def activate_detection_model(
+    model_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    激活 detection 模型 (语义化入口)
+    - 校验 mv.task_type == "detection"
+    - 行锁后置 is_active = True, 幂等
+    """
+    target = await db.get(ModelVersion, model_id)
+    if not target:
+        raise HTTPException(404, f"ModelVersion id={model_id} not found")
+    if target.task_type != TaskType.DETECTION.value:
+        raise HTTPException(
+            400,
+            f"ModelVersion task_type={target.task_type!r}, "
+            f"expected 'detection'",
+        )
+
+    try:
+        await _lock_dataset_models(db, target.dataset_id)
+        target.is_active = True
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"激活失败: {e}")
+
+    return {
+        "success": True,
+        "model_id": model_id,
+        "task_type": target.task_type,
+        "dataset_id": target.dataset_id,
+        "is_active": target.is_active,
+    }
+
+
+@router.post("/models/{model_id}/deactivate")
+async def deactivate_detection_model(
+    model_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    取消激活 detection 模型
+    """
+    target = await db.get(ModelVersion, model_id)
+    if not target:
+        raise HTTPException(404, f"ModelVersion id={model_id} not found")
+    if target.task_type != TaskType.DETECTION.value:
+        raise HTTPException(
+            400,
+            f"ModelVersion task_type={target.task_type!r}, "
+            f"expected 'detection'",
+        )
+
+    try:
+        await _lock_dataset_models(db, target.dataset_id)
+        target.is_active = False
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"取消激活失败: {e}")
+
+    return {
+        "success": True,
+        "model_id": model_id,
+        "task_type": target.task_type,
+        "is_active": target.is_active,
+    }
