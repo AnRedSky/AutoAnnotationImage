@@ -11,6 +11,7 @@ from app.api import (
     training, model as model_api, files,
     auto_annotate, export, stats, system,
     detection,  # v2.0.0 目标检测
+    segmentation,  # v2.0.0 图像分割
 )
 from app.config import settings
 from app.database import init_db
@@ -74,6 +75,8 @@ app.include_router(stats.router, prefix="/api/stats", tags=["统计分析"])
 app.include_router(files.router, prefix="/api/files", tags=["文件服务"])
 # v2.0.0 目标检测: bbox 标注 CRUD + 训练 (S3+ 训练) 端点
 app.include_router(detection.router, prefix="/api/detection", tags=["目标检测"])
+# v2.0.0 图像分割: mask CRUD (S5)
+app.include_router(segmentation.router, prefix="/api/segmentation", tags=["图像分割"])
 # system router 暴露 /api/health, /api/system/info 两个无鉴权端点
 app.include_router(system.router, prefix="/api", tags=["系统"])
 
