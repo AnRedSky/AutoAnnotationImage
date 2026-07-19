@@ -7,12 +7,16 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
 
-import timm
-import torch
-import torch.nn.functional as F
+# v2.0.0 S2: timm/torch 改为延迟导入, 避免非 AI 链路测试 (如 bbox CRUD) 被强制拉
+# 整个 torch (~2GB 运行时) 才能 import 该模块。实际加载/推理时再 import。
+if TYPE_CHECKING:  # 仅类型注解用, 运行时无开销
+    import timm
+    import torch
+    import torch.nn.functional as F
+
 from PIL import Image
 
 
@@ -99,15 +103,22 @@ class AIService:
 
     def __init__(self):
         # 设备选择：尊重 INFERENCE_DEVICE 配置
+        # v2.0.0 S2: 延迟 import torch + 容错, 避免无 AI 调用路径的测试环境
+        # (未装 timm/torch) 强制拉整个 torch (~2GB 运行时) 才能 import 本模块
         from app.config import settings
-        if settings.INFERENCE_DEVICE == "cuda" and torch.cuda.is_available():
-            self.device = torch.device("cuda")
-        elif settings.INFERENCE_DEVICE == "cuda":
-            # 用户要求 cuda 但不可用，回退 CPU 并打印警告
-            print(f"[WARN] INFERENCE_DEVICE=cuda 但未检测到 CUDA，回退到 CPU")
-            self.device = torch.device("cpu")
-        else:
-            self.device = torch.device("cpu")
+        try:
+            import torch  # lazy
+            if settings.INFERENCE_DEVICE == "cuda" and torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif settings.INFERENCE_DEVICE == "cuda":
+                # 用户要求 cuda 但不可用，回退 CPU 并打印警告
+                print(f"[WARN] INFERENCE_DEVICE=cuda 但未检测到 CUDA，回退到 CPU")
+                self.device = torch.device("cpu")
+            else:
+                self.device = torch.device("cpu")
+        except ImportError:
+            # 无 torch 环境下: 保留 None 占位, 实际调用 predict/load 时再报错
+            self.device = None
         self.current_model = None
         self.current_model_name: Optional[str] = None
         self.current_model_path: Optional[str] = None
@@ -142,6 +153,7 @@ class AIService:
     async def load_pretrained(self, model_name: str = "efficientnet_b0"):
         """异步加载 timm 预训练模型（带超时，避免无网络时长时间阻塞）"""
         import os
+        import timm  # lazy: 只在显式加载预训练模型时引入
         # 缩短 HF Hub 的连接 / 读取超时（默认 10s/无限制 -> 3s/15s）
         os.environ.setdefault("HF_HUB_CONNECT_TIMEOUT", "3")
         os.environ.setdefault("HF_HUB_READ_TIMEOUT", "15")
@@ -165,6 +177,8 @@ class AIService:
 
     async def load_local(self, model_name: str, model_path: str, num_classes: int):
         """异步加载本地训练好的模型"""
+        import timm  # lazy
+        import torch  # lazy
         loop = asyncio.get_event_loop()
         model = await loop.run_in_executor(
             self._executor,
@@ -183,6 +197,8 @@ class AIService:
 
     def _predict_sync(self, image_path: str, top_k: int) -> Dict:
         """同步推理 (在线程池执行)"""
+        import torch
+        import torch.nn.functional as F  # lazy
         img = Image.open(image_path).convert("RGB")
         transform = self._build_transform(self.current_model)
         input_tensor = transform(img).unsqueeze(0).to(self.device)

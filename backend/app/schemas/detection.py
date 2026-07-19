@@ -57,6 +57,14 @@ class BBoxListOut(BaseModel):
     items: List[BBoxOut] = []
 
 
+class BBoxBatchSaveResult(BaseModel):
+    """批量入库结果 (S2 占位, S3 接入 Celery 后用真实结果)"""
+    success: bool
+    received: int
+    message: str = ""
+    image_ids: List[int] = []
+
+
 class DetectionTrainRequest(BaseModel):
     """启动检测训练请求
 

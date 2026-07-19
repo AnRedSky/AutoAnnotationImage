@@ -10,6 +10,7 @@ from app.api import (
     auth, user, dataset, image, annotation,
     training, model as model_api, files,
     auto_annotate, export, stats, system,
+    detection,  # v2.0.0 目标检测
 )
 from app.config import settings
 from app.database import init_db
@@ -71,6 +72,8 @@ app.include_router(model_api.router, prefix="/api/models", tags=["模型管理"]
 app.include_router(export.router, prefix="/api/export", tags=["标注导出"])
 app.include_router(stats.router, prefix="/api/stats", tags=["统计分析"])
 app.include_router(files.router, prefix="/api/files", tags=["文件服务"])
+# v2.0.0 目标检测: bbox 标注 CRUD + 训练 (S3+ 训练) 端点
+app.include_router(detection.router, prefix="/api/detection", tags=["目标检测"])
 # system router 暴露 /api/health, /api/system/info 两个无鉴权端点
 app.include_router(system.router, prefix="/api", tags=["系统"])
 

@@ -694,9 +694,23 @@ async def delete_image(
     删除单张图片
     - 删文件
     - 删 AnnotationLog (CASCADE 已配)
+    - 删 BBoxAnnotation / SegmentationMask (v2.0.0: ORM cascade='all, delete-orphan')
     - 更新 dataset.image_count / annotated_count
+
+    关键: 必须 eager load 关联 (bbox_annotations / segmentation_mask), 否则
+    SQLAlchemy 的 ORM cascade 不会触发, bbox/mask 会残留 (即使 DB 层有
+    ON DELETE CASCADE, SQLite 默认不开启 PRAGMA foreign_keys, 也不可靠)
     """
-    img = await db.get(Image, image_id)
+    from sqlalchemy.orm import selectinload
+    stmt = (
+        select(Image)
+        .where(Image.id == image_id)
+        .options(
+            selectinload(Image.bbox_annotations),
+            selectinload(Image.segmentation_mask),
+        )
+    )
+    img = (await db.execute(stmt)).scalar_one_or_none()
     if not img:
         raise HTTPException(404, "Image not found")
 

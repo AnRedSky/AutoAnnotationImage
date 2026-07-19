@@ -23,13 +23,18 @@ dist/
 
 # Project
 uploads/
-/models/        # 只忽略项目根目录的 models/ (ML 权重), 不影响 backend/app/models (ORM)
-/backend/models/  # 训练产出 .pth / .onnx
+/models/                    # 项目根目录的 ML 权重 (历史, 未使用)
+/backend/models/            # 训练产出 .pth / hf_cache (运行时下载)
+/backend/models/**/*.pth    # 单文件兜底
+/backend/models/**/*.onnx
+/backend/models/hf_cache/   # HuggingFace / timm 预训练模型缓存
 *.pth
 *.onnx
+*.safetensors
 *.jpg
 *.png
 !frontend/public/
+
 
 # OS
 .DS_Store

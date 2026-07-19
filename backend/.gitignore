@@ -38,11 +38,12 @@ logs/
 *.sqlite3
 
 # 模型与数据
-models/*.pth
-models/*.onnx
+/models/*.pth
+/models/*.onnx
+/models/hf_cache/   # HuggingFace / timm 预训练模型缓存
 uploads/
 data/raw/
 data/processed/
-
+models/
 # 系统
 Thumbs.db
