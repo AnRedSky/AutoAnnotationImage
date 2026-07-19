@@ -213,6 +213,13 @@ function redo() {
 // dirty
 const initial = ref<string>(JSON.stringify(props.modelValue || []))
 const dirty = computed(() => JSON.stringify(props.modelValue || []) !== initial.value)
+function resetInitial() {
+  initial.value = JSON.stringify(props.modelValue || [])
+  // 重置 dirty 时, 同步重置撤销栈 (否则切图后 undo 会回到旧图状态)
+  undoStack.value = []
+  redoStack.value = []
+  selectedIndex.value = null
+}
 
 const selectedCategoryId = computed(() => {
   if (selectedIndex.value === null) return null
