@@ -593,6 +593,10 @@ const currentTaskTypeRaw = computed(() => {
 })
 // v2.3.0 S10: 检测任务 IoU 阈值 (NMS), 仅 detection 时显示
 const iouThreshold = ref(0.45)
+// v2.3.1 S10: 修复 -- 之前模板用 ref="detAnnotRef" 但 script setup 未声明,
+// 导致 detAnnot 在模板里 undefined, 渲染检测面板时抛 "Cannot read properties of undefined (reading 'mode')"
+const detAnnotRef = ref<any>(null)
+const detAnnot = computed(() => detAnnotRef.value || {})
 </script>
 
 <template>
