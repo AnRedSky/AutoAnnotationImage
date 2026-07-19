@@ -77,23 +77,8 @@ const historyCursor = ref(-1)
 const noMore = ref(false)
 
 onMounted(async () => {
-  try {
-    const ds: any = await datasetApi.list()
-    datasets.value = ds?.items || ds || []
-    if (route.params?.datasetId) {
-      datasetId.value = Number(route.params.datasetId)
-    } else if (datasets.value.length > 0) {
-      datasetId.value = datasets.value[0].id
-    }
-    // 加载 base models (timm) + 项目 fine-tune models
-    const ms: any = await autoAnnotateApi.models()
-    models.value = ms?.models || []
-    // v2 改造: 默认拉"当前 dataset"的激活模型, 而不是全量 fine-tune 列表
-    // 切换 dataset 时 (watch) 也会重新拉该 dataset 的激活模型
-    await refreshFinetuneModels()
-  } catch (e: any) {
-    ElMessage.error('初始化失败: ' + (e?.response?.data?.detail || e?.message))
-  }
+  // v2.3.2: 把初始化抽成 loadAll, 失败时 UI 可见 (datasetsLoadError + 重试按钮)
+  await loadAll()
 })
 
 /**
@@ -593,6 +578,41 @@ const currentTaskTypeRaw = computed(() => {
 })
 // v2.3.0 S10: 检测任务 IoU 阈值 (NMS), 仅 detection 时显示
 const iouThreshold = ref(0.45)
+// v2.3.1 S10: DetectionAnnotator 组件 ref, 用于右侧面板调其方法
+const detAnnotRef = ref<any>(null)
+// 方便模板里读 canUndo / canRedo / mode / selectedIndex (都从 ref.value 暴露)
+const detAnnot = computed(() => detAnnotRef.value || {})
+// v2.3.2: datasets 加载错误状态, 用于在 UI 显式提示
+const datasetsLoadError = ref(false)
+
+/** v2.3.2: 重试加载所有初始数据 (datasets + models) */
+const retryLoadAll = async () => {
+  await loadAll()
+}
+/** v2.3.2: 跳转到数据集管理页 (用户没数据集时) */
+const goToDatasets = () => {
+  router.push('/datasets')
+}
+/** v2.3.2: 加载所有初始数据, 可重入 (初次 / 重试) */
+const loadAll = async () => {
+  datasetsLoadError.value = false
+  try {
+    const ds: any = await datasetApi.list()
+    datasets.value = ds?.items || ds || []
+    if (route.params?.datasetId) {
+      datasetId.value = Number(route.params.datasetId)
+    } else if (datasets.value.length > 0) {
+      datasetId.value = datasets.value[0].id
+    }
+    const ms: any = await autoAnnotateApi.models()
+    models.value = ms?.models || []
+    await refreshFinetuneModels()
+  } catch (e: any) {
+    datasetsLoadError.value = true
+    ElMessage.error('初始化失败: ' + (e?.response?.data?.detail || e?.message))
+    console.error('[Annotate.vue] 初始化失败', e)
+  }
+}
 </script>
 
 <template>
@@ -635,9 +655,21 @@ const iouThreshold = ref(0.45)
     <el-card style="margin-bottom: 16px;">
       <el-form inline>
         <el-form-item label="数据集">
-          <el-select v-model="datasetId" placeholder="请选择" class="app-select" filterable>
+          <!-- v2.3.2: datasets 为空时显示明确提示, 而不是 el-select 默认的"无数据" -->
+          <el-select
+            v-if="datasets.length > 0"
+            v-model="datasetId" placeholder="请选择数据集" class="app-select" filterable
+          >
             <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
+          <el-button
+            v-else size="small" type="primary" :icon="Plus" @click="goToDatasets"
+          >去创建数据集</el-button>
+          <!-- v2.3.2: 加载错误提示 + 手动重试 -->
+          <el-button
+            v-if="datasetsLoadError" size="small" type="warning" plain style="margin-left: 6px;"
+            @click="retryLoadAll"
+          >重试加载</el-button>
         </el-form-item>
         <!-- S7 新增: 当前 dataset 任务类型徽章 (数据集旁边) -->
         <el-form-item v-if="datasetId" label="任务类型">
