@@ -437,6 +437,9 @@ export const detectionApi = {
   removeBBox: (id: number) => http.delete(`/detection/annotations/${id}`),
   clearBBoxes: (imageId: number) =>
     http.delete(`/detection/annotations/clear/${imageId}`),
+  // ---- 统计 (v2.2.0 S9.2) ----
+  stats: (datasetId: number) =>
+    http.get(`/detection/stats/${datasetId}`),
   // ---- 训练 ----
   startTrain: (data: {
     dataset_id: number
