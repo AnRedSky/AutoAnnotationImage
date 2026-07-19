@@ -1190,17 +1190,18 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             <div class="op-section-title">提交</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
-                type="primary" :icon="Check" style="flex: 1;"
-                :disabled="!detAnnot.dirty?.value || bboxList.length === 0"
-                @click="detAnnot.save?.()"
+                type="primary"
+                :icon="Check"
+                :disabled="!detAnnotRef?.dirty?.value || bboxList.length === 0"
+                @click="detAnnotRef?.save?.()"
               >保存 ({{ bboxList.length }})</el-button>
               <el-button
                 :icon="Close" style="flex: 1;"
-                :disabled="!detAnnot.dirty?.value"
+                :disabled="!detAnnotRef?.dirty?.value"
                 @click="cancelDetectionDraft"
               >取消</el-button>
             </div>
-            <div v-if="detAnnot.dirty?.value" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
+            <div v-if="detAnnotRef?.dirty?.value" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
               ● 有未保存的修改
             </div>
           </div>
