@@ -320,9 +320,6 @@ onBeforeUnmount(() => {
   maskEl.onload = null
   maskEl.onerror = null
 })
-
-// 强制 re-export (TS 提示)
-export {}
 </script>
 
 <style scoped>
