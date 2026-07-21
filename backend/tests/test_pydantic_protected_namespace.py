@@ -18,6 +18,7 @@ def test_schema_no_protected_namespace_warning():
         from app.schemas.segmentation import SegmentationTrainRequest  # noqa: PLC0415
         from app.schemas.detection import DetectionTrainRequest  # noqa: PLC0415
         from app.api.auto_annotate import AutoAnnotateRequest  # noqa: PLC0415
+        from app.api.image import PreviewConfidenceRequest  # noqa: PLC0415
 
         # 实例化每个有 model_name 的 schema
         TrainStartRequest(dataset_id=1, model_name="v1")
@@ -25,6 +26,12 @@ def test_schema_no_protected_namespace_warning():
         SegmentationTrainRequest(dataset_id=1, model_name="seg_v1")
         DetectionTrainRequest(dataset_id=1, model_name="det_v1")
         AutoAnnotateRequest(dataset_id=1, model_name="eff")
+        # v2.1.7 漏掉: image.py:32 PreviewConfidenceRequest
+        PreviewConfidenceRequest(
+            dataset_id=1, image_ids=[1],
+            model_name="efficientnet_b0", model_id=None,
+            confidence_threshold=0.6, use_finetune=True,
+        )
 
     # 收集所有 "protected namespace" 警告
     bad = [

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func, case
 from PIL import Image as PILImage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from io import BytesIO
 from datetime import datetime
 
@@ -34,6 +34,7 @@ class PreviewConfidenceRequest(BaseModel):
     POST /api/images/preview-confidence 请求体
     非破坏性测评: 对指定图片跑模型, 返回 top-1 置信度及在当前阈值下是否会被自动标注
     """
+    model_config = ConfigDict(protected_namespaces=())  # 允许 model_name/model_id 字段
     dataset_id: int = Field(..., description="数据集 id")
     image_ids: List[int] = Field(..., description="要测评的图片 id 列表")
     model_name: Optional[str] = Field(
