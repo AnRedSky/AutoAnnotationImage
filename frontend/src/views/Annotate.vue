@@ -169,6 +169,11 @@ const aiLabeledCount = computed(() => {
   return (stats.value?.status_counts || {}).ai_labeled || 0
 })
 
+// v2.5.0 S12.3b: 分割任务面板 state
+const segAnnotRef = ref<any>(null)
+const segMode = ref<'brush' | 'erase' | 'pan'>('brush')
+const segMaskStatsLabel = ref('—')
+
 async function refreshStats() {
   if (!datasetId.value) return
   try {
@@ -347,6 +352,28 @@ const saveSegmentationMask = async (file: File) => {
   }
 }
 
+/** v2.5.0: 分割任务切图时调用 (复用已有的 loadSegmentationMask) */
+const onSegmentationImageChange = async (imageId: number) => {
+  await loadSegmentationMask(imageId)
+}
+
+/** v2.5.0: 分割任务侧边栏 4 个 onclick handler */
+const onSegModeChange = (m: 'brush' | 'erase' | 'pan') => {
+  segMode.value = m
+  segAnnotRef.value?.setMode?.(m)
+}
+const onSegCategoryChange = (id: number) => {
+  segAnnotRef.value?.setCategory?.(id)
+}
+const onSegSave = () => {
+  segAnnotRef.value?.save?.()
+}
+const onSegClear = () => {
+  segAnnotRef.value?.resetInitial?.()
+  // 触发子组件的 clearMask: 这里直接调 resetInitial 让画布重置为已保存的 mask
+  // (完整的清空逻辑在子组件 clearMask(), 这里提供快速重置入口)
+}
+
 /**
  * 「下一张」逻辑:
  * 1. 在历史栈中间 → cursor++ 直接拿历史图, 不发请求 (浏览器行为)
@@ -360,21 +387,47 @@ const saveSegmentationMask = async (file: File) => {
  * - 分类任务不用调 (submit 即保存)
  */
 const autoSaveBeforeSwitch = async (): Promise<boolean> => {
-  if (currentTaskTypeRaw.value !== 'detection') return true
-  if (!detAnnotRef.value) return true
-  if (!detAnnotRef.value.dirty?.value) return true
-  try {
-    annotatorSaving.value = true
-    const cur = detAnnotRef.value.modelValue || []
-    await saveDetectionBBoxes(cur)
-    detAnnotRef.value.resetInitial?.()  // 通知组件把"初始"重置, 让 dirty=false
-    return true
-  } catch (e: any) {
-    ElMessage.error('自动保存失败: ' + (e?.response?.data?.detail || e?.message))
-    return false
-  } finally {
-    annotatorSaving.value = false
+  if (currentTaskTypeRaw.value === 'classification') return true
+  if (currentTaskTypeRaw.value === 'detection') {
+    if (!detAnnotRef.value) return true
+    if (!detAnnotRef.value.dirty?.value) return true
+    try {
+      annotatorSaving.value = true
+      const cur = detAnnotRef.value.modelValue || []
+      await saveDetectionBBoxes(cur)
+      detAnnotRef.value.resetInitial?.()  // 通知组件把"初始"重置, 让 dirty=false
+      return true
+    } catch (e: any) {
+      ElMessage.error('自动保存失败: ' + (e?.response?.data?.detail || e?.message))
+      return false
+    } finally {
+      annotatorSaving.value = false
+    }
   }
+  if (currentTaskTypeRaw.value === 'segmentation') {
+    if (!segAnnotRef.value) return true
+    if (!segAnnotRef.value.dirty?.value) return true
+    // 分割任务: emit('save') 触发 saveSegmentationMask,
+    // 但 emit 不会返回 Promise, 这里用直接调子组件 save() 拿不到 file
+    // 改方案: 调 segAnnotRef.value.save() 触发内部 emit,
+    // 然后在 watch dirty=false 时认为保存完成
+    return new Promise<boolean>((resolve) => {
+      const stop = watch(
+        () => segAnnotRef.value?.dirty?.value,
+        (v) => {
+          if (!v) {
+            stop()
+            resolve(true)
+          }
+        },
+        { flush: 'sync' }
+      )
+      // 设个 5s 超时防卡死
+      setTimeout(() => { stop(); resolve(true) }, 5000)
+      segAnnotRef.value?.save?.()
+    })
+  }
+  return true
 }
 
 const loadNext = async () => {
@@ -909,6 +962,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </template>
             <template v-else-if="image.task_type === 'segmentation'">
               <SegmentationAnnotator
+                ref="segAnnotRef"
                 :image-url="imageApi.fileUrl(image.id)"
                 :image-id="image.id"
                 :image-width="image.width || 0"
@@ -1214,9 +1268,118 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           </div>
         </el-card>
 
-        <!-- v2.3.0 S10: 分割任务占位 -->
-        <el-card v-else-if="image && image.task_type === 'segmentation'" title="分割操作面板">
-          <el-empty description="分割任务操作面板待 S9.5 完善" :image-size="60" />
+        <!-- v2.5.0 S12.3: 分割任务 8 sections 面板 -->
+        <el-card v-else-if="image && image.task_type === 'segmentation'">
+          <template #header>
+            <span style="font-size: 14px; font-weight: 600;">🖌️ 分割操作面板</span>
+            <el-tag size="small" type="success" style="margin-left: 8px;">8 sections</el-tag>
+          </template>
+
+          <!-- 1. 工具模式 -->
+          <div class="op-section">
+            <div class="op-section-title">1. 工具模式</div>
+            <el-radio-group v-model="segMode" size="small" @change="onSegModeChange">
+              <el-radio-button label="brush" @click="segAnnotRef?.setMode?.('brush')">画刷 (B)</el-radio-button>
+              <el-radio-button label="erase" @click="segAnnotRef?.setMode?.('erase')">橡皮 (E)</el-radio-button>
+              <el-radio-button label="pan" @click="segAnnotRef?.setMode?.('pan')">查看 (V)</el-radio-button>
+            </el-radio-group>
+          </div>
+
+          <!-- 2. 当前画刷类别 -->
+          <div class="op-section" v-if="categories.length">
+            <div class="op-section-title">2. 当前画刷类别</div>
+            <el-select
+              :model-value="segAnnotRef?.brushCategoryId?.value ?? null"
+              placeholder="选择类别"
+              size="small"
+              style="width: 100%;"
+              @change="onSegCategoryChange"
+            >
+              <el-option
+                v-for="c in categories" :key="c.id"
+                :label="c.name" :value="c.id"
+              />
+            </el-select>
+          </div>
+
+          <!-- 3. 当前画刷大小 -->
+          <div class="op-section">
+            <div class="op-section-title">3. 笔刷大小: {{ segAnnotRef?.brushSize?.value ?? 12 }}px</div>
+            <el-slider
+              :model-value="segAnnotRef?.brushSize?.value ?? 12"
+              :min="2" :max="40" :step="1"
+              @input="(v: number) => segAnnotRef?.setBrushSize?.(v)"
+            />
+          </div>
+
+          <!-- 4. 缩放控制 -->
+          <div class="op-section">
+            <div class="op-section-title">4. 画布缩放: {{ Math.round((segAnnotRef?.zoom?.value ?? 1) * 100) }}%</div>
+            <el-button-group size="small">
+              <el-button @click="segAnnotRef?.zoomOut?.()">-</el-button>
+              <el-button @click="segAnnotRef?.resetZoom?.()">100%</el-button>
+              <el-button @click="segAnnotRef?.zoomIn?.()">+</el-button>
+            </el-button-group>
+            <div style="font-size: 11px; color: #909399; margin-top: 4px;">Ctrl + 滚轮 缩放</div>
+          </div>
+
+          <!-- 5. 跨图复制建议 (分割任务 v2.5.0 暂未实现, 占位) -->
+          <div class="op-section" v-if="false">
+            <div class="op-section-title">5. 跨图复制建议</div>
+            <el-alert type="info" :closable="false" show-icon>
+              分割任务跨图复制建议待 v2.6.0 接入
+            </el-alert>
+          </div>
+
+          <!-- 6. 图片导航 -->
+          <div class="op-section">
+            <div class="op-section-title">6. 图片导航</div>
+            <el-button-group size="small">
+              <el-button @click="loadPrev" :disabled="!historyCursor">上一张 (P)</el-button>
+              <el-button @click="loadNext">下一张 (N)</el-button>
+            </el-button-group>
+            <div style="font-size: 11px; color: #909399; margin-top: 4px;">
+              {{ historyCursor + 1 }} / {{ historyIds.length || '?' }}
+              <span v-if="image">· {{ image.filename }}</span>
+            </div>
+          </div>
+
+          <!-- 7. mask 统计 -->
+          <div class="op-section">
+            <div class="op-section-title">7. 当前 mask 状态</div>
+            <div style="font-size: 12px; color: #606266;">
+              <div>画布尺寸: {{ image?.width ?? '?' }} × {{ image?.height ?? '?' }} px</div>
+              <div>已标像素: <span style="color: #67c23a; font-weight: 600;">{{ segMaskStatsLabel }}</span></div>
+              <div>坐标 (鼠标): x={{ segAnnotRef?.mousePos?.value?.x ?? '—' }}, y={{ segAnnotRef?.mousePos?.value?.y ?? '—' }} px</div>
+            </div>
+          </div>
+
+          <!-- 8. 提交 -->
+          <div class="op-section">
+            <div class="op-section-title">8. 提交</div>
+            <el-button
+              type="primary"
+              :icon="Check"
+              :disabled="!segAnnotRef?.dirty?.value || annotatorSaving"
+              :loading="annotatorSaving"
+              style="width: 100%;"
+              @click="onSegSave"
+            >保存 mask</el-button>
+            <el-button
+              size="small"
+              style="width: 100%; margin-top: 4px;"
+              @click="onSegClear"
+            >清空 mask</el-button>
+            <div v-if="segAnnotRef?.dirty?.value" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
+              ● 有未保存的修改
+            </div>
+          </div>
+
+          <div class="op-section">
+            <el-link type="primary" :icon="View" @click="viewDataset">
+              去数据集详情浏览全部图片
+            </el-link>
+          </div>
         </el-card>
       </el-col>
     </el-row>
