@@ -283,22 +283,10 @@ function catName(catId: number): string {
 }
 
 // v2.5.5: 选中 bbox 变化时, 给 Section 2 加高亮 + 滚动到视口, 让用户立刻看到"这里改类别"
-// 注意: 直接读 detAnnotRef.value, 不要读 detAnnot (detAnnot 是后定义的 computed, 早期 watch 触发会 TDZ)
+// 注意: watch 必须放在 detAnnotRef 定义之后 (line 806 之后), 否则 setup 早期会 TDZ 报错
+// v2.5.5-fix-2: watch 移到 detAnnotRef 定义后执行, 避免 TDZ
 const detSelectedSectionRef = ref<HTMLElement | null>(null)
 const detSectionHighlight = ref(false)
-watch(
-  () => detAnnotRef.value?.selectedIndex?.value,
-  async (newIdx) => {
-    if (newIdx === null || newIdx === undefined) {
-      detSectionHighlight.value = false
-      return
-    }
-    await nextTick()
-    detSelectedSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    detSectionHighlight.value = true
-    setTimeout(() => { detSectionHighlight.value = false }, 1500)
-  }
-)
 // v2.3.1 S10: 类别调色板 (与 DetectionAnnotator 一致)
 const DET_PALETTE = [
   '#f56c6c', '#67c23a', '#409eff', '#e6a23c',
@@ -805,6 +793,21 @@ const detectionModelName = ref('yolov8n')
 // 导致 detAnnot 在模板里 undefined, 渲染检测面板时抛 "Cannot read properties of undefined (reading 'mode')"
 const detAnnotRef = ref<any>(null)
 const detAnnot = computed(() => detAnnotRef.value || {})
+
+// v2.5.5-fix-2: watch 移到此处 (detAnnotRef 定义后), 避免 setup 早期 TDZ
+watch(
+  () => detAnnotRef.value?.selectedIndex?.value,
+  async (newIdx) => {
+    if (newIdx === null || newIdx === undefined) {
+      detSectionHighlight.value = false
+      return
+    }
+    await nextTick()
+    detSelectedSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    detSectionHighlight.value = true
+    setTimeout(() => { detSectionHighlight.value = false }, 1500)
+  }
+)
 </script>
 
 <template>
