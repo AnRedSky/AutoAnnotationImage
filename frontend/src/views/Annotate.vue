@@ -1,26 +1,44 @@
 <script setup lang="ts">
 /**
- * Annotate.vue - 人工标注工作台
+ * Annotate.vue - 人工标注工作台 (v2.5.7 重构版)
+ * ==================================================
  * - 选择数据集 → 显示下一张待标注图
  * - 显示 AI Top-5 候选 + 确认/修正
  * - 实时统计 + 已标注计数
  * - 可跳转到 DatasetDetail 浏览已标注图片
  * - 「使用项目训练模型」开关 ON 时, 显示项目微调模型下拉 (默认=激活的)
  * - 显示当前激活的模型名 + 训练后引导用户到标注页
+ *
+ * v2.5.7 重构:
+ * - 顶部统计 + 工具栏 → AnnotationToolbar.vue
+ * - 画布壳 → AnnotationCanvas.vue (slot 注入 3 个 annotator)
+ * - 3 个任务右侧面板 → ClassificationPanel / DetectionPanel / SegmentationPanel
+ * - 检测 / 分割 / AI 预标注业务逻辑 → composables
+ *   · useDetectionAnnotate (bboxList, 复制建议, 保存, popover)
+ *   · useSegmentationAnnotate (initialMaskUrl, 模式, 保存)
+ *   · useAutoAnnotate (runAutoAnnotate, runDetectionAutoAnnotate)
  */
-import { ref, onMounted, watch, computed, nextTick } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close, Lightning, View, ArrowLeft, MagicStick, EditPen, Select, Delete, RefreshLeft, RefreshRight, InfoFilled } from '@element-plus/icons-vue'
-import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi, detectionApi, segmentationApi } from '@/api'
+import { ElMessage } from 'element-plus'
+import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi } from '@/api'
 import { getTaskTypeMeta } from '@/utils/taskType'
+import { useDetectionAnnotate } from '@/composables/useDetectionAnnotate'
+import { useSegmentationAnnotate } from '@/composables/useSegmentationAnnotate'
+import { useAutoAnnotate } from '@/composables/useAutoAnnotate'
 import DetectionAnnotator from '@/components/annotation/DetectionAnnotator.vue'
 import SegmentationAnnotator from '@/components/annotation/SegmentationAnnotator.vue'
 import ClassificationAnnotator from '@/components/annotation/ClassificationAnnotator.vue'
+import AnnotationToolbar from './Annotate/components/AnnotationToolbar.vue'
+import AnnotationCanvas from './Annotate/components/AnnotationCanvas.vue'
+import ClassificationPanel from '@/components/annotation/ClassificationPanel.vue'
+import DetectionPanel from '@/components/annotation/DetectionPanel.vue'
+import SegmentationPanel from '@/components/annotation/SegmentationPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
 
+// ============== 核心 page state ==============
 const loading = ref(false)
 const image = ref<any>(null)
 const candidates = ref<{ label: string; confidence: number }[]>([])
@@ -28,53 +46,67 @@ const startTs = ref(0)
 const datasets = ref<any[]>([])
 const datasetId = ref<number | null>(null)
 const categories = ref<any[]>([])
-// base model name (仅 useFinetune=false 时使用)
-const modelName = ref('efficientnet_b0')
-const threshold = ref(0.6)
-const models = ref<any[]>([])         // base models (timm ImageNet)
-const finetuneModels = ref<any[]>([]) // 项目训练的 fine-tune models
-const selectedModelId = ref<number | null>(null)  // 当前选中的 fine-tune model id
-const activeModel = ref<any>(null)    // 当前激活的 model (引导用)
-const autoLabeling = ref(false)
-
-// ============== v2.1.0: 检测 / 分割画布数据 ==============
-// detection: 已有 bbox 列表 (归一化坐标, 与后端 BBoxAnnotation 一致)
-const bboxList = ref<Array<{
-  id?: number
-  x_min: number; y_min: number; x_max: number; y_max: number
-  category_id: number; confidence?: number
-}>>([])
-// segmentation: 已有 mask 的 URL (后端 /api/segmentation/masks/{id}?download=true 返回的 PNG blob URL)
-const initialMaskUrl = ref<string | null>(null)
-// segmentation: mask 元信息 (id/width/height), 用于保存时决定 update vs create
-const initialMaskMeta = ref<{ id: number; width: number; height: number } | null>(null)
-// 标注器保存中 (loading 态)
-const annotatorSaving = ref(false)
 const stats = ref<any>(null)
 const sessionStats = ref({ confirmed: 0, corrected: 0, total_time_ms: 0 })
+const annotatorSaving = ref(false)
+
+// ============== 模型选择 state ==============
+const modelName = ref('efficientnet_b0')           // 基础模型 (仅 useFinetune=false)
+const threshold = ref(0.6)
+const iouThreshold = ref(0.45)                    // 检测 NMS 阈值
+const detectionModelName = ref('yolov8n')         // 检测预训练模型
+const models = ref<any[]>([])                     // base models (timm ImageNet)
+const finetuneModels = ref<any[]>([])             // 项目训练的 fine-tune models
+const selectedModelId = ref<number | null>(null)  // 当前选中的 fine-tune model id
+const activeModel = ref<any>(null)                // 当前激活的 model (引导用)
 // 严格模式: 默认使用项目训练的 fine-tune 模型, 严禁默认走基础模型
 // (基础模型 ImageNet 输出的 class_532 等不在项目类目, 会被前端归一为「未知」)
 const useFinetune = ref(true)
 
-/**
- * 浏览历史栈 (按访问顺序记录看过的 image id, 支持「上一张 / 下一张」双向导航)
- * - historyIds:   所有看过的图片 id 列表
- * - historyCursor: 当前所在位置 (默认 -1, 表示还没加载过)
- *
- * 行为:
- * - 「下一张」: 已在栈顶 → 调后端拉新图 (排除整个 history) 推入栈尾, cursor 移到栈顶
- *             在栈中间 → 直接 cursor++ 拿历史图 (不调后端)
- * - 「上一张」: cursor--, 从 history 直接拿, 调后端 detail 拉最新数据 (状态可能已变)
- * - 标准浏览器行为: 在历史中间点「上一张」再点「下一张」, 应该回到原位置 (不拉新图)
- * - 清空时机: 切换 dataset 时
- */
+// ============== 检测 / 分割子组件 ref ==============
+const detAnnotRef = ref<any>(null)
+const segAnnotRef = ref<any>(null)
+
+// ============== 检测任务 composable ==============
+const {
+  bboxList,
+  copySuggestions,
+  copySuggestionSourceCount,
+  detDirty,
+  detOpenPopoverIdx,
+  loadDetectionAnnotations,
+  loadCopySuggestion,
+  applyCopySuggestions,
+  ignoreCopySuggestions,
+  saveDetectionBBoxes,
+  cancelDetectionDraft,
+  onDetTagClick,
+  onDetCategoryChange,
+  onPopoverVisibleChange,
+  onDetTargetCategoryChange,
+  removeBboxByIndex,
+} = useDetectionAnnotate({ image, detAnnotRef, annotatorSaving })
+
+// ============== 分割任务 composable ==============
+const {
+  initialMaskUrl,
+  segDirty,
+  segMode,
+  loadSegmentationMask,
+  saveSegmentationMask,
+  revokeMaskUrl,
+  onSegModeChange,
+  onSegCategoryChange,
+  onSegBrushSizeChange,
+  onSegSave,
+  onSegClear,
+  onSegDirtyChange,
+} = useSegmentationAnnotate({ image, segAnnotRef, annotatorSaving })
+
+// ============== 浏览历史栈 (按访问顺序记录看过的 image id) ==============
 const historyIds = ref<number[]>([])
 const historyCursor = ref(-1)
-/**
- * 是否已到末尾 (栈顶时后端 list 返回空, 没有更多待标注图)
- * - true 时「下一张」按钮 disabled
- * - false 时恢复可用 (典型触发: 上一张回到中间 / 启动 AI 预标注完 / 提交标注后)
- */
+// 是否已到末尾 (栈顶时后端 list 返回空, 没有更多待标注图)
 const noMore = ref(false)
 
 onMounted(async () => {
@@ -89,8 +121,6 @@ onMounted(async () => {
     // 加载 base models (timm) + 项目 fine-tune models
     const ms: any = await autoAnnotateApi.models()
     models.value = ms?.models || []
-    // v2 改造: 默认拉"当前 dataset"的激活模型, 而不是全量 fine-tune 列表
-    // 切换 dataset 时 (watch) 也会重新拉该 dataset 的激活模型
     await refreshFinetuneModels()
   } catch (e: any) {
     ElMessage.error('初始化失败: ' + (e?.response?.data?.detail || e?.message))
@@ -98,10 +128,8 @@ onMounted(async () => {
 })
 
 /**
- * v2 改造: 拉取"指定 dataset 已激活的 fine-tune 模型"
+ * 拉取"指定 dataset 已激活的 fine-tune 模型"
  * - 仅显示该 dataset 的激活模型, 与"模型版本管理"的"按数据集显示已激活"语义一致
- * - 若该 dataset 没有任何激活模型, finetuneModels 为空数组, 下拉禁用
- * - 自动选中第一个 (用户可在下拉中切换, 但只有激活的才能选)
  */
 const refreshFinetuneModels = async () => {
   const did = datasetId.value
@@ -110,18 +138,15 @@ const refreshFinetuneModels = async () => {
     return
   }
   try {
-    // 优先用 list + active=true&dataset_id=N 过滤 (与 Models.vue 筛选语义一致)
     const ft: any = await modelApi.list({ dataset_id: did, active: true })
     let items: any[] = ft?.items || ft || []
-    // 兜底: 若 list 接口没有按 active 过滤 (旧版本), 再用 getActive 拉一次
     if (items.length === 0) {
       const r: any = await modelApi.getActive(did)
       items = r?.items || (r?.model ? [r.model] : [])
     }
     finetuneModels.value = items
-    // 默认选中: 当前已选若仍在列表中, 保留; 否则选第一个; 否则清空
     if (selectedModelId.value && items.find((m) => m.id === selectedModelId.value)) {
-      // 保留
+      // 保留当前选中
     } else if (items.length > 0) {
       selectedModelId.value = items[0].id
     } else {
@@ -142,47 +167,46 @@ watch(datasetId, async (v) => {
   noMore.value = false
   image.value = null
   candidates.value = []
+  revokeMaskUrl()
   try {
     const cats: any = await datasetApi.categories(v)
     categories.value = cats?.items || cats || []
     const s: any = await annotationApi.stats(v)
     stats.value = s
   } catch {}
-  // 查询当前 dataset 的激活模型
   try {
     const r: any = await modelApi.getActive(v)
     activeModel.value = r?.items?.[0] || r?.model || null
   } catch {
     activeModel.value = null
   }
-  // v2 改造: 切换 dataset 时, 重新拉该 dataset 的激活 fine-tune 模型列表
-  // (顶部下拉只显示「该 dataset 已激活」的模型)
   await refreshFinetuneModels()
-  // 立即加载第一张
   loadNext()
 })
 
+// ============== computed ==============
 const pendingCount = computed(() => {
   return (stats.value?.status_counts || {}).pending || 0
 })
-
 const aiLabeledCount = computed(() => {
   return (stats.value?.status_counts || {}).ai_labeled || 0
 })
-
-// v2.5.0 S12.3b: 分割任务面板 state
-const segAnnotRef = ref<any>(null)
-const segMode = ref<'brush' | 'erase' | 'pan'>('brush')
-const segMaskStatsLabel = ref('—')
-
-// v2.5.1: 本地 dirty 状态 (替代 detAnnotRef?.dirty?.value / segAnnotRef?.dirty?.value 深层 ref 访问)
-// 子组件通过 emit('dirty-change', v) 通知父组件, 父组件同步本地 ref, 模板响应式追踪稳定
-const detDirty = ref(false)
-const segDirty = ref(false)
-
-// v2.5.1: dirty-change 事件 handler
-const onDetDirtyChange = (v: boolean) => { detDirty.value = v }
-const onSegDirtyChange = (v: boolean) => { segDirty.value = v }
+// 类别下拉排序 (按 id 升序)
+const sortedCategories = computed(() => {
+  return [...categories.value].sort((a: any, b: any) => Number(a.id) - Number(b.id))
+})
+// 当前 dataset 的 task_type 元信息
+const currentTaskTypeRaw = computed(() => {
+  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
+  return ds?.task_type || 'classification'
+})
+// 全部 AI 候选标签都不在项目 category 里 → 等同于基础模型 (ImageNet) 输出
+const allUnknown = computed(() => {
+  if (!candidates.value.length) return false
+  return candidates.value.every((c) => !findCategory(c.label))
+})
+// 上一张按钮是否可用
+const canGoPrev = computed(() => historyCursor.value > 0)
 
 async function refreshStats() {
   if (!datasetId.value) return
@@ -193,15 +217,13 @@ async function refreshStats() {
 }
 
 /**
- * 按 id 加载图片并填充 candidates / startTs
- * 不动 historyCursor, 由调用方控制 (loadNext / loadPrev)
- * v2.1.0 新增: 根据 task_type 加载 bbox / mask 已有数据
+ * 按 item 填充 image / candidates / startTs, 按 task_type 拉取已有标注
+ * 不动 historyCursor, 由调用方控制
  */
 const fillImage = (item: any) => {
   image.value = item
   const aiPred = item.ai_prediction
   if (aiPred && Array.isArray(aiPred.top5)) {
-    // 修复: 后端 ai_service 返回的字段是 confidence, 不是 conf
     candidates.value = aiPred.top5.map((c: any) => ({ label: c.label, confidence: c.confidence }))
   } else {
     candidates.value = []
@@ -209,11 +231,7 @@ const fillImage = (item: any) => {
   startTs.value = Date.now()
   // 重置画布数据
   bboxList.value = []
-  if (initialMaskUrl.value) {
-    URL.revokeObjectURL(initialMaskUrl.value)
-    initialMaskUrl.value = null
-  }
-  initialMaskMeta.value = null
+  revokeMaskUrl()
   // 按 task_type 拉取已有标注
   if (item?.id && item.task_type === 'detection') {
     loadDetectionAnnotations(item.id)
@@ -223,229 +241,20 @@ const fillImage = (item: any) => {
   }
 }
 
-/** 加载某图的已有 bbox 列表 */
-const loadDetectionAnnotations = async (imageId: number) => {
-  try {
-    const r: any = await detectionApi.listBBoxes(imageId)
-    const items = r?.items || r || []
-    bboxList.value = items.map((b: any) => ({
-      id: b.id,
-      x_min: b.x_min, y_min: b.y_min,
-      x_max: b.x_max, y_max: b.y_max,
-      category_id: b.category_id,
-      confidence: b.confidence,
-    }))
-  } catch (e: any) {
-    bboxList.value = []
-    // 静默失败: 没标就是没标
-  }
-}
-
-// v2.2.0 S9.3: 跨图 bbox 复制建议
-const copySuggestions = ref<Array<{
-  category_id: number
-  avg_x_min: number; avg_y_min: number
-  avg_x_max: number; avg_y_max: number
-  source_count: number
-}>>([])
-const copySuggestionSourceCount = ref(0)
-const loadCopySuggestion = async (imageId: number) => {
-  copySuggestions.value = []
-  copySuggestionSourceCount.value = 0
-  try {
-    const r: any = await detectionApi.copySuggestion(imageId)
-    copySuggestions.value = r?.suggestions || []
-    copySuggestionSourceCount.value = r?.total_source_images || 0
-  } catch (e: any) {
-    // 静默失败
-  }
-}
-const applyCopySuggestions = () => {
-  if (copySuggestions.value.length === 0) return
-  // 追加到 bboxList (避免覆盖已有标注)
-  const newBoxes = copySuggestions.value.map((s) => ({
-    x_min: s.avg_x_min, y_min: s.avg_y_min,
-    x_max: s.avg_x_max, y_max: s.avg_y_max,
-    category_id: s.category_id,
-  }))
-  bboxList.value = [...bboxList.value, ...newBoxes]
-  ElMessage.success(`已应用 ${newBoxes.length} 个建议 bbox, 可在画布上微调`)
-  copySuggestions.value = []
-}
-// v2.5.5: 类别下拉排序 (按 id 升序, 用户需求: 下拉按预设分类排序提升选择效率)
-const sortedCategories = computed(() => {
-  return [...categories.value].sort((a: any, b: any) => Number(a.id) - Number(b.id))
-})
-// 类别名查表 (弹窗 tag 用) -- script setup 顶层 ref 必须用 .value
-function catName(catId: number): string {
-  const c = categories.value.find((x: any) => x.id === catId)
-  return c?.name || `cls_${catId}`
-}
-
-// v2.5.6: Section 5 el-popover 类别变更交互
-// - detOpenPopoverIdx: 当前打开 popover 的 bbox idx (同时只能一个)
-// - onDetTagClick: 点击 el-tag → 选中 + 切换 popover 显示
-// - onDetCategoryChange: 在 popover 内选新类别 → 调子组件 changeSelectedCategory + 关闭 popover
-const detOpenPopoverIdx = ref<number | null>(null)
-function onDetTagClick(idx: number) {
-  // 1) 选中该 bbox
-  detAnnot.value?.selectByIndex?.(idx)
-  // 2) 切换 popover 显示 (再次点同一 bbox -> 关闭)
-  detOpenPopoverIdx.value = detOpenPopoverIdx.value === idx ? null : idx
-}
-function onDetCategoryChange(idx: number, catId: number | null) {
-  if (catId == null) return
-  // 选中目标 bbox + 改类别 (复用子组件的 snapshot 撤销栈)
-  detAnnot.value?.selectByIndex?.(idx)
-  detAnnot.value?.changeSelectedCategory?.(catId)
-  // 关闭 popover
-  detOpenPopoverIdx.value = null
-}
-function onPopoverVisibleChange(idx: number, v: boolean) {
-  // popover 外部点击关闭 → 同步状态
-  detOpenPopoverIdx.value = v ? idx : (detOpenPopoverIdx.value === idx ? null : detOpenPopoverIdx.value)
-}
-// v2.3.1 S10: 类别调色板 (与 DetectionAnnotator 一致)
-const DET_PALETTE = [
-  '#f56c6c', '#67c23a', '#409eff', '#e6a23c',
-  '#909399', '#9b59b6', '#1abc9c', '#ff5722',
-]
-function catColor(catId: number | null | undefined): string {
-  if (catId == null) return '#909399'
-  return DET_PALETTE[Math.abs(Number(catId)) % DET_PALETTE.length]
-}
-/** v2.3.1 S10: 取消未保存的修改 (从服务器重读) */
-/** v2.5.1: 同步调子组件 resetInitial, 触发 dirty-change(false) 让保存按钮恢复 disabled */
-const cancelDetectionDraft = async () => {
-  if (!image.value?.id) return
-  await loadDetectionAnnotations(image.value.id)
-  // 等待 bboxList 更新传到子组件后, 重置 initial -> dirty=false -> emit dirty-change(false)
-  await nextTick()
-  detAnnotRef.value?.resetInitial?.()
-  ElMessage.success('已撤销未保存修改')
-}
-
-/** 加载某图的已有 mask (作为初始 mask 渲染到画布) */
-const loadSegmentationMask = async (imageId: number) => {
-  try {
-    // 1) 元数据
-    const r: any = await segmentationApi.getMask(imageId)
-    if (!r || !r.file_exists || !r.id) {
-      initialMaskMeta.value = null
-      initialMaskUrl.value = null
-      return
-    }
-    initialMaskMeta.value = { id: r.id, width: r.width, height: r.height }
-    // 2) 拉 PNG 二进制 (responseType=blob)
-    const resp: any = await segmentationApi.getMask(imageId, true)
-    const blob: Blob | null = resp instanceof Blob ? resp
-      : (resp?.data instanceof Blob ? resp.data : null)
-    if (blob) {
-      if (initialMaskUrl.value) URL.revokeObjectURL(initialMaskUrl.value)
-      initialMaskUrl.value = URL.createObjectURL(blob)
-    } else {
-      initialMaskUrl.value = null
-    }
-  } catch {
-    initialMaskMeta.value = null
-    initialMaskUrl.value = null
-  }
-}
-
-/** 保存 detection bbox 列表: clear 旧 + 批量 save 新 */
-/** v2.5.1: 保存成功后调 resetInitial, 确保子组件 dirty 重置 -> emit dirty-change(false) */
-const saveDetectionBBoxes = async (bboxes: any[]) => {
-  if (!image.value?.id) return
-  annotatorSaving.value = true
-  try {
-    // 1) 清空旧 bbox
-    await detectionApi.clearBBoxes(image.value.id)
-    // 2) 批量写入新 bbox
-    for (const b of bboxes) {
-      await detectionApi.saveBBox(image.value.id, {
-        x_min: b.x_min, y_min: b.y_min,
-        x_max: b.x_max, y_max: b.y_max,
-        category_id: b.category_id,
-        confidence: b.confidence ?? null,
-        source: 'human',
-      })
-    }
-    ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
-    // 重新拉一次以同步 id 字段
-    await loadDetectionAnnotations(image.value.id)
-    // v2.5.1: 等 bboxList 更新传到子组件后, 重置 initial -> dirty=false
-    await nextTick()
-    detAnnotRef.value?.resetInitial?.()
-  } catch (e: any) {
-    ElMessage.error('bbox 保存失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    annotatorSaving.value = false
-  }
-}
-
-/** 保存 segmentation mask: 上传 PNG 文件 (后端自动判断 create vs update) */
-const saveSegmentationMask = async (file: File) => {
-  if (!image.value?.id) return
-  annotatorSaving.value = true
-  try {
-    await segmentationApi.uploadMask(image.value.id, file, 'human')
-    ElMessage.success('mask 已保存')
-    await loadSegmentationMask(image.value.id)
-    // v2.5.1: 等 initialMaskUrl 更新传到子组件后, 显式重置 dirty (兜底)
-    await nextTick()
-    segAnnotRef.value?.resetInitial?.()
-  } catch (e: any) {
-    ElMessage.error('mask 保存失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    annotatorSaving.value = false
-  }
-}
-
-/** v2.5.0: 分割任务切图时调用 (复用已有的 loadSegmentationMask) */
-const onSegmentationImageChange = async (imageId: number) => {
-  await loadSegmentationMask(imageId)
-}
-
-/** v2.5.0: 分割任务侧边栏 4 个 onclick handler */
-const onSegModeChange = (m: 'brush' | 'erase' | 'pan') => {
-  segMode.value = m
-  segAnnotRef.value?.setMode?.(m)
-}
-const onSegCategoryChange = (id: number) => {
-  segAnnotRef.value?.setCategory?.(id)
-}
-const onSegSave = () => {
-  segAnnotRef.value?.save?.()
-}
-const onSegClear = () => {
-  // v2.5.1: 调子组件 cancel() 撤销未保存修改 (重新加载 initialMaskUrl 对应的 mask)
-  // 与检测任务的 cancelDetectionDraft 语义对齐
-  segAnnotRef.value?.cancel?.()
-}
-
 /**
- * 「下一张」逻辑:
- * 1. 在历史栈中间 → cursor++ 直接拿历史图, 不发请求 (浏览器行为)
- * 2. 已在栈顶 → 调后端 list (排除整个 history) 拉新图, 推入栈尾
- *    - 若后端无图 (全部 pending 已拿完): 提示"已经是最后一张了", 「下一张」按钮 disabled
- */
-/**
- * v2.3.2: 切图前自动保存检测标注 (避免用户画了 bbox 没点保存就跳走)
- * - dirty + 是检测任务 -> 调 onSave (emit save -> saveDetectionBBoxes)
- * - 静默, 不弹窗, 失败回 toast
- * - 分类任务不用调 (submit 即保存)
+ * 切图前自动保存检测/分割标注 (避免用户画了 bbox/mask 没点保存就跳走)
+ * - dirty + 是检测任务 -> 调子组件 save
+ * - dirty + 是分割任务 -> 调子组件 save (Promise 间接通过 watch segDirty)
  */
 const autoSaveBeforeSwitch = async (): Promise<boolean> => {
   if (currentTaskTypeRaw.value === 'classification') return true
   if (currentTaskTypeRaw.value === 'detection') {
-    // v2.5.1: 改用本地 detDirty (替代 detAnnotRef.value.dirty?.value 深层 ref 访问)
     if (!detAnnotRef.value) return true
     if (!detDirty.value) return true
     try {
       annotatorSaving.value = true
       const cur = detAnnotRef.value.modelValue || []
       await saveDetectionBBoxes(cur)
-      // saveDetectionBBoxes 内部已调 resetInitial, dirty-change(false) 会让 detDirty=false
       return true
     } catch (e: any) {
       ElMessage.error('自动保存失败: ' + (e?.response?.data?.detail || e?.message))
@@ -455,25 +264,16 @@ const autoSaveBeforeSwitch = async (): Promise<boolean> => {
     }
   }
   if (currentTaskTypeRaw.value === 'segmentation') {
-    // v2.5.1: 改用本地 segDirty
     if (!segAnnotRef.value) return true
     if (!segDirty.value) return true
-    // 分割任务: emit('save') 触发 saveSegmentationMask,
-    // 但 emit 不会返回 Promise, 这里用直接调子组件 save() 拿不到 file
-    // 改方案: 调 segAnnotRef.value.save() 触发内部 emit,
-    // 然后在 watch segDirty=false 时认为保存完成
     return new Promise<boolean>((resolve) => {
       const stop = watch(
         segDirty,
         (v) => {
-          if (!v) {
-            stop()
-            resolve(true)
-          }
+          if (!v) { stop(); resolve(true) }
         },
         { flush: 'sync' }
       )
-      // 设个 5s 超时防卡死
       setTimeout(() => { stop(); resolve(true) }, 5000)
       segAnnotRef.value?.save?.()
     })
@@ -481,12 +281,16 @@ const autoSaveBeforeSwitch = async (): Promise<boolean> => {
   return true
 }
 
+/**
+ * 「下一张」逻辑:
+ * 1. 在历史栈中间 → cursor++ 直接拿历史图, 不发请求 (浏览器行为)
+ * 2. 已在栈顶 → 调后端 list (排除整个 history) 拉新图, 推入栈尾
+ */
 const loadNext = async () => {
   if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
-  // v2.3.2: 切图前自动保存当前图 dirty
   const ok = await autoSaveBeforeSwitch()
   if (!ok) return
-  // 情况 1: 历史栈中间, 直接前进 (浏览器行为)
+  // 情况 1: 历史栈中间, 直接前进
   if (historyCursor.value < historyIds.value.length - 1) {
     historyCursor.value++
     const id = historyIds.value[historyCursor.value]
@@ -501,11 +305,9 @@ const loadNext = async () => {
     }
     return
   }
-
   // 情况 2: 栈顶, 拉新图
   loading.value = true
   try {
-    // 排除整个 history (防止连续点下一张回到已看过的图)
     const excludeIdsParam = historyIds.value.length > 0
       ? historyIds.value.join(',')
       : undefined
@@ -518,7 +320,6 @@ const loadNext = async () => {
     const items = resp?.items || []
     const item = items[0]
     if (!item) {
-      // 栈顶 + 后端无新图 = 已到底
       noMore.value = true
       if (historyIds.value.length > 0) {
         ElMessage.warning({
@@ -531,9 +332,7 @@ const loadNext = async () => {
       }
       return
     }
-    // 拉到新图, 重置 noMore (用户能看到"还有更多"的信号)
     noMore.value = false
-    // 推入历史栈
     historyIds.value.push(item.id)
     historyCursor.value = historyIds.value.length - 1
     fillImage(item)
@@ -545,29 +344,23 @@ const loadNext = async () => {
 }
 
 /**
- * 「上一张」逻辑:
- * - cursor > 0: cursor--, 从 history 拿图, 调 detail 拉最新数据
- * - cursor = 0: 提示"已经是第一张"
+ * 「上一张」逻辑: cursor--, 从 history 拿图, 调 detail 拉最新数据
  */
 const loadPrev = async () => {
   if (historyCursor.value <= 0) {
     ElMessage.info('已经是第一张了')
     return
   }
-  // v2.3.2: 切图前自动保存
   const ok = await autoSaveBeforeSwitch()
   if (!ok) return
   historyCursor.value--
-  // 离开栈顶, 重置 noMore (再点下一张时, 栈中间直接拿 history, 不需要重新判断)
   noMore.value = false
   const prevId = historyIds.value[historyCursor.value]
   loading.value = true
   try {
-    // 走 detail 拉最新数据 (状态/AI 预测可能已变)
     const detail: any = await imageApi.detail(prevId)
     fillImage(detail)
   } catch (e: any) {
-    // 图片可能已被删, 回滚 cursor
     historyIds.value.splice(historyCursor.value, 1)
     historyCursor.value++
     ElMessage.error('加载上一张失败: ' + (e?.response?.data?.detail || e?.message))
@@ -576,174 +369,24 @@ const loadPrev = async () => {
   }
 }
 
-/** 上一张按钮是否可用 (仅在历史栈非首位时可点) */
-const canGoPrev = computed(() => historyCursor.value > 0)
+/**
+ * 「启动 AI 预标注」按钮: 按 task_type 分派
+ * - classification -> runAutoAnnotate
+ * - detection -> runDetectionAutoAnnotate
+ * - segmentation -> 提示去训练页
+ */
+const {
+  autoLabeling,
+  onStartAutoLabelClick,
+} = useAutoAnnotate({
+  datasetId, threshold, iouThreshold, useFinetune,
+  selectedModelId, modelName, detectionModelName,
+  finetuneModels, activeModel, refreshStats, loadNext,
+})
 
 /**
- * v2.3.2: 「启动 AI 预标注」按钮按 task_type 分派
- * - classification -> runAutoAnnotate (走 fine-tune / ImageNet 预训练)
- * - detection -> runDetectionAutoAnnotate (走 fine-tune / 预训练 yolov8n/s/m/l/x)
- * - segmentation -> 暂不接入 (提示去训练页)
+ * 分类任务提交标注 (确认 / 修正)
  */
-const onStartAutoLabelClick = async () => {
-  if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
-  const tt = currentTaskTypeRaw.value
-  if (tt === 'classification') {
-    await runAutoAnnotate()
-  } else if (tt === 'detection') {
-    await runDetectionAutoAnnotate()
-  } else if (tt === 'segmentation') {
-    ElMessage.info('分割任务的 AI 预标注请到「训练任务」页启动')
-  } else {
-    ElMessage.warning('未知任务类型: ' + tt)
-  }
-}
-
-const runAutoAnnotate = async () => {
-  if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
-  // 严格模式: 如果走基础模型分支, 必须先弹窗告知用户结果会被归一为「未知」
-  if (!useFinetune.value) {
-    try {
-      await ElMessageBox.confirm(
-        [
-          '当前选择「ImageNet 基础模型」。该模型输出 (class_532 等) 不在项目类目内,',
-          '前端会统一归类为「未知」, 强制人工从下拉框选类目。',
-          '',
-          '建议: 训练项目 fine-tune 模型后再做预标注。是否继续使用基础模型?',
-        ].join('\n'),
-        '基础模型预标注确认',
-        { confirmButtonText: '继续用基础模型', cancelButtonText: '切到 Fine-tune', type: 'warning' }
-      )
-    } catch {
-      // 用户取消 → 切到 fine-tune
-      useFinetune.value = true
-      ElMessage.info('已切换到项目训练模型')
-      return
-    }
-  } else if (useFinetune.value && finetuneModels.value.length === 0) {
-    // 冷启动: 没有 fine-tune 模型, 但用户选了 fine-tune 模式
-    ElMessage.warning(
-      '当前项目还没有训练好的 fine-tune 模型! 请先到「训练任务」页训练一个模型并激活, 再回这里做预标注。'
-    )
-    return
-  }
-  autoLabeling.value = true
-  try {
-    if (useFinetune.value) {
-      // 走 /api/images/auto-label/{dataset_id} 用项目训练模型
-      const resp: any = await autoAnnotateApi.autoLabel(datasetId.value, {
-        confidence_threshold: threshold.value,
-        use_finetune: true,
-        model_id: selectedModelId.value || undefined,
-      })
-      // 刷新激活模型 (可能后端回退到默认激活)
-      // 注意: getActive 返回 { items: [...] }, 修复前 r?.model 为 undefined 会把激活模型清空
-      try {
-        const r: any = await modelApi.getActive(datasetId.value)
-        const refreshed = r?.items?.[0] || r?.model || null
-        // 只在后端真正变更了激活模型时更新, 避免 No pending images 等情况把已有的 activeModel 清掉
-        if (refreshed) {
-          activeModel.value = refreshed
-        }
-      } catch {}
-      if (resp.used_finetune) {
-        ElMessage.success(
-          `[Fine-tune ${resp.model_name}] 共 ${resp.total} 张, 命中 ${resp.auto_labeled} 张, 需人工 ${resp.need_human} 张, 平均置信度 ${(resp.avg_confidence * 100).toFixed(1)}%`
-        )
-      } else if (resp.message) {
-        // 后端早 return: 没有 pending 图片 (数据集全部已标)
-        // 优先显示用户在下拉框里实际选中的模型名 (与后端实际推理的 model 一致),
-        // 回退到 activeModel.name, 最后回退到 resp.model_name, 最后 'Fine-tune'
-        const selected = finetuneModels.value.find((m) => m.id === selectedModelId.value)
-        const labelName = selected?.name || activeModel.value?.name || resp.model_name || 'Fine-tune'
-        ElMessage.info(`[${labelName}] ${resp.message}`)
-      } else {
-        // 真正的回退: use_finetune=True 但后端找不到 fine-tune → 自动回退到 ImageNet
-        ElMessage.warning(
-          `[回退 → 基础模型 ${resp.model_name || 'ImageNet'}] ${resp.warning || '当前没有激活的 fine-tune 模型, 已回退到 ImageNet 预训练'}`
-        )
-      }
-    } else {
-      // 走 /api/auto-annotate/run 用 timm 预训练 ImageNet (仅在无 fine-tune 时后端才允许)
-      const resp: any = await autoAnnotateApi.run({
-        dataset_id: datasetId.value,
-        model_name: modelName.value,
-        confidence_threshold: threshold.value
-      })
-      ElMessage.warning(
-        `[基础模型 ${modelName.value}] 输出已被前端归一为「未知」, 请人工标注. ` +
-        `共 ${resp.total} 张, 需人工 ${resp.need_human} 张`
-      )
-    }
-    await refreshStats()
-    // AI 预标注后, 部分图被标为 ai_labeled, 剩下的 pending 列表可能变化 → 重置 noMore 让用户重新点「下一张」看
-    noMore.value = false
-    await loadNext()
-  } catch (e: any) {
-    ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    autoLabeling.value = false
-  }
-}
-
-/**
- * v2.3.2: 检测任务的 AI 预标注 (用预训练 yolov8n/s/m/l/x, 不依赖已训练 ModelVersion)
- * 与分类 runAutoAnnotate 平行, 单独函数
- */
-const runDetectionAutoAnnotate = async () => {
-  if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
-  if (!useFinetune.value) {
-    try {
-      await ElMessageBox.confirm(
-        [
-          `当前使用「预训练 ${detectionModelName.value}」(COCO 80 类).`,
-          '仅当数据集类目名与 COCO 类目重合时, 才会写入 BBoxAnnotation.',
-          '建议: 训练项目 fine-tune 模型后再做预标注, 准确率更高.',
-          '',
-          '是否继续?',
-        ].join('\n'),
-        '预训练模型预标注确认',
-        { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
-      )
-    } catch {
-      return
-    }
-  } else if (finetuneModels.value.length === 0) {
-    ElMessage.warning('当前项目还没有训练好的 fine-tune 模型! 请先训练一个再回这里做预标注.')
-    return
-  }
-  autoLabeling.value = true
-  try {
-    let resp: any
-    if (useFinetune.value) {
-      resp = await detectionApi.startAutoAnnotate({
-        dataset_id: datasetId.value,
-        model_version_id: selectedModelId.value ?? 0,
-        conf_threshold: threshold.value,
-        iou_threshold: iouThreshold.value,
-      })
-    } else {
-      resp = await detectionApi.startAutoAnnotatePretrained({
-        dataset_id: datasetId.value,
-        model_name: detectionModelName.value,
-        conf_threshold: threshold.value,
-        iou_threshold: iouThreshold.value,
-      })
-    }
-    const matched = resp.matched_coco_classes || []
-    ElMessage.info(
-      `[预训练 ${detectionModelName.value}] 任务已入队, 等待 Celery worker 启动...` +
-      (matched.length
-        ? ` 匹配 COCO 类: ${matched.join(', ')}`
-        : ' 未匹配任何 COCO 类, 将无结果')
-    )
-  } catch (e: any) {
-    ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    autoLabeling.value = false
-  }
-}
-
 const submit = async (labelId: number, labelName: string, isConfirm: boolean) => {
   if (!image.value) return
   const cost = Date.now() - startTs.value
@@ -760,10 +403,7 @@ const submit = async (labelId: number, labelName: string, isConfirm: boolean) =>
     sessionStats.value.total_time_ms += cost
     if (isConfirm) sessionStats.value.confirmed++
     else sessionStats.value.corrected++
-    // 标注成功后重置 noMore: 该图 status 已变, 后端可能返回新的"非当前 history"图
     noMore.value = false
-    // 不需要动 historyIds: 该图 status 已变, 下一张「下一张」自然不会再返回
-    // (但用「上一张」回看还能再看到, 拿的是最新状态)
     await refreshStats()
     loadNext()
   } catch (e: any) {
@@ -777,44 +417,13 @@ const viewDataset = () => {
 
 const findCategory = (label: string) => categories.value.find((c) => c.name === label)
 
-// 关键判断: 全部 AI 候选标签都不在项目 category 里 → 等同于基础模型 (ImageNet) 输出
-// 整体归一为「未知」, 不再分 5 个独立候选 + 各自置信度
-const allUnknown = computed(() => {
-  if (!candidates.value.length) return false
-  return candidates.value.every((c) => !findCategory(c.label))
-})
-
-// 当前选中显示的模型名 (用于 autoLabel 反馈后的 status 提示)
-const currentModelLabel = computed(() => {
-  if (useFinetune.value) {
-    if (selectedModelId.value) {
-      const m = finetuneModels.value.find((x) => x.id === selectedModelId.value)
-      if (m) return `${m.name} (${m.base_model})`
-    }
-    return activeModel.value ? `${activeModel.value.name} (激活)` : '未选择 fine-tune 模型'
-  }
-  return `${modelName.value} (基础模型)`
-})
-
-// S7 新增: 当前 dataset 的 task_type 元信息, 用于在顶部展示任务类型徽章
-// 找不到 dataset 时回退到 classification, 保持向后兼容
-const currentTaskTypeRaw = computed(() => {
-  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
-  return ds?.task_type || 'classification'
-})
-// v2.3.0 S10: 检测任务 IoU 阈值 (NMS), 仅 detection 时显示
-const iouThreshold = ref(0.45)
-// v2.3.2: 检测任务 AI 预标注模型 (YOLO 系列)
-const DETECTION_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
-const detectionModelName = ref('yolov8n')
-// v2.3.1 S10: 修复 -- 之前模板用 ref="detAnnotRef" 但 script setup 未声明,
-// 导致 detAnnot 在模板里 undefined, 渲染检测面板时抛 "Cannot read properties of undefined (reading 'mode')"
-const detAnnotRef = ref<any>(null)
-const detAnnot = computed(() => detAnnotRef.value || {})
-
-// v2.5.6: 移除 v2.5.5 的 watch 块 (原 Section 2 滚动+高亮已不再需要, 类别下拉迁到 Section 5 popover 后, 用户点 el-tag 直接弹 popover, 无需滚动+高亮提示)
-// v2.5.5-fix-2: watch 移到此处 (detAnnotRef 定义后), 避免 setup 早期 TDZ
-// 当前无 v2.5.5 遗留 watch, 保留此注释说明 v2.5.6 清理历史
+/**
+ * 「自动 AI 预标注」按钮 (toolbar 触发, 全量队列)
+ * v2.5.7: 暂未实现 (需后端支持), 提示去训练页
+ */
+const autoLabelAll = () => {
+  ElMessage.info('自动 AI 预标注功能开发中, 请先在训练页触发')
+}
 </script>
 
 <template>
@@ -853,747 +462,161 @@ const detAnnot = computed(() => detAnnotRef.value || {})
       </template>
     </el-alert>
 
-    <!-- 顶部控制条 -->
-    <el-card style="margin-bottom: 16px;">
-      <el-form inline>
-        <el-form-item label="数据集">
-          <el-select v-model="datasetId" placeholder="请选择" class="app-select" filterable>
-            <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
-          </el-select>
-        </el-form-item>
-        <!-- S7 新增: 当前 dataset 任务类型徽章 (数据集旁边)
-             v2.5.2: 改为 el-popover 包裹, 点击徽章可查看完整任务类型定义 -->
-        <el-form-item v-if="datasetId" label="任务类型">
-          <el-popover
-            placement="bottom-start"
-            :width="380"
-            trigger="click"
-            :show-after="0"
-          >
-            <template #reference>
-              <el-tag
-                :type="getTaskTypeMeta(currentTaskTypeRaw).type"
-                effect="plain"
-                size="small"
-                style="cursor: pointer;"
-              >
-                <el-icon style="vertical-align: -2px; margin-right: 2px;">
-                  <component :is="getTaskTypeMeta(currentTaskTypeRaw).icon" />
-                </el-icon>
-                {{ getTaskTypeMeta(currentTaskTypeRaw).label }}
-                <el-icon style="vertical-align: -2px; margin-left: 2px;"><InfoFilled /></el-icon>
-              </el-tag>
-            </template>
-            <!-- v2.5.2: 任务类型正式定义面板 -->
-            <div class="task-type-popover">
-              <div class="ttp-title">
-                <el-icon style="vertical-align: -2px; margin-right: 4px;">
-                  <component :is="getTaskTypeMeta(currentTaskTypeRaw).icon" />
-                </el-icon>
-                {{ getTaskTypeMeta(currentTaskTypeRaw).label }}
-              </div>
-              <div class="ttp-row">
-                <span class="ttp-label">任务定义</span>
-                <span class="ttp-value">{{ getTaskTypeMeta(currentTaskTypeRaw).definition }}</span>
-              </div>
-              <div class="ttp-row">
-                <span class="ttp-label">输出粒度</span>
-                <span class="ttp-value">{{ getTaskTypeMeta(currentTaskTypeRaw).output }}</span>
-              </div>
-              <div class="ttp-row">
-                <span class="ttp-label">典型场景</span>
-                <span class="ttp-value">{{ getTaskTypeMeta(currentTaskTypeRaw).scenario }}</span>
-              </div>
-            </div>
-          </el-popover>
-        </el-form-item>
-        <!-- v2.3.0 S10: 模型选择区按 task_type 分派
-             classification: useFinetune 开关 + fine-tune/基础模型下拉 (原有)
-             detection:     IoU 阈值 (新增)
-             segmentation:  不显示 -->
-        <el-form-item v-if="currentTaskTypeRaw === 'classification'">
-          <div class="model-select-slot">
-            <!-- fine-tune 模式下: 显示项目训练的微调模型 (默认=激活的) -->
-            <el-tooltip
-              v-if="useFinetune"
-              :content="activeModel ? '当前激活: ' + activeModel.name : '当前没有激活的模型'"
-              placement="top">
-              <el-select
-                v-model="selectedModelId"
-                class="app-select"
-                :fit-input-width="false"
-                popper-class="app-select-dropdown"
-                :disabled="finetuneModels.length === 0"
-                :placeholder="finetuneModels.length === 0 ? '选择 fine-tune 模型 (仅本数据集已激活)' : '选择 fine-tune 模型'"
-              >
-              <!-- 风格参考 DatasetDetail.vue 模型下拉:
-                   - label 简化为 「name · base_model」, 不再加 ID 前缀
-                   - 内部 layout: name (主体) + base_model (灰) + 准确率 (绿, 自动居右)
-                   - 移除「激活」绿 tag, 激活状态通过 tooltip 提示 (避免与 Models.vue 产品规范冲突) -->
-              <el-option
-                v-for="m in finetuneModels" :key="m.id"
-                :value="m.id"
-                :label="`${m.name} · ${m.base_model}`"
-              >
-                <div style="display: flex; align-items: center; gap: 6px;">
-                  <span>{{ m.name }}</span>
-                  <span style="color: #909399; font-size: 12px;">· {{ m.base_model }}</span>
-                  <span style="margin-left: auto; color: #67c23a; font-size: 12px;">{{ (m.accuracy * 100).toFixed(1) }}%</span>
-                </div>
-              </el-option>
-            </el-select>
-          </el-tooltip>
-          <!-- 基础模型模式下: 显示 timm ImageNet 模型 -->
-          <el-tooltip
-            v-else
-            content="基础模型输出会被归一为「未知」, 请谨慎使用"
-            placement="top">
-            <el-select v-model="modelName" class="app-select" :fit-input-width="false" popper-class="app-select-dropdown">
-              <el-option v-for="m in models" :key="m.name" :label="`${m.name} (${m.params})`" :value="m.name">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                  <el-tag v-if="m.framework" size="small" type="info" effect="plain">{{ m.framework }}</el-tag>
-                  <span>{{ m.name }}</span>
-                  <span style="color: #909399; font-size: 12px;">({{ m.params }})</span>
-                </div>
-              </el-option>
-            </el-select>
-          </el-tooltip>
-          </div>
-        </el-form-item>
-        <el-form-item label="置信度阈值">
-          <el-slider v-model="threshold" :min="0.1" :max="1.0" :step="0.05" style="width: 160px;"
-            :format-tooltip="(v: number) => `${(v * 100).toFixed(0)}%`" />
-        </el-form-item>
-        <el-form-item v-if="currentTaskTypeRaw === 'classification'" label="是否使用项目训练模型">
-          <!-- 严格模式: 默认开启 fine-tune, 基础模型只作冷启动排查 -->
-          <el-switch v-model="useFinetune"
-            active-text="是" inactive-text="否"
-            inline-prompt style="--el-switch-on-color: #67c23a;" />
-        </el-form-item>
-        <!-- v2.3.0 S10: 检测任务专属 IoU 阈值 (NMS) -->
-        <el-form-item v-if="currentTaskTypeRaw === 'detection'" label="IoU 阈值 (NMS)">
-          <el-slider v-model="iouThreshold" :min="0.1" :max="0.95" :step="0.05" style="width: 160px;"
-            :format-tooltip="(v: number) => v.toFixed(2)" />
-        </el-form-item>
-        <!-- v2.3.2: 检测任务 AI 预标注模型选择 (YOLO) -->
-        <el-form-item v-if="currentTaskTypeRaw === 'detection'" label="AI 模型">
-          <el-select v-model="detectionModelName" placeholder="选择 YOLO 模型" size="small" style="width: 160px;">
-            <el-option
-              v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item>
-          <el-tooltip
-            :content="`当前: ${currentModelLabel}. 启动 AI 预标注会批量推理所有待标注图片, 命中阈值的图自动写入候选标签。`"
-            placement="top">
-            <el-button type="primary" :icon="Lightning" :loading="autoLabeling" @click="onStartAutoLabelClick">
-              启动 AI 预标注
-            </el-button>
-          </el-tooltip>
-          <el-button :icon="View" @click="viewDataset">查看数据集</el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
+    <!-- 顶部统计 + 工具栏 (拆分到 AnnotationToolbar.vue) -->
+    <AnnotationToolbar
+      :datasets="datasets"
+      :dataset-id="datasetId"
+      :current-task-type-raw="currentTaskTypeRaw"
+      :current-task-meta="getTaskTypeMeta(currentTaskTypeRaw)"
+      :model-name="modelName"
+      :threshold="threshold"
+      :iou-threshold="iouThreshold"
+      :detection-model-name="detectionModelName"
+      :models="models"
+      :finetune-models="finetuneModels"
+      :selected-model-id="selectedModelId"
+      :active-model="activeModel"
+      :use-finetune="useFinetune"
+      :stats="stats"
+      :pending-count="pendingCount"
+      :ai-labeled-count="aiLabeledCount"
+      :session-stats="sessionStats"
+      :auto-labeling="autoLabeling"
+      @dataset-change="(v: number) => datasetId = v"
+      @threshold-change="(v: number) => threshold = v"
+      @iou-threshold-change="(v: number) => iouThreshold = v"
+      @detection-model-change="(v: string) => detectionModelName = v"
+      @selected-model-change="(v: number | null) => selectedModelId = v"
+      @model-name-change="(v: string) => modelName = v"
+      @use-finetune-change="(v: boolean) => useFinetune = v"
+      @ai-start="onStartAutoLabelClick(currentTaskTypeRaw)"
+      @auto-ai-start="autoLabelAll"
+    />
 
-    <!-- 统计 -->
-    <el-row v-if="stats" :gutter="12" style="margin-bottom: 16px;">
-      <el-col :span="5">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="待标注" :value="pendingCount" suffix="张"
-            :value-style="{ color: '#409eff' }" />
-        </el-card>
-      </el-col>
-      <el-col :span="5">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="AI 已标" :value="aiLabeledCount" suffix="张"
-            :value-style="{ color: '#67c23a' }" />
-        </el-card>
-      </el-col>
-      <el-col :span="5">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="本会话已标" :value="sessionStats.confirmed + sessionStats.corrected" suffix="张" />
-        </el-card>
-      </el-col>
-      <el-col :span="5">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="本会话耗时"
-            :value="Number((sessionStats.total_time_ms / 1000).toFixed(1))" :precision="1" suffix="秒" />
-        </el-card>
-      </el-col>
-      <el-col :span="4">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="估算 AI 节省" :value="stats.estimated_saved_seconds || 0"
-            suffix="秒" :value-style="{ color: '#e6a23c' }" />
-        </el-card>
-      </el-col>
-    </el-row>
-
+    <!-- 主体: 左侧画布 + 右侧任务面板 -->
     <el-row :gutter="16">
       <el-col :span="14">
-        <el-card :title="image ? `待标注图片 #${image.id}` : '待标注图片'">
-          <div v-if="loading" v-loading="true" style="height: 360px;"></div>
-          <div v-else-if="image" class="annotate-canvas">
-            <!-- v2.1.0: 按 task_type 分派 annotator
-                 - detection:    DetectionAnnotator (canvas 拖拽画 bbox)
-                 - segmentation: SegmentationAnnotator (canvas 画刷画 mask)
-                 - classification: 沿用原 img + AI 候选 (不变) -->
-            <template v-if="image.task_type === 'detection'">
-              <!-- v2.3.1 S10: DetectionAnnotator 极简版, 操作全在右侧面板 -->
-              <!-- v2.5.1: 增加 @dirty-change 监听, 同步本地 detDirty (修复保存按钮无法点击) -->
-              <DetectionAnnotator
-                ref="detAnnotRef"
-                :image-url="imageApi.fileUrl(image.id)"
-                :image-id="image.id"
-                :image-width="image.width || 0"
-                :image-height="image.height || 0"
-                :categories="categories"
-                v-model="bboxList"
-                :disabled="annotatorSaving"
-                @save="saveDetectionBBoxes"
-                @cancel="loadDetectionAnnotations(image.id)"
-                @next="loadNext"
-                @prev="loadPrev"
-                @dirty-change="onDetDirtyChange"
-              />
-            </template>
-            <template v-else-if="image.task_type === 'segmentation'">
-              <!-- v2.5.1: SegmentationAnnotator 极简版 (对齐 DetectionAnnotator), 操作全在右侧面板 -->
-              <SegmentationAnnotator
-                ref="segAnnotRef"
-                :image-url="imageApi.fileUrl(image.id)"
-                :image-id="image.id"
-                :image-width="image.width || 0"
-                :image-height="image.height || 0"
-                :categories="categories"
-                :initial-mask-url="initialMaskUrl"
-                :disabled="annotatorSaving"
-                @save="saveSegmentationMask"
-                @cancel="loadSegmentationMask(image.id)"
-                @dirty-change="onSegDirtyChange"
-              />
-            </template>
-            <template v-else>
-              <!-- v2.5.2 修复: 图像分类任务改用 ClassificationAnnotator (与检测/分割同款缩放交互) -->
-              <ClassificationAnnotator
-                :image-url="imageApi.fileUrl(image.id)"
-                :image-id="image.id"
-                :image-width="image.width || 0"
-                :image-height="image.height || 0"
-                :filename="image.filename"
-              />
-            </template>
-            <div style="color: #999; margin-top: 8px; font-size: 13px;">
-              <strong>{{ image.filename }}</strong>
-              | 尺寸: {{ image.width }}×{{ image.height }}
-              | 大小: {{ ((image.file_size || 0) / 1024).toFixed(1) }} KB
-              <el-tag v-if="image.task_type" size="small" effect="plain" :type="getTaskTypeMeta(image.task_type).type" style="margin-left: 6px;">
-                {{ getTaskTypeMeta(image.task_type).label }}
-              </el-tag>
-            </div>
-          </div>
-          <el-empty v-else description="暂无待标注图片, 可先点「启动 AI 预标注」批量推理" />
-        </el-card>
+        <AnnotationCanvas :image="image" :loading="loading">
+          <template v-if="image?.task_type === 'detection'">
+            <DetectionAnnotator
+              ref="detAnnotRef"
+              :image-url="imageApi.fileUrl(image.id)"
+              :image-id="image.id"
+              :image-width="image.width || 0"
+              :image-height="image.height || 0"
+              :categories="categories"
+              v-model="bboxList"
+              :disabled="annotatorSaving"
+              @save="saveDetectionBBoxes"
+              @cancel="loadDetectionAnnotations(image.id)"
+              @next="loadNext"
+              @prev="loadPrev"
+              @dirty-change="(v: boolean) => detDirty = v"
+            />
+          </template>
+          <template v-else-if="image?.task_type === 'segmentation'">
+            <SegmentationAnnotator
+              ref="segAnnotRef"
+              :image-url="imageApi.fileUrl(image.id)"
+              :image-id="image.id"
+              :image-width="image.width || 0"
+              :image-height="image.height || 0"
+              :categories="categories"
+              :initial-mask-url="initialMaskUrl"
+              :disabled="annotatorSaving"
+              @save="saveSegmentationMask"
+              @cancel="loadSegmentationMask(image.id)"
+              @dirty-change="onSegDirtyChange"
+            />
+          </template>
+          <template v-else>
+            <ClassificationAnnotator
+              :image-url="imageApi.fileUrl(image.id)"
+              :image-id="image.id"
+              :image-width="image.width || 0"
+              :image-height="image.height || 0"
+              :filename="image.filename"
+            />
+          </template>
+        </AnnotationCanvas>
       </el-col>
       <el-col :span="10">
-        <!-- v2.3.0 S10: 右侧面板按 task_type 分派
-             - classification: AI 候选 (原)
-             - detection:     操作面板 (跨图建议 + 上一张/下一张 + 进度 + AI 预标注)
-             - segmentation:  暂未实现占位 -->
-        <el-card v-if="!image || image.task_type === 'classification'" title="AI 候选标签（Top-5）">
-          <el-empty v-if="!loading && candidates.length === 0 && !image" description="请选择数据集" :image-size="80" />
-          <el-empty v-else-if="candidates.length === 0" description="该图无 AI 预测, 请直接选择其他类别" :image-size="60" />
-          <!-- 关键简化: 基础模型 (ImageNet 预训练) 输出 = 全部 Top-5 都不在项目类目
-               → 整组归一为「未知」, 不再分 5 个候选 + 各自置信度
-               → 强制用户从下方下拉框手动选类目 -->
-          <div v-else-if="allUnknown" class="model-confidence-bar"
-            style="text-align: center; padding: 32px 12px; border: 1px dashed #f56c6c; border-radius: 6px; background: #fef0f0;">
-            <el-tag type="danger" size="large" effect="dark">未知</el-tag>
-            <div style="color: #f56c6c; font-size: 13px; margin-top: 12px; line-height: 1.6;">
-              AI 基础模型标注信息不在项目类别内<br />
-              统一归类为「未知」, 请从下方下拉框手动选择正确类别
-            </div>
-          </div>
-          <div v-for="(c, idx) in candidates" v-show="!allUnknown" :key="`${c.label}-${idx}`" class="model-confidence-bar">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span>
-                <el-tag size="small" type="info">#{{ idx + 1 }}</el-tag>
-                <!-- 关键修复: AI 标签若不在项目类目里 (=预训练模型 ImageNet 输出), 强制显示「未知」并禁止采纳 -->
-                <strong style="margin-left: 6px;" :class="{ 'unknown-label': !findCategory(c.label) }">
-                  {{ findCategory(c.label) ? c.label : '未知' }}
-                </strong>
-              </span>
-              <el-tag :type="c.confidence > 0.8 ? 'success' : c.confidence > 0.5 ? 'warning' : 'info'">
-                {{ (c.confidence * 100).toFixed(1) }}%
-              </el-tag>
-            </div>
-            <el-progress :percentage="Math.round(c.confidence * 100)" :show-text="false"
-              :color="c.confidence > 0.8 ? '#67c23a' : c.confidence > 0.5 ? '#e6a23c' : '#909399'" />
-            <div style="margin-top: 4px;">
-              <template v-if="findCategory(c.label)">
-                <el-button size="small" type="primary" :icon="Check"
-                  @click="submit(findCategory(c.label)!.id, c.label, true)">
-                  确认此标签
-                </el-button>
-                <el-button size="small"
-                  @click="submit(findCategory(c.label)!.id, c.label, false)">
-                  强制采用
-                </el-button>
-              </template>
-              <!-- 预训练模型输出的标签 (ImageNet class_X / 英文名) 不在项目类目里,
-                   视为"未知" — 禁止"确认"和"强制采用", 强制用户从下拉框手动选类目 -->
-              <el-tag v-else type="danger" size="small">
-                未知（AI 预训练模型输出, 禁止采纳）
-              </el-tag>
-            </div>
-          </div>
-          <el-divider v-if="categories.length > 0">或选择其他类别</el-divider>
-          <el-select v-if="categories.length > 0" placeholder="选择其他类别（修正）" style="width: 100%;"
-            filterable
-            @change="(id: number) => {
-              const cat = categories.find((c: any) => c.id === id)
-              if (cat) submit(cat.id, cat.name, false)
-            }"
-          >
-            <el-option v-for="c in sortedCategories" :key="c.id" :label="c.name" :value="c.id" />
-          </el-select>
-          <div style="margin-top: 8px; display: flex; gap: 8px;">
-            <el-button
-              style="flex: 1;"
-              :icon="ArrowLeft"
-              :disabled="!canGoPrev"
-              @click="loadPrev"
-            >上一张</el-button>
-            <el-button
-              style="flex: 1;"
-              :type="noMore ? 'info' : 'danger'"
-              :plain="!noMore"
-              :icon="Close"
-              :disabled="noMore"
-              @click="loadNext"
-            >{{ noMore ? '已是最后一张' : '下一张' }}</el-button>
-          </div>
-          <div v-if="noMore" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-            所有待标注图片已加载完毕，可点击「启动 AI 预标注」继续
-          </div>
-          <div v-if="datasetId" style="margin-top: 8px; text-align: center;">
-            <el-link type="primary" :icon="View" @click="viewDataset">
-              去数据集详情浏览全部图片
-            </el-link>
-          </div>
-        </el-card>
-
-        <!-- v2.3.1 S10: 检测任务右侧操作面板 (所有标注相关操作统一在这里) -->
-        <!-- v2.5.1: 与分割面板统一 8 sections 编号风格 -->
-        <!-- v2.5.3: 工具模式 + 历史操作合并为一行, 增加"目标类型" 选择 -->
-        <el-card v-if="image && image.task_type === 'detection'" title="检测操作面板">
-          <!-- 1. 历史操作 + 目标类型 (v2.5.4: 智能模式, 移除绘制/编辑按钮) -->
-          <div class="op-section">
-            <div class="op-section-title">1. 工具与历史</div>
-            <!-- v2.5.4: 智能模式 - 无需绘制/编辑切换, 仅保留撤销/重做 -->
-            <div style="display: flex; gap: 4px; margin-top: 6px;">
-              <el-button
-                size="small" :icon="RefreshLeft"
-                style="flex: 1;"
-                :disabled="!detAnnot.canUndo?.value"
-                @click="detAnnot.undo?.()"
-              >撤销 (Ctrl+Z)</el-button>
-              <el-button
-                size="small" :icon="RefreshRight"
-                style="flex: 1;"
-                :disabled="!detAnnot.canRedo?.value"
-                @click="detAnnot.redo?.()"
-              >重做 (Ctrl+Y)</el-button>
-            </div>
-            <!-- v2.5.3: 目标类型选择 (始终显示, 画新 bbox 时使用) -->
-            <div style="margin-top: 8px;">
-              <div style="font-size: 11px; color: #909399; margin-bottom: 4px;">
-                目标类型 <span style="color: #67c23a;">(画新 bbox 时使用)</span>
-              </div>
-              <el-select
-                v-model="detAnnot.defaultCategoryId"
-                placeholder="选择目标类型" size="small"
-                style="width: 100%;" filterable
-              >
-                <el-option
-                  v-for="c in sortedCategories" :key="c.id" :value="c.id" :label="c.name"
-                >
-                  <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
-                  {{ c.name }}
-                </el-option>
-              </el-select>
-            </div>
-            <!-- 清空未保存 (整行宽度, 不挤占按钮行) -->
-            <el-button
-              size="small" type="warning" plain
-              style="margin-top: 8px; width: 100%;"
-              @click="detAnnot.clearDraft?.()"
-            >清空未保存</el-button>
-            <!-- v2.5.4: 智能模式操作提示 (合并绘制/编辑) -->
-            <div style="margin-top: 8px; padding: 6px 8px; background: #f0f9ff; border-left: 3px solid #409eff; border-radius: 3px; font-size: 11px; color: #606266; line-height: 1.6;">
-              <div><strong>💡 智能标注</strong> (无需切换模式):</div>
-              <div>• 拖空白处 → 画新 bbox</div>
-              <div>• 点 bbox → 选中 (出现 8 handle)</div>
-              <div>• 拖 body → 平移, 拖 8 handle → 缩放</div>
-              <div>• <kbd>Delete</kbd> 删除选中 / 点 <kbd>×</kbd> 删除对应</div>
-            </div>
-          </div>
-
-          <!-- v2.5.6: 移除原 Section 2「选中 bbox」(类别下拉 + 删除按钮)
-               类别下拉已迁移到 Section 5 el-popover, 删除按钮由 el-tag × 按钮承担
-               选中状态视觉反馈: Section 5 el-tag primary + 8 handle (DetectionAnnotator 内部) -->
-
-          <!-- 3. 跨图 bbox 复制建议 (条件性显示) -->
-          <el-alert
-            v-if="copySuggestions.length > 0"
-            type="info" :closable="true" show-icon
-            style="margin-bottom: 12px;"
-            @close="copySuggestions = []"
-          >
-            <template #title>
-              <div style="font-size: 12px; line-height: 1.6;">
-                <strong>3. 智能建议</strong>: 基于同数据集 {{ copySuggestionSourceCount }} 张已标注图,
-                <strong>{{ copySuggestions.length }}</strong> 个类别可复制
-              </div>
-            </template>
-            <div style="margin-top: 6px;">
-              <el-tag
-                v-for="s in copySuggestions" :key="s.category_id"
-                size="small" type="info" effect="plain"
-                style="margin-right: 4px; margin-bottom: 4px;"
-              >
-                {{ catName(s.category_id) }} ×{{ s.source_count }}
-              </el-tag>
-              <div style="margin-top: 8px; display: flex; gap: 6px;">
-                <el-button
-                  type="primary" size="small" :icon="MagicStick"
-                  @click="applyCopySuggestions"
-                >应用建议</el-button>
-                <el-button size="small" text @click="copySuggestions = []">忽略</el-button>
-              </div>
-            </div>
-          </el-alert>
-
-          <!-- 3. 图片导航 -->
-          <div class="op-section">
-            <div class="op-section-title">3. 图片导航</div>
-            <div style="display: flex; gap: 8px; margin-top: 6px;">
-              <el-button
-                style="flex: 1;" :icon="ArrowLeft"
-                :disabled="!canGoPrev"
-                @click="loadPrev"
-              >上一张 (P)</el-button>
-              <el-button
-                style="flex: 1;"
-                :type="noMore ? 'info' : 'primary'"
-                :plain="!noMore"
-                :disabled="noMore"
-                @click="loadNext"
-              >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
-            </div>
-            <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-              {{ historyCursor + 1 }} / {{ historyIds.length || '?' }} · <strong>{{ image.filename }}</strong>
-            </div>
-          </div>
-
-          <!-- 4. 当前 bbox 列表 (v2.5.6: 类别下拉已迁移到每个 el-tag 的 el-popover 内) -->
-          <div class="op-section">
-            <div class="op-section-title">
-              4. 当前 bbox ({{ bboxList.length }})
-            </div>
-            <el-empty v-if="bboxList.length === 0" description="尚未画任何 bbox" :image-size="50" />
-            <div v-else style="margin-top: 6px; max-height: 180px; overflow-y: auto;">
-              <!-- v2.5.6: 每个 bbox 一个 el-popover, 点击 el-tag 弹出类别下拉改类别
-                   同时 el-tag 上的 × 按钮仍可单独删除 (走 confirmAndRemove 流程) -->
-              <el-popover
-                v-for="(b, idx) in bboxList" :key="b.id || idx"
-                :visible="detOpenPopoverIdx === idx"
-                placement="bottom-start"
-                :width="220"
-                trigger="manual"
-                :show-arrow="false"
-                :hide-after="0"
-                @update:visible="(v: boolean) => onPopoverVisibleChange(idx, v)"
-              >
-                <template #reference>
-                  <el-tag
-                    size="small" effect="plain"
-                    :type="detAnnot.selectedIndex?.value === idx ? 'primary' : 'info'"
-                    style="margin: 2px 4px 2px 0; cursor: pointer;"
-                    @click="onDetTagClick(idx)"
-                    closable
-                    @close.stop="detAnnot.removeAtWithConfirm?.(idx)"
-                  >
-                    <span class="cat-dot" :style="{ background: catColor(b.category_id) }"></span>
-                    #{{ idx + 1 }} {{ catName(b.category_id) }}
-                  </el-tag>
-                </template>
-                <!-- popover 内容: 类别下拉, 改类别后自动关闭 popover -->
-                <div class="det-cat-popover">
-                  <div class="det-cat-popover-title">变更 #{{ idx + 1 }} 类别</div>
-                  <el-select
-                    :model-value="b.category_id"
-                    @update:model-value="(v: number | null) => onDetCategoryChange(idx, v)"
-                    size="small" style="width: 100%;" filterable
-                  >
-                    <el-option
-                      v-for="c in sortedCategories" :key="c.id" :value="c.id" :label="c.name"
-                    >
-                      <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
-                      {{ c.name }}
-                    </el-option>
-                  </el-select>
-                </div>
-              </el-popover>
-            </div>
-          </div>
-
-          <!-- 5. 提交 -->
-          <div class="op-section">
-            <div class="op-section-title">5. 提交</div>
-            <div style="display: flex; gap: 8px; margin-top: 6px;">
-              <el-button
-                type="primary"
-                :icon="Check"
-                :disabled="!detDirty || bboxList.length === 0 || annotatorSaving"
-                :loading="annotatorSaving"
-                style="flex: 1;"
-                @click="detAnnotRef?.save?.()"
-              >保存 ({{ bboxList.length }})</el-button>
-              <el-button
-                :icon="Close" style="flex: 1;"
-                :disabled="!detDirty || annotatorSaving"
-                @click="cancelDetectionDraft"
-              >取消</el-button>
-            </div>
-            <div v-if="detDirty" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
-              ● 有未保存的修改
-            </div>
-          </div>
-
-          <!-- 任务专属提示 -->
-          <div class="op-section">
-            <el-link type="primary" :icon="View" @click="viewDataset">
-              去数据集详情浏览全部图片
-            </el-link>
-          </div>
-        </el-card>
-
-        <!-- v2.5.0 S12.3: 分割任务 8 sections 面板 -->
-        <!-- v2.5.1: 与检测面板统一风格 (el-card title= + 8 sections 编号 + 本地 segDirty) -->
-        <el-card v-else-if="image && image.task_type === 'segmentation'" title="分割操作面板">
-          <!-- 1. 工具模式 -->
-          <div class="op-section">
-            <div class="op-section-title">1. 工具模式</div>
-            <el-radio-group v-model="segMode" size="small" @change="onSegModeChange">
-              <el-radio-button value="brush" @click="segAnnotRef?.setMode?.('brush')">画刷 (B)</el-radio-button>
-              <el-radio-button value="erase" @click="segAnnotRef?.setMode?.('erase')">橡皮 (E)</el-radio-button>
-              <el-radio-button value="pan" @click="segAnnotRef?.setMode?.('pan')">查看 (V)</el-radio-button>
-            </el-radio-group>
-            <div style="margin-top: 4px; font-size: 11px; color: #909399;">
-              <template v-if="segMode === 'brush'">按住鼠标画当前类别, 释放停止</template>
-              <template v-else-if="segMode === 'erase'">按住鼠标擦除像素, 释放停止</template>
-              <template v-else>按住鼠标拖动查看画布</template>
-            </div>
-          </div>
-
-          <!-- 2. 当前画刷类别 -->
-          <div class="op-section" v-if="categories.length">
-            <div class="op-section-title">2. 当前画刷类别</div>
-            <el-select
-              :model-value="segAnnotRef?.brushCategoryId?.value ?? null"
-              placeholder="选择类别"
-              size="small"
-              style="width: 100%; margin-top: 6px;"
-              filterable
-              @change="onSegCategoryChange"
-            >
-              <el-option
-                v-for="c in categories" :key="c.id"
-                :label="c.name" :value="c.id"
-              >
-                <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
-                {{ c.name }}
-              </el-option>
-            </el-select>
-          </div>
-
-          <!-- 3. 当前画刷大小 -->
-          <div class="op-section">
-            <div class="op-section-title">3. 笔刷大小: {{ segAnnotRef?.brushSize?.value ?? 12 }}px</div>
-            <el-slider
-              :model-value="segAnnotRef?.brushSize?.value ?? 12"
-              :min="2" :max="40" :step="1"
-              style="margin-top: 6px;"
-              @input="(v: number) => segAnnotRef?.setBrushSize?.(v)"
-            />
-          </div>
-
-          <!-- 4. (v2.5.2 已删除) 缩放控制 — 冗余, 子组件顶部已有缩放控制条 + 滚轮 + 右下角比例显示 -->
-
-          <!-- 5. 图片导航 -->
-          <div class="op-section">
-            <div class="op-section-title">5. 图片导航</div>
-            <div style="display: flex; gap: 8px; margin-top: 6px;">
-              <el-button
-                style="flex: 1;" :icon="ArrowLeft"
-                :disabled="!canGoPrev"
-                @click="loadPrev"
-              >上一张 (P)</el-button>
-              <el-button
-                style="flex: 1;"
-                :type="noMore ? 'info' : 'primary'"
-                :plain="!noMore"
-                :disabled="noMore"
-                @click="loadNext"
-              >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
-            </div>
-            <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-              {{ historyCursor + 1 }} / {{ historyIds.length || '?' }} · <strong>{{ image.filename }}</strong>
-            </div>
-          </div>
-
-          <!-- 6. mask 统计 -->
-          <div class="op-section">
-            <div class="op-section-title">6. 当前 mask 状态</div>
-            <div style="font-size: 12px; color: #606266; margin-top: 6px;">
-              <div>画布尺寸: {{ image?.width ?? '?' }} × {{ image?.height ?? '?' }} px</div>
-              <div v-if="segAnnotRef?.maskStats?.value">
-                已标像素:
-                <span style="color: #67c23a; font-weight: 600;">
-                  {{ segAnnotRef.maskStats.value.painted }} / {{ segAnnotRef.maskStats.value.total }}
-                </span>
-                ({{ (segAnnotRef.maskStats.value.painted / segAnnotRef.maskStats.value.total * 100).toFixed(1) }}%)
-              </div>
-              <div v-else>已标像素: <span style="color: #909399;">—</span></div>
-              <div>坐标 (鼠标): x={{ segAnnotRef?.mousePos?.value?.x ?? '—' }}, y={{ segAnnotRef?.mousePos?.value?.y ?? '—' }} px</div>
-            </div>
-          </div>
-
-          <!-- 7. 提交 -->
-          <div class="op-section">
-            <div class="op-section-title">7. 提交</div>
-            <div style="display: flex; gap: 8px; margin-top: 6px;">
-              <el-button
-                type="primary"
-                :icon="Check"
-                :disabled="!segDirty || annotatorSaving"
-                :loading="annotatorSaving"
-                style="flex: 1;"
-                @click="onSegSave"
-              >保存 mask</el-button>
-              <el-button
-                :icon="Close" style="flex: 1;"
-                :disabled="!segDirty || annotatorSaving"
-                @click="onSegClear"
-              >取消</el-button>
-            </div>
-            <div v-if="segDirty" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
-              ● 有未保存的修改
-            </div>
-          </div>
-
-          <div class="op-section">
-            <el-link type="primary" :icon="View" @click="viewDataset">
-              去数据集详情浏览全部图片
-            </el-link>
-          </div>
-        </el-card>
+        <ClassificationPanel
+          v-if="!image || image.task_type === 'classification'"
+          :image="image"
+          :candidates="candidates"
+          :all-unknown="allUnknown"
+          :categories="categories"
+          :sorted-categories="sortedCategories"
+          :can-go-prev="canGoPrev"
+          :no-more="noMore"
+          @submit="submit"
+          @prev="loadPrev"
+          @next="loadNext"
+          @view-dataset="viewDataset"
+        />
+        <DetectionPanel
+          v-else-if="image.task_type === 'detection'"
+          :det-annot-ref="detAnnotRef"
+          :bbox-list="bboxList"
+          :det-dirty="detDirty"
+          :annotator-saving="annotatorSaving"
+          :sorted-categories="sortedCategories"
+          :copy-suggestions="copySuggestions"
+          :copy-suggestion-source-count="copySuggestionSourceCount"
+          :can-go-prev="canGoPrev"
+          :no-more="noMore"
+          :history-cursor="historyCursor"
+          :history-ids="historyIds"
+          :image="image"
+          :det-open-popover-idx="detOpenPopoverIdx"
+          @undo="detAnnotRef?.undo?.()"
+          @redo="detAnnotRef?.redo?.()"
+          @clear-draft="detAnnotRef?.clearDraft?.()"
+          @save="detAnnotRef?.save?.()"
+          @cancel="cancelDetectionDraft"
+          @apply-copy-suggestions="applyCopySuggestions"
+          @ignore-copy-suggestions="ignoreCopySuggestions"
+          @prev="loadPrev"
+          @next="loadNext"
+          @view-dataset="viewDataset"
+          @tag-click="onDetTagClick"
+          @category-change="onDetCategoryChange"
+          @popover-visible-change="onPopoverVisibleChange"
+          @remove-bbox="(idx: number) => removeBboxByIndex(idx)"
+          @target-category-change="onDetTargetCategoryChange"
+        />
+        <SegmentationPanel
+          v-else-if="image.task_type === 'segmentation'"
+          :seg-annot-ref="segAnnotRef"
+          :seg-dirty="segDirty"
+          :annotator-saving="annotatorSaving"
+          :categories="categories"
+          :seg-mode="segMode"
+          :can-go-prev="canGoPrev"
+          :no-more="noMore"
+          :history-cursor="historyCursor"
+          :history-ids="historyIds"
+          :image="image"
+          @mode-change="onSegModeChange"
+          @category-change="onSegCategoryChange"
+          @brush-size-change="onSegBrushSizeChange"
+          @prev="loadPrev"
+          @next="loadNext"
+          @view-dataset="viewDataset"
+          @save="onSegSave"
+          @cancel="onSegClear"
+        />
       </el-col>
     </el-row>
   </div>
 </template>
 
 <style scoped>
-.stat-card { text-align: center; }
-/* v2.3.0 S10: 检测操作面板 section 样式 */
-.op-section {
-  margin-bottom: 14px;
-  padding-bottom: 12px;
-  border-bottom: 1px dashed #ebeef5;
-}
-.op-section:last-child {
-  margin-bottom: 0;
-  padding-bottom: 0;
-  border-bottom: none;
-}
-/* v2.5.6: Section 5 el-popover 类别下拉样式 (替代原 Section 2) */
-.det-cat-popover {
-  padding: 4px 0;
-}
-.det-cat-popover-title {
-  font-size: 12px;
-  color: #909399;
-  margin-bottom: 6px;
-  letter-spacing: 0.3px;
-}
-.op-section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #606266;
-  letter-spacing: 0.5px;
-  display: flex;
-  align-items: center;
-}
-.op-section-title::before {
-  content: '';
-  display: inline-block;
-  width: 3px;
-  height: 12px;
-  background: #409eff;
-  margin-right: 6px;
-  border-radius: 2px;
-}
+/* v2.5.7: Annotate.vue 主体仅保留 1 处样式 (其余样式已迁到子组件) */
 .annotate-canvas {
   display: flex;
   flex-direction: column;
   align-items: center;
-}
-/* 模型下拉切换容器: 固定宽度, 防止 useFinetune 切换时表单 reflow 抖动 */
-.model-select-slot {
-  display: inline-block;
-  width: 260px;
-}
-.model-confidence-bar {
-  padding: 10px 0;
-  border-bottom: 1px dashed #ebeef5;
-}
-.model-confidence-bar:last-of-of { border-bottom: none; }
-.unknown-label {
-  color: #f56c6c;
-  font-style: italic;
-  font-weight: 600;
-}
-/* v2.5.2: 任务类型定义 popover 样式 */
-.task-type-popover {
-  font-size: 13px;
-  line-height: 1.5;
-}
-.task-type-popover .ttp-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #303133;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #ebeef5;
-}
-.task-type-popover .ttp-row {
-  display: flex;
-  margin-bottom: 8px;
-  gap: 8px;
-}
-.task-type-popover .ttp-row:last-child {
-  margin-bottom: 0;
-}
-.task-type-popover .ttp-label {
-  flex-shrink: 0;
-  width: 64px;
-  color: #909399;
-  font-weight: 500;
-}
-.task-type-popover .ttp-value {
-  flex: 1;
-  color: #303133;
-  word-break: break-word;
 }
 </style>
