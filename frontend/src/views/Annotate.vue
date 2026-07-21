@@ -1153,49 +1153,74 @@ const detAnnot = computed(() => detAnnotRef.value || {})
 
         <!-- v2.3.1 S10: 检测任务右侧操作面板 (所有标注相关操作统一在这里) -->
         <!-- v2.5.1: 与分割面板统一 8 sections 编号风格 -->
+        <!-- v2.5.3: 工具模式 + 历史操作合并为一行, 增加"目标类型" 选择 -->
         <el-card v-if="image && image.task_type === 'detection'" title="检测操作面板">
-          <!-- 1. 工具模式 (绘制/编辑) -->
+          <!-- 1. 工具与历史 (4 按钮一行) + 目标类型 (始终显示, 不分模式) -->
           <div class="op-section">
-            <div class="op-section-title">1. 工具模式</div>
-            <el-button-group style="margin-top: 6px; display: flex;">
+            <div class="op-section-title">1. 工具与历史</div>
+            <!-- 4 按钮一行: 绘制 / 编辑 / 撤销 / 重做, 紧凑布局 -->
+            <div style="display: flex; gap: 4px; margin-top: 6px;">
               <el-button
-                style="flex: 1;" :icon="EditPen"
+                size="small" :icon="EditPen"
+                style="flex: 1;"
                 :type="detAnnot.mode?.value === 'draw' ? 'primary' : 'default'"
                 @click="detAnnot.setMode?.('draw')"
               >绘制 (D)</el-button>
               <el-button
-                style="flex: 1;" :icon="Select"
+                size="small" :icon="Select"
+                style="flex: 1;"
                 :type="detAnnot.mode?.value === 'edit' ? 'warning' : 'default'"
                 @click="detAnnot.setMode?.('edit')"
               >编辑 (E)</el-button>
-            </el-button-group>
+              <el-button
+                size="small" :icon="RefreshLeft"
+                style="flex: 1;"
+                :disabled="!detAnnot.canUndo?.value"
+                @click="detAnnot.undo?.()"
+              >撤销</el-button>
+              <el-button
+                size="small" :icon="RefreshRight"
+                style="flex: 1;"
+                :disabled="!detAnnot.canRedo?.value"
+                @click="detAnnot.redo?.()"
+              >重做</el-button>
+            </div>
+            <!-- v2.5.3 新增: 目标类型选择 (始终显示, 不分模式; 绘制时用作新 bbox 默认类别, 编辑时仅展示当前默认) -->
+            <div style="margin-top: 8px;">
+              <div style="font-size: 11px; color: #909399; margin-bottom: 4px;">
+                目标类型
+                <span v-if="detAnnot.mode?.value === 'draw'" style="color: #67c23a;">(绘制时使用)</span>
+                <span v-else style="color: #909399;">(切回绘制模式时使用)</span>
+              </div>
+              <el-select
+                v-model="detAnnot.defaultCategoryId"
+                placeholder="选择目标类型" size="small"
+                style="width: 100%;" filterable
+              >
+                <el-option
+                  v-for="c in categories" :key="c.id" :value="c.id" :label="c.name"
+                >
+                  <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
+                  {{ c.name }}
+                </el-option>
+              </el-select>
+            </div>
+            <!-- 清空未保存 (尺寸小, 整行宽度, 不挤占按钮行) -->
+            <el-button
+              size="small" type="warning" plain
+              style="margin-top: 8px; width: 100%;"
+              @click="detAnnot.clearDraft?.()"
+            >清空未保存</el-button>
             <div style="margin-top: 4px; font-size: 11px; color: #909399;">
               <template v-if="detAnnot.mode?.value === 'draw'">在画布上拖拽画新 bbox</template>
               <template v-else>点击选中, 拖动 body 平移, 8 handle 缩放</template>
             </div>
           </div>
 
-          <!-- 2. 新 bbox 类别 (绘制模式时) -->
-          <div class="op-section" v-if="detAnnot.mode?.value === 'draw'">
-            <div class="op-section-title">2. 新 bbox 类别</div>
-            <el-select
-              v-model="detAnnot.defaultCategoryId"
-              placeholder="选择类别" size="small"
-              style="width: 100%; margin-top: 6px;" filterable
-            >
-              <el-option
-                v-for="c in categories" :key="c.id" :value="c.id" :label="c.name"
-              >
-                <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
-                {{ c.name }}
-              </el-option>
-            </el-select>
-          </div>
-
-          <!-- 3. 选中 bbox 的属性 (编辑模式时) -->
+          <!-- 2. 选中 bbox 的属性 (编辑模式 + 有选中时) -->
           <div class="op-section" v-if="detAnnot.mode?.value === 'edit' && detAnnot.selectedIndex?.value !== null">
             <div class="op-section-title">
-              3. 选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
+              2. 选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
             </div>
             <el-select
               :model-value="detAnnot.selectedIndex.value !== null ? bboxList[detAnnot.selectedIndex.value]?.category_id : null"
@@ -1218,28 +1243,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- 4. 撤销/重做/清空 -->
-          <div class="op-section">
-            <div class="op-section-title">4. 历史操作</div>
-            <div style="display: flex; gap: 6px; margin-top: 6px;">
-              <el-button
-                size="small" :icon="RefreshLeft" style="flex: 1;"
-                :disabled="!detAnnot.canUndo?.value"
-                @click="detAnnot.undo?.()"
-              >撤销</el-button>
-              <el-button
-                size="small" :icon="RefreshRight" style="flex: 1;"
-                :disabled="!detAnnot.canRedo?.value"
-                @click="detAnnot.redo?.()"
-              >重做</el-button>
-            </div>
-            <el-button
-              size="small" type="warning" plain style="margin-top: 6px; width: 100%;"
-              @click="detAnnot.clearDraft?.()"
-            >清空未保存</el-button>
-          </div>
-
-          <!-- 5. 跨图 bbox 复制建议 (条件性显示) -->
+          <!-- 3. 跨图 bbox 复制建议 (条件性显示) -->
           <el-alert
             v-if="copySuggestions.length > 0"
             type="info" :closable="true" show-icon
@@ -1248,7 +1252,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           >
             <template #title>
               <div style="font-size: 12px; line-height: 1.6;">
-                <strong>5. 智能建议</strong>: 基于同数据集 {{ copySuggestionSourceCount }} 张已标注图,
+                <strong>3. 智能建议</strong>: 基于同数据集 {{ copySuggestionSourceCount }} 张已标注图,
                 <strong>{{ copySuggestions.length }}</strong> 个类别可复制
               </div>
             </template>
@@ -1270,9 +1274,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </el-alert>
 
-          <!-- 6. 图片导航 -->
+          <!-- 4. 图片导航 -->
           <div class="op-section">
-            <div class="op-section-title">6. 图片导航</div>
+            <div class="op-section-title">4. 图片导航</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 style="flex: 1;" :icon="ArrowLeft"
@@ -1292,10 +1296,10 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- 7. 当前 bbox 列表 -->
+          <!-- 5. 当前 bbox 列表 -->
           <div class="op-section">
             <div class="op-section-title">
-              7. 当前 bbox ({{ bboxList.length }})
+              5. 当前 bbox ({{ bboxList.length }})
             </div>
             <el-empty v-if="bboxList.length === 0" description="尚未画任何 bbox" :image-size="50" />
             <div v-else style="margin-top: 6px; max-height: 180px; overflow-y: auto;">
@@ -1314,9 +1318,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- Section 8: 保存/取消 -->
+          <!-- 6. 提交 -->
           <div class="op-section">
-            <div class="op-section-title">8. 提交</div>
+            <div class="op-section-title">6. 提交</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 type="primary"
