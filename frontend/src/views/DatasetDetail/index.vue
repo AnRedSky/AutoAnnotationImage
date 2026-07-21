@@ -16,9 +16,10 @@ import {
 import {
   datasetApi, imageApi, annotationApi, autoAnnotateApi, exportApi, statsApi, modelApi
 } from '@/api'
-import AnnotationViewer from '@/components/AnnotationViewer.vue'
-import UploadQueue from '@/components/UploadQueue.vue'
-import PreviewList from '@/components/PreviewList.vue'
+// v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
+import AnnotationViewer from './components/AnnotationViewer.vue'
+import UploadQueue from '../Datasets/components/UploadQueue.vue'  // 与 Datasets 列表页共享同一组件 (同模块复用)
+import PreviewList from './components/PreviewList.vue'
 import { getTaskTypeMeta } from '@/utils/taskType'
 
 const route = useRoute()

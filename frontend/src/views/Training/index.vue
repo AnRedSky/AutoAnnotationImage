@@ -8,8 +8,9 @@ import {
 import { trainingApi, datasetApi, autoAnnotateApi } from '@/api'
 import { getDefaultBaseModel, getTaskTypeMeta } from '@/utils/taskType'
 import * as echarts from 'echarts'
-import TrainingParamsForm, { type TrainingParams } from '@/components/TrainingParamsForm.vue'
-import StateBadge from '@/components/StateBadge.vue'
+// v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
+import TrainingParamsForm, { type TrainingParams } from './components/TrainingParamsForm.vue'
+import StateBadge from './components/StateBadge.vue'
 
 interface EpochData {
   epoch: number

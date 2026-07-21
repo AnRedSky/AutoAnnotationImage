@@ -9,8 +9,9 @@ import {
   Plus, View, Delete, Download, CollectionTag, Lightning, Folder, DataAnalysis
 } from '@element-plus/icons-vue'
 import { datasetApi, autoAnnotateApi, exportApi, detectionApi } from '@/api'
-import UploadQueue from '@/components/UploadQueue.vue'
-import DetectionStatsPanel from '@/components/dataset/DetectionStatsPanel.vue'
+// v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
+import UploadQueue from './components/UploadQueue.vue'
+import DetectionStatsPanel from './components/DetectionStatsPanel.vue'
 import {
   getTaskTypeMeta, TASK_TYPE_OPTIONS
 } from '@/utils/taskType'

@@ -26,14 +26,15 @@ import { getTaskTypeMeta } from '@/utils/taskType'
 import { useDetectionAnnotate } from '@/composables/useDetectionAnnotate'
 import { useSegmentationAnnotate } from '@/composables/useSegmentationAnnotate'
 import { useAutoAnnotate } from '@/composables/useAutoAnnotate'
-import DetectionAnnotator from '@/components/annotation/DetectionAnnotator.vue'
-import SegmentationAnnotator from '@/components/annotation/SegmentationAnnotator.vue'
-import ClassificationAnnotator from '@/components/annotation/ClassificationAnnotator.vue'
-import AnnotationToolbar from './Annotate/components/AnnotationToolbar.vue'
-import AnnotationCanvas from './Annotate/components/AnnotationCanvas.vue'
-import ClassificationPanel from '@/components/annotation/ClassificationPanel.vue'
-import DetectionPanel from '@/components/annotation/DetectionPanel.vue'
-import SegmentationPanel from '@/components/annotation/SegmentationPanel.vue'
+// v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录, 引用统一使用相对路径
+import DetectionAnnotator from './components/DetectionAnnotator.vue'
+import SegmentationAnnotator from './components/SegmentationAnnotator.vue'
+import ClassificationAnnotator from './components/ClassificationAnnotator.vue'
+import ClassificationPanel from './components/ClassificationPanel.vue'
+import DetectionPanel from './components/DetectionPanel.vue'
+import SegmentationPanel from './components/SegmentationPanel.vue'
+import AnnotationToolbar from './components/AnnotationToolbar.vue'
+import AnnotationCanvas from './components/AnnotationCanvas.vue'
 
 const route = useRoute()
 const router = useRouter()
