@@ -1042,8 +1042,14 @@ const detAnnot = computed(() => detAnnotRef.value || {})
               />
             </template>
             <template v-else>
-              <img :src="imageApi.fileUrl(image.id)" alt="待标注"
-                style="max-width: 100%; max-height: 480px;" />
+              <!-- v2.5.2 修复: 图像分类任务改用 ClassificationAnnotator (与检测/分割同款缩放交互) -->
+              <ClassificationAnnotator
+                :image-url="imageApi.fileUrl(image.id)"
+                :image-id="image.id"
+                :image-width="image.width || 0"
+                :image-height="image.height || 0"
+                :filename="image.filename"
+              />
             </template>
             <div style="color: #999; margin-top: 8px; font-size: 13px;">
               <strong>{{ image.filename }}</strong>
@@ -1389,28 +1395,11 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             />
           </div>
 
-          <!-- 4. 缩放控制 -->
-          <div class="op-section">
-            <div class="op-section-title">4. 画布缩放: {{ Math.round((segAnnotRef?.zoom?.value ?? 1) * 100) }}%</div>
-            <el-button-group size="small" style="margin-top: 6px; display: flex;">
-              <el-button style="flex: 1;" :icon="RefreshLeft" @click="segAnnotRef?.zoomOut?.()">缩小</el-button>
-              <el-button style="flex: 1;" @click="segAnnotRef?.resetZoom?.()">100%</el-button>
-              <el-button style="flex: 1;" :icon="RefreshRight" @click="segAnnotRef?.zoomIn?.()">放大</el-button>
-            </el-button-group>
-            <div style="font-size: 11px; color: #909399; margin-top: 4px;">Ctrl + 滚轮 缩放</div>
-          </div>
+          <!-- 4. (v2.5.2 已删除) 缩放控制 — 冗余, 子组件顶部已有缩放控制条 + 滚轮 + 右下角比例显示 -->
 
-          <!-- 5. 跨图复制建议 (分割任务 v2.5.0 暂未实现, 占位) -->
-          <div class="op-section" v-if="false">
-            <div class="op-section-title">5. 跨图复制建议</div>
-            <el-alert type="info" :closable="false" show-icon>
-              分割任务跨图复制建议待 v2.6.0 接入
-            </el-alert>
-          </div>
-
-          <!-- 6. 图片导航 -->
+          <!-- 5. 图片导航 -->
           <div class="op-section">
-            <div class="op-section-title">6. 图片导航</div>
+            <div class="op-section-title">5. 图片导航</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 style="flex: 1;" :icon="ArrowLeft"
@@ -1430,9 +1419,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- 7. mask 统计 -->
+          <!-- 6. mask 统计 -->
           <div class="op-section">
-            <div class="op-section-title">7. 当前 mask 状态</div>
+            <div class="op-section-title">6. 当前 mask 状态</div>
             <div style="font-size: 12px; color: #606266; margin-top: 6px;">
               <div>画布尺寸: {{ image?.width ?? '?' }} × {{ image?.height ?? '?' }} px</div>
               <div v-if="segAnnotRef?.maskStats?.value">
@@ -1447,9 +1436,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- 8. 提交 -->
+          <!-- 7. 提交 -->
           <div class="op-section">
-            <div class="op-section-title">8. 提交</div>
+            <div class="op-section-title">7. 提交</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 type="primary"
