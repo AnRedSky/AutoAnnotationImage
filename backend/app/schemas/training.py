@@ -85,6 +85,12 @@ class TrainingJobOut(_Base):
     device_info: Optional[Dict[str, Any]] = None
     gpu_peak_memory_mb: Optional[int] = None
 
+    # ---- 任务类型 (v2.0.0: classification / detection / segmentation) ----
+    # 详情页 Training.vue S12.4 训练可视化按 task_type 切换曲线
+    # (classification: loss/acc / detection: mAP/P/R / segmentation: mIoU/dice)
+    # 模型 default="classification" + nullable=False, 这里给 schema 同样默认值
+    task_type: Optional[str] = "classification"
+
     # ---- 数据集统计 (训练启动那一刻由 train.py 推送, 持久化到 DB) ----
     # 详情页 Training.vue 用这 4 个字段展示「数据集统计」4 联卡 (总样本/训练/验证/类数)
     # 之前: 训练完成后 (result.info = return dict) 这 4 个字段全 0, 用户看到的
