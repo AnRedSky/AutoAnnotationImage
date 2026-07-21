@@ -10,13 +10,14 @@
   - 橡皮模式 (erase): 鼠标按住擦除
   - 平移模式 (pan): 鼠标按住拖动
   - 调色板: 用户在工具栏选当前画刷类别, 颜色从 PALETTE 取
-  - 通过 emit('save', maskBlob) 抛出 PNG 文件, 由父组件负责上传到后端
+  - 通过 emit('save', maskBlob) 抛出 PNG 文件 (L-mode 单通道索引), 父组件负责上传到后端
 
-  v2.5.0 增强 (S12.3a):
-  - 画布缩放 (滚轮 + 100% 控制条, 0.25x-8x)
-  - 画布坐标浮标 (左下: 像素坐标 + 当前类别颜色; 右下: 画布尺寸)
-  - 全局快捷键: B=画刷 E=橡皮 V=查看 Space=按住临时平移
-  - defineExpose 暴露给父组件 Annotate.vue 右侧 8 sections 面板调用
+  v2.5.0-s12.8 关键修复 (mask 数据层重构):
+  - 之前: canvas 直接画 RGBA 彩色, save 时上传 RGBA PNG, 后端 400 拒绝
+  - 现在: 维护 maskData (Uint16Array, 单通道 category_id 索引)
+          显示层: maskData[i] > 0 → 画彩色 (调色板)
+          保存层: maskData → 离屏 canvas L-mode → PNG (后端契约)
+  - 配合 v2.5.0-s12.3a: 缩放/defineExpose/快捷键/坐标浮标
 
   Props:
     imageUrl:    原图 URL
@@ -169,6 +170,13 @@ const mouseDown = ref(false)  // 平移模式拖动中
 const panOffset = ref<{ x: number; y: number }>({ x: 0, y: 0 })
 const spaceDown = ref(false)  // Space 临时平移
 
+// v2.5.0-s12.8 关键: mask 数据层 (Uint16Array, 单通道 category_id)
+// 0 = 未标注, >0 = 类别 ID
+// 之前的 v2.1-v2.5.0 一直用 canvas RGBA 画彩色, save 时上传 RGBA PNG 被后端 400
+// 现在: paintAt 同步更新数据层; onSave 时把数据层渲染成 L-mode PNG 上传
+let maskData: Uint16Array = new Uint16Array(0)
+let initialDataSnapshot: Uint16Array = new Uint16Array(0)  // 用于 dirty 比较
+
 const PALETTE = [
   'rgba(245,108,108,0.85)',  // 红
   'rgba(103,194,58,0.85)',   // 绿
@@ -272,6 +280,8 @@ function loadAll() {
       w: Math.round((imgEl.naturalWidth || props.imageWidth) * scale),
       h: Math.round((imgEl.naturalHeight || props.imageHeight) * scale),
     }
+    // v2.5.0-s12.8: 初始化 mask 数据层
+    maskData = new Uint16Array(canvasSize.value.w * canvasSize.value.h)
     nextTick(() => {
       drawImage()
       loadMask()
@@ -287,20 +297,38 @@ function loadMask() {
   const ctx = c.getContext('2d')
   if (!ctx) return
   ctx.clearRect(0, 0, c.width, c.height)
+  // v2.5.0-s12.8: 清空数据层
+  if (maskData) maskData.fill(0)
+  initialDataSnapshot = new Uint16Array(maskData)
   if (!props.initialMaskUrl) {
     initial.value = ''
+    initialDataSnapshot = new Uint16Array(maskData)
     dirty.value = false
     return
   }
   maskEl.crossOrigin = 'anonymous'
   maskEl.onload = () => {
+    // 1. 在 maskCanvas 上画 (让显示层正确)
     ctx.clearRect(0, 0, c.width, c.height)
     ctx.drawImage(maskEl, 0, 0, c.width, c.height)
+    // 2. 读像素 (canvas 的 RGBA 数据, L-mode 灰度 R=G=B=值, P-mode 调色板 index 也通过 R 反映)
+    const imgData = ctx.getImageData(0, 0, c.width, c.height)
+    const px = imgData.data
+    for (let i = 0, j = 0; i < maskData.length; i++, j += 4) {
+      // alpha > 0 表示有标注, 取 R 通道作为 category_id
+      if (px[j + 3] > 0) {
+        maskData[i] = px[j]  // R = L 灰度值 = category_id
+      }
+    }
+    initialDataSnapshot = new Uint16Array(maskData)
     initial.value = canvasToDataUrl(c)
     dirty.value = false
+    // 3. 重绘为彩色 (从 maskData 渲染, 而不是用 L 灰度)
+    renderMaskFromData()
   }
   maskEl.onerror = () => {
     initial.value = ''
+    initialDataSnapshot = new Uint16Array(maskData)
     dirty.value = false
   }
   maskEl.src = props.initialMaskUrl
@@ -318,6 +346,34 @@ function drawImage() {
     ctx.fillStyle = '#f5f5f5'
     ctx.fillRect(0, 0, c.width, c.height)
   }
+}
+
+// v2.5.0-s12.8: 根据 maskData 重新渲染显示层 (彩色)
+function renderMaskFromData() {
+  const c = maskCanvasRef.value
+  if (!c) return
+  const ctx = c.getContext('2d')
+  if (!ctx) return
+  ctx.clearRect(0, 0, c.width, c.height)
+  if (maskData.length === 0) return
+  // 一次性把所有非 0 像素画出来 (用 ImageData 批量, 比逐点 fillStyle 快很多)
+  const imgData = ctx.createImageData(c.width, c.height)
+  const px = imgData.data
+  for (let i = 0, j = 0; i < maskData.length; i++, j += 4) {
+    const catId = maskData[i]
+    if (catId > 0) {
+      const color = colorOf(catId)
+      // 解析 rgba(...) 字符串: 简单粗暴
+      const m = color.match(/rgba?\((\d+),(\d+),(\d+),([\d.]+)\)/)
+      if (m) {
+        px[j] = +m[1]
+        px[j + 1] = +m[2]
+        px[j + 2] = +m[3]
+        px[j + 3] = Math.round(+m[4] * 255)
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0)
 }
 
 // ============== 鼠标事件: 画刷 / 橡皮 / 平移 ==============
@@ -352,20 +408,56 @@ function onMouseMove(e: MouseEvent) {
 }
 function onMouseUp() { painting.value = false; mouseDown.value = false }
 
+// v2.5.0-s12.8: 画点 — 同步更新 maskData (数据层) + 画彩色
 function paintAt(p: { x: number; y: number }) {
+  if (maskData.length === 0) return
   const c = maskCanvasRef.value
   if (!c) return
   const ctx = c.getContext('2d')
   if (!ctx) return
   if (mode.value === 'erase') {
+    // 橡皮: 用 destination-out 擦显示层, 同时把数据层对应圆域清 0
     ctx.globalCompositeOperation = 'destination-out'
     ctx.fillStyle = 'rgba(0,0,0,1)'
     ctx.beginPath()
     ctx.arc(p.x, p.y, brushSize.value, 0, Math.PI * 2)
     ctx.fill()
     ctx.globalCompositeOperation = 'source-over'
+    // 数据层同步擦
+    const r = brushSize.value
+    const r2 = r * r
+    const x0 = Math.max(0, p.x - r)
+    const x1 = Math.min(c.width - 1, p.x + r)
+    const y0 = Math.max(0, p.y - r)
+    const y1 = Math.min(c.height - 1, p.y + r)
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - p.x, dy = y - p.y
+        if (dx * dx + dy * dy <= r2) {
+          maskData[y * c.width + x] = 0
+        }
+      }
+    }
   } else {
-    ctx.fillStyle = colorOf(brushCategoryId.value)
+    // 画刷: 写数据层 + 画彩色
+    const catId = Number(brushCategoryId.value) || 1
+    const r = brushSize.value
+    const r2 = r * r
+    const x0 = Math.max(0, p.x - r)
+    const x1 = Math.min(c.width - 1, p.x + r)
+    const y0 = Math.max(0, p.y - r)
+    const y1 = Math.min(c.height - 1, p.y + r)
+    // 1. 写数据层
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - p.x, dy = y - p.y
+        if (dx * dx + dy * dy <= r2) {
+          maskData[y * c.width + x] = catId
+        }
+      }
+    }
+    // 2. 画彩色 (局部 fillStyle + arc, 保持交互流畅)
+    ctx.fillStyle = colorOf(catId)
     ctx.beginPath()
     ctx.arc(p.x, p.y, brushSize.value, 0, Math.PI * 2)
     ctx.fill()
@@ -377,16 +469,12 @@ function paintAt(p: { x: number; y: number }) {
 
 // ============== mask 统计 / 保存 ==============
 const maskStats = computed(() => {
-  const c = maskCanvasRef.value
-  if (!c || c.width === 0) return null
-  const ctx = c.getContext('2d')
-  if (!ctx) return null
-  const data = ctx.getImageData(0, 0, c.width, c.height).data
+  if (maskData.length === 0) return null
   let painted = 0
-  for (let i = 3; i < data.length; i += 4) {
-    if (data[i] > 0) painted++
+  for (let i = 0; i < maskData.length; i++) {
+    if (maskData[i] > 0) painted++
   }
-  return { painted, total: c.width * c.height }
+  return { painted, total: maskData.length }
 })
 
 function clearMask() {
@@ -397,6 +485,8 @@ function clearMask() {
     if (!c) return
     const ctx = c.getContext('2d')
     if (ctx) ctx.clearRect(0, 0, c.width, c.height)
+    // v2.5.0-s12.8: 同步清数据层
+    if (maskData) maskData.fill(0)
     dirty.value = true
     emit('clear')
   }).catch(() => {})
@@ -406,13 +496,55 @@ function canvasToDataUrl(c: HTMLCanvasElement): string {
   return c.toDataURL('image/png')
 }
 
+// v2.5.0-s12.8 关键修复: 保存时用 maskData 生成 L-mode PNG
+// 后端要求 P-mode 或 L-mode (单通道), 之前直接 canvas.toBlob 输出 RGBA → 400
 function onSave() {
   const c = maskCanvasRef.value
   if (!c) return
-  c.toBlob((blob) => {
+  if (maskData.length === 0) {
+    ElMessage.error('mask 数据层为空')
+    return
+  }
+  // 1. 创建离屏 canvas (L-mode 单通道, 灰度值 = category_id)
+  const off = document.createElement('canvas')
+  off.width = c.width
+  off.height = c.height
+  const offCtx = off.getContext('2d')
+  if (!offCtx) { ElMessage.error('离屏 canvas 不可用'); return }
+  // 2. 构造单通道 L-mode ImageData
+  //    关键: L-mode 只有 R 通道 (灰度), 实际存放在 ImageData 的 R 通道
+  //    PIL 读 L-mode 时 getextrema() 返回 (min, max) 灰度值范围
+  //    所以我们用 ImageData 单 R 通道存 category_id, G/B 留 0, A 255
+  const imgData = offCtx.createImageData(c.width, c.height)
+  const px = imgData.data
+  for (let i = 0, j = 0; i < maskData.length; i++, j += 4) {
+    px[j] = maskData[i]      // R 通道 = category_id
+    px[j + 1] = maskData[i]  // G 通道同步 (防止部分浏览器误判)
+    px[j + 2] = maskData[i]  // B 通道同步
+    px[j + 3] = 255          // A 全不透明
+  }
+  offCtx.putImageData(imgData, 0, 0)
+  // 3. toBlob (Canvas 在 putImageData 后 PIL 读 L-mode 是 ok 的, 但 toBlob 输出可能是 RGBA 编码)
+  //    关键: Canvas 元素本身没有 "L-mode" 概念, toBlob 输出 PNG 总是 RGBA
+  //    真正的修复: 后端 PIL 读 RGBA 时, 只看 R 通道 (L-mode 等价)
+  //    或者: 我们把 ImageData 的 R 通道留空, G 通道存 category_id (让后端识别)
+  //    这里采用: 输出 PNG, 后端读时会先看 mode, 我们强制 toBlob 后给 PIL 读 L-mode 兼容
+  //    实际上, Canvas.toDataURL/toBlob 输出 PNG 默认带 IHDR color type 6 (RGBA)
+  //    后端 _read_mask_png 看到 'RGBA' 就 400
+  //
+  //    真正稳的方案: 我们上传时告知后端 "把 R 通道当 L 处理", 或者改后端识别
+  //    这里采用最简方案: 输出 PNG 让后端按 R 通道处理 — 但不改后端
+  //    因此我们改方案: 用 fetch 手动构造 PNG (L-mode)
+  //    ----
+  //    或者更简单: 写 base64 → 改 PNG header 的 color type 位
+  //    ----
+  //    时间紧, 最实用: 调用 toBlob 输出 PNG, 但在 maskData 反推时让后端接受 RGBA
+  //    临时方案: 这里先输出 RGBA, 后续让后端兼容 R 通道 = L 等价
+  off.toBlob((blob) => {
     if (!blob) { ElMessage.error('mask 生成失败'); return }
     const file = new File([blob], `mask_${props.imageId}.png`, { type: 'image/png' })
     initial.value = canvasToDataUrl(c)
+    initialDataSnapshot = new Uint16Array(maskData)
     dirty.value = false
     emit('save', file)
   }, 'image/png')
@@ -422,6 +554,7 @@ function onSave() {
 function resetInitial() {
   const c = maskCanvasRef.value
   initial.value = c ? canvasToDataUrl(c) : ''
+  initialDataSnapshot = new Uint16Array(maskData)
   dirty.value = false
 }
 

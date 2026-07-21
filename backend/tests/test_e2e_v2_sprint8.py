@@ -501,9 +501,12 @@ async def test_e2e_segmentation_mask_crud(
     assert r.json()["success"] is True
     assert r.json()["file_deleted"] is True
 
-    # 复核 GET 404
+    # 复核: GET 应返回 200 + file_exists:False (v2.5.0-s12.7 契约: mask 不存在不抛 404)
     r = await client.get(
         f"/api/segmentation/masks/{img_ids[0]}",
         headers=auth_headers,
     )
-    assert r.status_code == 404, r.text
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] is None
+    assert body["file_exists"] is False

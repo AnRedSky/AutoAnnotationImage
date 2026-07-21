@@ -74,9 +74,20 @@ def _read_mask_png(content: bytes) -> tuple[int, int, dict[int, int]]:
     elif pil.mode == "L":
         # L-mode: 灰度值直接当类别索引
         arr = pil
+    elif pil.mode in ("RGB", "RGBA"):
+        # v2.5.0-s12.8: 前端 canvas.toBlob 默认输出 RGBA PNG (color type 6),
+        # 实际数据是 R=G=B=category_id, A=255. 这里取 R 通道当 L-mode.
+        # 业务上: mask 是单通道索引图, 调色板只是显示层.
+        import numpy as np
+        arr = np.array(pil)
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]  # 取 R 通道 (R=G=B 都相同)
+    elif pil.mode == "1":
+        # 二值图, 255/0 当类别
+        arr = pil.convert("L")
     else:
         raise HTTPException(
-            400, f"mask PNG 必须是 P-mode (索引) 或 L-mode (灰度), 当前 {pil.mode!r}",
+            400, f"mask PNG 必须是 P-mode (索引) / L-mode (灰度) / RGB / RGBA, 当前 {pil.mode!r}",
         )
 
     # 统计像素值分布
