@@ -1,21 +1,22 @@
 <!--
   SegmentationAnnotator.vue
   =========================
-  图像分割 mask 画布组件 (v2.1.0)
+  图像分割 mask 画布组件 (v2.1.0 → v2.5.0)
 
   职责:
   - 加载原图 + 已存在的 mask (来自后端 /api/segmentation/masks/{image_id})
   - 渲染: 原图为底, mask 用半透明彩色叠层 (调色板按 category_id 分配)
   - 画刷模式 (brush): 鼠标按住画当前类别, 释放停止
   - 橡皮模式 (erase): 鼠标按住擦除
+  - 平移模式 (pan): 鼠标按住拖动
   - 调色板: 用户在工具栏选当前画刷类别, 颜色从 PALETTE 取
   - 通过 emit('save', maskBlob) 抛出 PNG 文件, 由父组件负责上传到后端
 
-  设计原则:
-  - 零业务耦合: 不直接调 API, 数据全靠 props 传入
-  - mask 内部表示: 离屏 canvas (P-mode-like), 与 PIL P-mode 兼容
-  - 保存: 离屏 canvas 转 PNG File, emit 给父组件
-  - 坐标: mask 像素坐标 (与 PIL 一致), 不做归一化
+  v2.5.0 增强 (S12.3a):
+  - 画布缩放 (滚轮 + 100% 控制条, 0.25x-8x)
+  - 画布坐标浮标 (左下: 像素坐标 + 当前类别颜色; 右下: 画布尺寸)
+  - 全局快捷键: B=画刷 E=橡皮 V=查看 Space=按住临时平移
+  - defineExpose 暴露给父组件 Annotate.vue 右侧 8 sections 面板调用
 
   Props:
     imageUrl:    原图 URL
@@ -32,17 +33,17 @@
 -->
 <template>
   <div class="seg-annotator">
-    <!-- 工具栏 -->
+    <!-- 工具栏 (保留 v2.1 模式切换 + 笔刷大小 + 清空) -->
     <div class="toolbar">
       <el-button-group size="small">
         <el-button :type="mode === 'brush' ? 'primary' : 'default'" @click="mode = 'brush'">
-          <el-icon><Brush /></el-icon>画刷
+          <el-icon><Brush /></el-icon>画刷 (B)
         </el-button>
         <el-button :type="mode === 'erase' ? 'primary' : 'default'" @click="mode = 'erase'">
-          <el-icon><Delete /></el-icon>橡皮
+          <el-icon><Delete /></el-icon>橡皮 (E)
         </el-button>
         <el-button :type="mode === 'pan' ? 'primary' : 'default'" @click="mode = 'pan'">
-          <el-icon><View /></el-icon>查看
+          <el-icon><View /></el-icon>查看 (V)
         </el-button>
       </el-button-group>
       <span class="brush-size">
@@ -50,6 +51,12 @@
         <el-slider v-model="brushSize" :min="2" :max="40" :step="1" style="width: 120px;" />
         <span class="size-num">{{ brushSize }}px</span>
       </span>
+      <!-- v2.5.0: 缩放控制 (v2.3.2 检测端同款) -->
+      <el-button-group size="small">
+        <el-button :icon="ZoomOut" @click="zoomOut">缩小</el-button>
+        <el-button @click="resetZoom">{{ Math.round(zoom * 100) }}%</el-button>
+        <el-button :icon="ZoomIn" @click="zoomIn">放大</el-button>
+      </el-button-group>
       <el-button size="small" @click="clearMask" :icon="Refresh">清空</el-button>
     </div>
 
@@ -69,19 +76,41 @@
     </div>
 
     <!-- 双 canvas 叠层: 底层原图, 上层 mask 半透明 -->
-    <div ref="wrapRef" class="canvas-wrap">
+    <div
+      ref="wrapRef"
+      class="canvas-wrap"
+      @wheel.prevent="onWheel"
+    >
       <canvas ref="imgCanvasRef" class="layer" :width="canvasSize.w" :height="canvasSize.h" />
       <canvas
-        ref="maskCanvasRef" class="layer interactive"
+        ref="maskCanvasRef"
+        class="layer interactive"
         :width="canvasSize.w" :height="canvasSize.h"
+        :style="{ transform: `translate(-50%, -50%) scale(${zoom})` }"
         @mousedown="onMouseDown"
         @mousemove="onMouseMove"
         @mouseup="onMouseUp"
         @mouseleave="onMouseUp"
       />
+      <!-- v2.5.0: 画布坐标浮标 -->
+      <div class="coord-overlay coord-bl">
+        <span v-if="mousePos" class="coord-mouse">
+          x={{ mousePos.x }}, y={{ mousePos.y }} px
+        </span>
+        <span v-else class="coord-mouse idle">—</span>
+        <span v-if="brushCategoryId != null" class="coord-cat" :style="{ color: colorOf(brushCategoryId) }">
+          ● {{ catName(brushCategoryId) }}
+        </span>
+      </div>
+      <div class="coord-overlay coord-br">
+        画布 {{ canvasSize.w }}×{{ canvasSize.h }}px · 缩放 {{ Math.round(zoom * 100) }}%
+      </div>
+      <div class="coord-overlay coord-tl">
+        <el-tag size="small" :type="modeTagType">{{ modeLabel }}</el-tag>
+      </div>
     </div>
 
-    <!-- 操作按钮 -->
+    <!-- 操作按钮 (v2.5.0 仍保留内部按钮, 但父组件右侧面板也会暴露 save; 不冲突) -->
     <div class="actions">
       <el-button type="primary" :icon="Check" :disabled="!dirty" @click="onSave">
         保存 mask
@@ -100,7 +129,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Brush, Delete, View, Refresh } from '@element-plus/icons-vue'
+import {
+  Check, Brush, Delete, View, Refresh,
+  ZoomIn, ZoomOut,
+} from '@element-plus/icons-vue'
 
 interface Category { id: number; name: string }
 const props = defineProps<{
@@ -115,6 +147,7 @@ const emit = defineEmits<{
   (e: 'save', file: File): void
   (e: 'cancel'): void
   (e: 'clear'): void
+  (e: 'dirty-change', dirty: boolean): void
 }>()
 
 // ============== State ==============
@@ -129,21 +162,46 @@ const imgEl = new Image()
 const maskEl = new Image()
 const dirty = ref(false)
 const initial = ref<string>('')
+// v2.5.0 增强
+const zoom = ref(1)
+const mousePos = ref<{ x: number; y: number } | null>(null)
+const mouseDown = ref(false)  // 平移模式拖动中
+const panOffset = ref<{ x: number; y: number }>({ x: 0, y: 0 })
+const spaceDown = ref(false)  // Space 临时平移
 
 const PALETTE = [
-  'rgba(245,108,108,0.55)',  // 红
-  'rgba(103,194,58,0.55)',   // 绿
-  'rgba(64,158,255,0.55)',   // 蓝
-  'rgba(230,162,60,0.55)',   // 黄
-  'rgba(155,89,182,0.55)',   // 紫
-  'rgba(26,188,156,0.55)',   // 青
-  'rgba(255,87,34,0.55)',    // 橙
-  'rgba(144,147,153,0.55)',  // 灰
+  'rgba(245,108,108,0.85)',  // 红
+  'rgba(103,194,58,0.85)',   // 绿
+  'rgba(64,158,255,0.85)',   // 蓝
+  'rgba(230,162,60,0.85)',   // 黄
+  'rgba(155,89,182,0.85)',   // 紫
+  'rgba(26,188,156,0.85)',   // 青
+  'rgba(255,87,34,0.85)',    // 橙
+  'rgba(144,147,153,0.85)',  // 灰
 ]
 function colorOf(catId: number | null | undefined): string {
   if (catId == null) return PALETTE[0]
   return PALETTE[Math.abs(Number(catId)) % PALETTE.length]
 }
+
+// v2.5.0: 当前类别名 (右侧 8 sections 需要显示)
+function catName(id: number | null | undefined): string {
+  if (id == null) return '未选'
+  const c = props.categories.find((x: Category) => x.id === id)
+  return c ? c.name : `#${id}`
+}
+
+// v2.5.0: 模式徽章
+const modeTagType = computed(() => {
+  if (mode.value === 'brush') return 'primary'
+  if (mode.value === 'erase') return 'danger'
+  return 'info'
+})
+const modeLabel = computed(() => {
+  if (mode.value === 'brush') return '画刷'
+  if (mode.value === 'erase') return '橡皮'
+  return '查看'
+})
 
 // 监听 categories, 默认选第一个
 watch(
@@ -156,12 +214,53 @@ watch(
   { immediate: true }
 )
 
+// v2.5.0: dirty 变化时通知父组件 (右侧 8 sections 用)
+watch(dirty, (v) => emit('dirty-change', v))
+
+// v2.5.0: 缩放
+function zoomIn() { zoom.value = Math.min(8, +(zoom.value * 1.2).toFixed(3)) }
+function zoomOut() { zoom.value = Math.max(0.25, +(zoom.value / 1.2).toFixed(3)) }
+function resetZoom() { zoom.value = 1; panOffset.value = { x: 0, y: 0 } }
+function onWheel(e: WheelEvent) {
+  if (e.ctrlKey || e.metaKey) {
+    // Ctrl+滚轮 缩放 (检测端同款)
+    if (e.deltaY < 0) zoomIn(); else zoomOut()
+  }
+  // 普通滚轮 留给浏览器 (本身被 prevent 避免外层滚动)
+}
+
+// v2.5.0: 全局快捷键
+function onKeyDown(e: KeyboardEvent) {
+  // 在输入框里不响应
+  const tag = (e.target as HTMLElement | null)?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  if (e.code === 'KeyB') { mode.value = 'brush'; e.preventDefault() }
+  else if (e.code === 'KeyE') { mode.value = 'erase'; e.preventDefault() }
+  else if (e.code === 'KeyV') { mode.value = 'pan'; e.preventDefault() }
+  else if (e.code === 'Space') { spaceDown.value = true; e.preventDefault() }
+}
+function onKeyUp(e: KeyboardEvent) {
+  if (e.code === 'Space') { spaceDown.value = false }
+}
+
 // ============== 加载原图 + 已有 mask ==============
 watch(
   () => [props.imageUrl, props.initialMaskUrl],
   () => loadAll()
 )
-onMounted(() => loadAll())
+onMounted(() => {
+  loadAll()
+  window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('keyup', onKeyUp)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('keyup', onKeyUp)
+  imgEl.onload = null
+  imgEl.onerror = null
+  maskEl.onload = null
+  maskEl.onerror = null
+})
 
 function loadAll() {
   if (!props.imageUrl) return
@@ -190,18 +289,19 @@ function loadMask() {
   ctx.clearRect(0, 0, c.width, c.height)
   if (!props.initialMaskUrl) {
     initial.value = ''
+    dirty.value = false
     return
   }
   maskEl.crossOrigin = 'anonymous'
   maskEl.onload = () => {
     ctx.clearRect(0, 0, c.width, c.height)
     ctx.drawImage(maskEl, 0, 0, c.width, c.height)
-    // 记录初始 PNG 哈希, 用于 dirty 检测
     initial.value = canvasToDataUrl(c)
     dirty.value = false
   }
   maskEl.onerror = () => {
     initial.value = ''
+    dirty.value = false
   }
   maskEl.src = props.initialMaskUrl
 }
@@ -220,7 +320,7 @@ function drawImage() {
   }
 }
 
-// ============== 鼠标事件: 画刷 / 橡皮 ==============
+// ============== 鼠标事件: 画刷 / 橡皮 / 平移 ==============
 const painting = ref(false)
 function eventToCanvas(e: MouseEvent): { x: number; y: number } {
   if (!maskCanvasRef.value) return { x: 0, y: 0 }
@@ -231,7 +331,11 @@ function eventToCanvas(e: MouseEvent): { x: number; y: number } {
   }
 }
 function onMouseDown(e: MouseEvent) {
-  if (mode.value === 'pan') return
+  const isPan = mode.value === 'pan' || spaceDown.value
+  if (isPan) {
+    mouseDown.value = true
+    return
+  }
   if (mode.value === 'brush' && brushCategoryId.value == null) {
     ElMessage.warning('请先在调色板选一个类别')
     return
@@ -240,10 +344,13 @@ function onMouseDown(e: MouseEvent) {
   paintAt(eventToCanvas(e))
 }
 function onMouseMove(e: MouseEvent) {
+  // v2.5.0: 实时更新坐标浮标
+  mousePos.value = eventToCanvas(e)
+  if (mouseDown.value) return
   if (!painting.value) return
   paintAt(eventToCanvas(e))
 }
-function onMouseUp() { painting.value = false }
+function onMouseUp() { painting.value = false; mouseDown.value = false }
 
 function paintAt(p: { x: number; y: number }) {
   const c = maskCanvasRef.value
@@ -258,13 +365,14 @@ function paintAt(p: { x: number; y: number }) {
     ctx.fill()
     ctx.globalCompositeOperation = 'source-over'
   } else {
-    // brush: 用当前类别颜色画圆
     ctx.fillStyle = colorOf(brushCategoryId.value)
     ctx.beginPath()
     ctx.arc(p.x, p.y, brushSize.value, 0, Math.PI * 2)
     ctx.fill()
   }
-  dirty.value = true
+  if (!dirty.value) {
+    dirty.value = true
+  }
 }
 
 // ============== mask 统计 / 保存 ==============
@@ -310,15 +418,27 @@ function onSave() {
   }, 'image/png')
 }
 
+// v2.5.0: 重置 dirty (切图时父组件调用)
+function resetInitial() {
+  const c = maskCanvasRef.value
+  initial.value = c ? canvasToDataUrl(c) : ''
+  dirty.value = false
+}
+
 // 渲染: 当 size 变化时重绘
 watch(canvasSize, () => { drawImage(); loadMask() })
 
-// 释放资源
-onBeforeUnmount(() => {
-  imgEl.onload = null
-  imgEl.onerror = null
-  maskEl.onload = null
-  maskEl.onerror = null
+// v2.5.0: 暴露给父组件 (右侧 8 sections 调用)
+defineExpose({
+  // 状态
+  mode, dirty, brushCategoryId, brushSize, zoom, mousePos,
+  // 操作
+  setMode: (m: 'brush' | 'erase' | 'pan') => { mode.value = m },
+  setCategory: (id: number) => { brushCategoryId.value = id },
+  setBrushSize: (n: number) => { brushSize.value = n },
+  zoomIn, zoomOut, resetZoom,
+  save: onSave,
+  resetInitial,
 })
 </script>
 
@@ -401,6 +521,7 @@ onBeforeUnmount(() => {
   left: 50%;
   transform: translate(-50%, -50%);
   cursor: crosshair;
+  transform-origin: center center;
 }
 .actions {
   display: flex;
@@ -410,5 +531,46 @@ onBeforeUnmount(() => {
 .meta {
   font-size: 12px;
   color: #909399;
+}
+
+/* v2.5.0: 画布坐标浮标 (与检测端 DetectionAnnotator 同款风格) */
+.coord-overlay {
+  position: absolute;
+  font-size: 11px;
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid #e4e7ed;
+  pointer-events: none;
+  z-index: 10;
+  white-space: nowrap;
+}
+.coord-bl {
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.coord-br {
+  right: 8px;
+  bottom: 8px;
+  color: #909399;
+}
+.coord-tl {
+  left: 8px;
+  top: 8px;
+}
+.coord-mouse {
+  color: #67c23a;
+  font-weight: 600;
+}
+.coord-mouse.idle {
+  color: #c0c4cc;
+  font-weight: normal;
+}
+.coord-cat {
+  font-weight: 600;
 }
 </style>
