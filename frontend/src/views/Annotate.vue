@@ -11,11 +11,12 @@
 import { ref, onMounted, watch, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close, Lightning, View, ArrowLeft, MagicStick, EditPen, Select, Delete, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
+import { Check, Close, Lightning, View, ArrowLeft, MagicStick, EditPen, Select, Delete, RefreshLeft, RefreshRight, InfoFilled } from '@element-plus/icons-vue'
 import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi, detectionApi, segmentationApi } from '@/api'
 import { getTaskTypeMeta } from '@/utils/taskType'
 import DetectionAnnotator from '@/components/annotation/DetectionAnnotator.vue'
 import SegmentationAnnotator from '@/components/annotation/SegmentationAnnotator.vue'
+import ClassificationAnnotator from '@/components/annotation/ClassificationAnnotator.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -828,11 +829,51 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
-        <!-- S7 新增: 当前 dataset 任务类型徽章 (数据集旁边) -->
+        <!-- S7 新增: 当前 dataset 任务类型徽章 (数据集旁边)
+             v2.5.2: 改为 el-popover 包裹, 点击徽章可查看完整任务类型定义 -->
         <el-form-item v-if="datasetId" label="任务类型">
-          <el-tag :type="getTaskTypeMeta(currentTaskTypeRaw).type" effect="plain" size="small">
-            {{ getTaskTypeMeta(currentTaskTypeRaw).label }}
-          </el-tag>
+          <el-popover
+            placement="bottom-start"
+            :width="380"
+            trigger="click"
+            :show-after="0"
+          >
+            <template #reference>
+              <el-tag
+                :type="getTaskTypeMeta(currentTaskTypeRaw).type"
+                effect="plain"
+                size="small"
+                style="cursor: pointer;"
+              >
+                <el-icon style="vertical-align: -2px; margin-right: 2px;">
+                  <component :is="getTaskTypeMeta(currentTaskTypeRaw).icon" />
+                </el-icon>
+                {{ getTaskTypeMeta(currentTaskTypeRaw).label }}
+                <el-icon style="vertical-align: -2px; margin-left: 2px;"><InfoFilled /></el-icon>
+              </el-tag>
+            </template>
+            <!-- v2.5.2: 任务类型正式定义面板 -->
+            <div class="task-type-popover">
+              <div class="ttp-title">
+                <el-icon style="vertical-align: -2px; margin-right: 4px;">
+                  <component :is="getTaskTypeMeta(currentTaskTypeRaw).icon" />
+                </el-icon>
+                {{ getTaskTypeMeta(currentTaskTypeRaw).label }}
+              </div>
+              <div class="ttp-row">
+                <span class="ttp-label">任务定义</span>
+                <span class="ttp-value">{{ getTaskTypeMeta(currentTaskTypeRaw).definition }}</span>
+              </div>
+              <div class="ttp-row">
+                <span class="ttp-label">输出粒度</span>
+                <span class="ttp-value">{{ getTaskTypeMeta(currentTaskTypeRaw).output }}</span>
+              </div>
+              <div class="ttp-row">
+                <span class="ttp-label">典型场景</span>
+                <span class="ttp-value">{{ getTaskTypeMeta(currentTaskTypeRaw).scenario }}</span>
+              </div>
+            </div>
+          </el-popover>
         </el-form-item>
         <!-- v2.3.0 S10: 模型选择区按 task_type 分派
              classification: useFinetune 开关 + fine-tune/基础模型下拉 (原有)
@@ -1489,5 +1530,37 @@ const detAnnot = computed(() => detAnnotRef.value || {})
   color: #f56c6c;
   font-style: italic;
   font-weight: 600;
+}
+/* v2.5.2: 任务类型定义 popover 样式 */
+.task-type-popover {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.task-type-popover .ttp-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ebeef5;
+}
+.task-type-popover .ttp-row {
+  display: flex;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+.task-type-popover .ttp-row:last-child {
+  margin-bottom: 0;
+}
+.task-type-popover .ttp-label {
+  flex-shrink: 0;
+  width: 64px;
+  color: #909399;
+  font-weight: 500;
+}
+.task-type-popover .ttp-value {
+  flex: 1;
+  color: #303133;
+  word-break: break-word;
 }
 </style>

@@ -3,9 +3,24 @@
  * 后端存储: classification | detection | segmentation (英文枚举值, 跨语言稳定)
  * 前端展示: 实际业务含义 (中文, 带图标)
  *
- * - classification: 图像分类 (整张图归为 1 个类别)
- * - detection:     目标检测 (图内多个目标, 框选 + 类别)
- * - segmentation:  图像分割 (逐像素分类, 当前未实现, 仅占位)
+ * v2.5.2 任务类型正式定义 (教学文档/帮助面板用):
+ * - classification: 图像分类 (Classification)
+ *     任务: 对整张图像进行单一类别判断, 输出 1 个类别标签 + 置信度
+ *     输出: (label, confidence) - 整图级别
+ *     适用: 「是/不是」「属于哪一类」 (猫/狗/缺陷/正常 等)
+ *     不关注目标位置, 只看整张图的语义
+ *
+ * - detection: 目标检测 (Object Detection)
+ *     任务: 识别图中所有感兴趣目标的「位置」+「类别」, 输出多个 bbox
+ *     输出: [(x_min, y_min, x_max, y_max, category_id, confidence), ...] - 目标级
+ *     适用: 「找出图中所有 X」 (行人/车辆/缺陷 等)
+ *     位置是矩形 (axis-aligned bbox), 不画轮廓
+ *
+ * - segmentation: 图像分割 (Semantic Segmentation)
+ *     任务: 对图像「每个像素」进行分类, 输出与原图同尺寸的 mask
+ *     输出: H×W 的 mask, 每个像素 = category_id (0=背景, 1..N=前景)
+ *     适用: 精细轮廓识别 (医学影像/自动驾驶车道线/工业缺陷 等)
+ *     位置是逐像素, 比 bbox 精细, 但标注成本高
  */
 import { Picture, Aim, Crop, QuestionFilled } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
@@ -19,6 +34,12 @@ export interface TaskTypeMeta {
   icon: Component
   /** tag 颜色 */
   type: 'primary' | 'success' | 'warning' | 'info' | 'danger'
+  /** v2.5.2: 任务类型正式定义 (详细说明, 帮助面板用) */
+  definition: string
+  /** v2.5.2: 输出粒度 (整图 / 目标 / 像素) */
+  output: string
+  /** v2.5.2: 典型应用场景 (帮助面板用) */
+  scenario: string
 }
 
 export const TASK_TYPE_META: Record<string, TaskTypeMeta> = {
@@ -27,18 +48,27 @@ export const TASK_TYPE_META: Record<string, TaskTypeMeta> = {
     desc: '整张图片归为 1 个类别, 适用「是/不是」「属于哪一类」场景',
     icon: Picture,
     type: 'primary',
+    definition: '对整张图像进行单一类别判断, 输出 1 个类别标签 + 置信度',
+    output: '整图级 (label + confidence)',
+    scenario: '猫狗分类 / 质检合格判定 / 医学影像良恶性',
   },
   detection: {
     label: '目标检测',
     desc: '框选图中多个目标并分类, 适用「找出并识别」场景',
     icon: Aim,
     type: 'success',
+    definition: '识别图中所有感兴趣目标的「位置」+「类别」, 输出多个矩形框 + 类别',
+    output: '目标级 (bbox + category + confidence)',
+    scenario: '行人车辆检测 / 工业缺陷定位 / 零售商品识别',
   },
   segmentation: {
     label: '图像分割',
-    desc: '逐像素分类, 适用精细轮廓识别场景 (当前为预留类型)',
+    desc: '逐像素分类, 适用精细轮廓识别场景',
     icon: Crop,
     type: 'warning',
+    definition: '对图像「每个像素」进行分类, 输出与原图同尺寸的语义 mask',
+    output: '像素级 (H×W mask, 每像素 = 类别 ID)',
+    scenario: '医学器官分割 / 自动驾驶车道线 / 工业缺陷轮廓',
   },
 }
 
@@ -48,6 +78,9 @@ const DEFAULT_META: TaskTypeMeta = {
   desc: '任务类型未识别',
   icon: QuestionFilled,
   type: 'info',
+  definition: '未识别的任务类型',
+  output: '未知',
+  scenario: '请联系管理员检查数据集 task_type 字段',
 }
 
 /**

@@ -81,9 +81,17 @@
           &nbsp;● {{ catName(brushCategoryId) }}
         </span>
       </div>
-      <!-- 画布尺寸 (右下角) -->
+      <!-- v2.5.2: 缩放控制条 (顶部中间, 与 DetectionAnnotator/ClassificationAnnotator 同款) -->
+      <div class="zoom-overlay">
+        <el-button-group size="small">
+          <el-button @click="zoomOut" :icon="ZoomOut" circle />
+          <el-button @click="resetZoom" plain style="min-width: 64px;">{{ zoomPercent }}%</el-button>
+          <el-button @click="zoomIn" :icon="ZoomIn" circle />
+        </el-button-group>
+      </div>
+      <!-- 画布尺寸 (右下角, v2.5.2: 与检测端同款 scalePercent + zoomPercent) -->
       <div class="size-overlay">
-        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ Math.round(zoom * 100) }}%
+        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}% · 显示 {{ zoomPercent }}%
         <span v-if="maskStats">
           · 已标 {{ maskStats.painted }} / {{ maskStats.total }}
           ({{ (maskStats.painted / maskStats.total * 100).toFixed(1) }}%)
@@ -100,6 +108,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 
 interface Category { id: number; name: string }
 const props = defineProps<{
@@ -186,16 +195,25 @@ watch(
 // v2.5.0: dirty 变化时通知父组件 (右侧 8 sections 用)
 watch(dirty, (v) => emit('dirty-change', v))
 
-// v2.5.0: 缩放
-function zoomIn() { zoom.value = Math.min(8, +(zoom.value * 1.2).toFixed(3)) }
-function zoomOut() { zoom.value = Math.max(0.25, +(zoom.value / 1.2).toFixed(3)) }
+// v2.5.2: 缩放 (与 DetectionAnnotator 严格一致: MIN/MAX 1.0, 滚轮 1.15, 按钮 1.25)
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 8.0
+const zoomPercent = computed(() => Math.round(zoom.value * 100))
+const scalePercent = computed(() => {
+  const dw = props.imageWidth || 0
+  if (!dw || !canvasSize.value.w) return '100'
+  return ((canvasSize.value.w / dw) * 100).toFixed(0)
+})
+function zoomIn() { zoom.value = Math.min(MAX_ZOOM, zoom.value * 1.25) }
+function zoomOut() { zoom.value = Math.max(MIN_ZOOM, zoom.value / 1.25) }
 function resetZoom() { zoom.value = 1; panOffset.value = { x: 0, y: 0 } }
+// v2.5.2: 滚轮缩放 (无需 Ctrl, 与 DetectionAnnotator 完全一致)
 function onWheel(e: WheelEvent) {
-  if (e.ctrlKey || e.metaKey) {
-    // Ctrl+滚轮 缩放 (检测端同款)
-    if (e.deltaY < 0) zoomIn(); else zoomOut()
-  }
-  // 普通滚轮 留给浏览器 (本身被 prevent 避免外层滚动)
+  e.preventDefault()
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom.value * factor))
+  if (newZoom === zoom.value) return
+  zoom.value = newZoom
 }
 
 // v2.5.0: 全局快捷键
@@ -631,6 +649,14 @@ defineExpose({
   border-radius: 4px;
   font-size: 12px;
   pointer-events: none;
+  z-index: 5;
+}
+/* v2.5.2: 缩放控制条 (顶部中间, 与检测端同款) */
+.zoom-overlay {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 5;
 }
 /* 模式徽章 (左上角) */
