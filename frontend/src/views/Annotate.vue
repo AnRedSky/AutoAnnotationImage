@@ -282,11 +282,29 @@ function catName(catId: number): string {
   return c?.name || `cls_${catId}`
 }
 
-// v2.5.5: 选中 bbox 变化时, 给 Section 2 加高亮 + 滚动到视口, 让用户立刻看到"这里改类别"
-// 注意: watch 必须放在 detAnnotRef 定义之后 (line 806 之后), 否则 setup 早期会 TDZ 报错
-// v2.5.5-fix-2: watch 移到 detAnnotRef 定义后执行, 避免 TDZ
-const detSelectedSectionRef = ref<HTMLElement | null>(null)
-const detSectionHighlight = ref(false)
+// v2.5.6: Section 5 el-popover 类别变更交互
+// - detOpenPopoverIdx: 当前打开 popover 的 bbox idx (同时只能一个)
+// - onDetTagClick: 点击 el-tag → 选中 + 切换 popover 显示
+// - onDetCategoryChange: 在 popover 内选新类别 → 调子组件 changeSelectedCategory + 关闭 popover
+const detOpenPopoverIdx = ref<number | null>(null)
+function onDetTagClick(idx: number) {
+  // 1) 选中该 bbox
+  detAnnot.value?.selectByIndex?.(idx)
+  // 2) 切换 popover 显示 (再次点同一 bbox -> 关闭)
+  detOpenPopoverIdx.value = detOpenPopoverIdx.value === idx ? null : idx
+}
+function onDetCategoryChange(idx: number, catId: number | null) {
+  if (catId == null) return
+  // 选中目标 bbox + 改类别 (复用子组件的 snapshot 撤销栈)
+  detAnnot.value?.selectByIndex?.(idx)
+  detAnnot.value?.changeSelectedCategory?.(catId)
+  // 关闭 popover
+  detOpenPopoverIdx.value = null
+}
+function onPopoverVisibleChange(idx: number, v: boolean) {
+  // popover 外部点击关闭 → 同步状态
+  detOpenPopoverIdx.value = v ? idx : (detOpenPopoverIdx.value === idx ? null : detOpenPopoverIdx.value)
+}
 // v2.3.1 S10: 类别调色板 (与 DetectionAnnotator 一致)
 const DET_PALETTE = [
   '#f56c6c', '#67c23a', '#409eff', '#e6a23c',
@@ -794,20 +812,9 @@ const detectionModelName = ref('yolov8n')
 const detAnnotRef = ref<any>(null)
 const detAnnot = computed(() => detAnnotRef.value || {})
 
+// v2.5.6: 移除 v2.5.5 的 watch 块 (原 Section 2 滚动+高亮已不再需要, 类别下拉迁到 Section 5 popover 后, 用户点 el-tag 直接弹 popover, 无需滚动+高亮提示)
 // v2.5.5-fix-2: watch 移到此处 (detAnnotRef 定义后), 避免 setup 早期 TDZ
-watch(
-  () => detAnnotRef.value?.selectedIndex?.value,
-  async (newIdx) => {
-    if (newIdx === null || newIdx === undefined) {
-      detSectionHighlight.value = false
-      return
-    }
-    await nextTick()
-    detSelectedSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    detSectionHighlight.value = true
-    setTimeout(() => { detSectionHighlight.value = false }, 1500)
-  }
-)
+// 当前无 v2.5.5 遗留 watch, 保留此注释说明 v2.5.6 清理历史
 </script>
 
 <template>
@@ -1232,37 +1239,9 @@ watch(
             </div>
           </div>
 
-          <!-- 2. 选中 bbox 的属性 (有选中时, v2.5.4: 不再依赖 mode)
-               v2.5.5: ref + highlight, 选中变化时滚动到视口 + 高亮动画 -->
-          <div
-            ref="detSelectedSectionRef"
-            class="op-section"
-            :class="{ 'op-section-highlight': detSectionHighlight }"
-            v-if="detAnnot.selectedIndex?.value !== null"
-          >
-            <div class="op-section-title">
-              2. 选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
-            </div>
-            <el-select
-              :model-value="detAnnot.selectedIndex.value !== null ? bboxList[detAnnot.selectedIndex.value]?.category_id : null"
-              @update:model-value="(v: number | null) => detAnnot.changeSelectedCategory?.(v)"
-              size="small" style="width: 100%; margin-top: 6px;" filterable
-            >
-              <el-option
-                v-for="c in sortedCategories" :key="c.id" :value="c.id" :label="c.name"
-              >
-                <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
-                {{ c.name }}
-              </el-option>
-            </el-select>
-            <div style="display: flex; gap: 6px; margin-top: 6px;">
-              <el-button
-                size="small" type="danger" plain style="flex: 1;"
-                :icon="Delete"
-                @click="detAnnot.removeSelected?.()"
-              >删除 (Del)</el-button>
-            </div>
-          </div>
+          <!-- v2.5.6: 移除原 Section 2「选中 bbox」(类别下拉 + 删除按钮)
+               类别下拉已迁移到 Section 5 el-popover, 删除按钮由 el-tag × 按钮承担
+               选中状态视觉反馈: Section 5 el-tag primary + 8 handle (DetectionAnnotator 内部) -->
 
           <!-- 3. 跨图 bbox 复制建议 (条件性显示) -->
           <el-alert
@@ -1295,9 +1274,9 @@ watch(
             </div>
           </el-alert>
 
-          <!-- 4. 图片导航 -->
+          <!-- 3. 图片导航 -->
           <div class="op-section">
-            <div class="op-section-title">4. 图片导航</div>
+            <div class="op-section-title">3. 图片导航</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 style="flex: 1;" :icon="ArrowLeft"
@@ -1317,31 +1296,61 @@ watch(
             </div>
           </div>
 
-          <!-- 5. 当前 bbox 列表 -->
+          <!-- 4. 当前 bbox 列表 (v2.5.6: 类别下拉已迁移到每个 el-tag 的 el-popover 内) -->
           <div class="op-section">
             <div class="op-section-title">
-              5. 当前 bbox ({{ bboxList.length }})
+              4. 当前 bbox ({{ bboxList.length }})
             </div>
             <el-empty v-if="bboxList.length === 0" description="尚未画任何 bbox" :image-size="50" />
             <div v-else style="margin-top: 6px; max-height: 180px; overflow-y: auto;">
-              <el-tag
+              <!-- v2.5.6: 每个 bbox 一个 el-popover, 点击 el-tag 弹出类别下拉改类别
+                   同时 el-tag 上的 × 按钮仍可单独删除 (走 confirmAndRemove 流程) -->
+              <el-popover
                 v-for="(b, idx) in bboxList" :key="b.id || idx"
-                size="small" effect="plain"
-                :type="detAnnot.selectedIndex?.value === idx ? 'primary' : 'info'"
-                style="margin: 2px 4px 2px 0; cursor: pointer;"
-                @click="detAnnot.selectByIndex?.(idx)"
-                closable
-                @close="detAnnot.removeAtWithConfirm?.(idx)"
+                :visible="detOpenPopoverIdx === idx"
+                placement="bottom-start"
+                :width="220"
+                trigger="manual"
+                :show-arrow="false"
+                :hide-after="0"
+                @update:visible="(v: boolean) => onPopoverVisibleChange(idx, v)"
               >
-                <span class="cat-dot" :style="{ background: catColor(b.category_id) }"></span>
-                #{{ idx + 1 }} {{ catName(b.category_id) }}
-              </el-tag>
+                <template #reference>
+                  <el-tag
+                    size="small" effect="plain"
+                    :type="detAnnot.selectedIndex?.value === idx ? 'primary' : 'info'"
+                    style="margin: 2px 4px 2px 0; cursor: pointer;"
+                    @click="onDetTagClick(idx)"
+                    closable
+                    @close.stop="detAnnot.removeAtWithConfirm?.(idx)"
+                  >
+                    <span class="cat-dot" :style="{ background: catColor(b.category_id) }"></span>
+                    #{{ idx + 1 }} {{ catName(b.category_id) }}
+                  </el-tag>
+                </template>
+                <!-- popover 内容: 类别下拉, 改类别后自动关闭 popover -->
+                <div class="det-cat-popover">
+                  <div class="det-cat-popover-title">变更 #{{ idx + 1 }} 类别</div>
+                  <el-select
+                    :model-value="b.category_id"
+                    @update:model-value="(v: number | null) => onDetCategoryChange(idx, v)"
+                    size="small" style="width: 100%;" filterable
+                  >
+                    <el-option
+                      v-for="c in sortedCategories" :key="c.id" :value="c.id" :label="c.name"
+                    >
+                      <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
+                      {{ c.name }}
+                    </el-option>
+                  </el-select>
+                </div>
+              </el-popover>
             </div>
           </div>
 
-          <!-- 6. 提交 -->
+          <!-- 5. 提交 -->
           <div class="op-section">
-            <div class="op-section-title">6. 提交</div>
+            <div class="op-section-title">5. 提交</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 type="primary"
@@ -1508,19 +1517,15 @@ watch(
   padding-bottom: 0;
   border-bottom: none;
 }
-/* v2.5.5: 选中 bbox 时, Section 2 高亮动画 (1.5s 后自动消失) */
-.op-section-highlight {
-  background: #f0f9ff;
-  border-left: 3px solid #409eff;
-  border-radius: 4px;
-  padding: 8px 10px;
-  margin-left: -10px;
-  animation: op-section-pulse 1.5s ease-out;
+/* v2.5.6: Section 5 el-popover 类别下拉样式 (替代原 Section 2) */
+.det-cat-popover {
+  padding: 4px 0;
 }
-@keyframes op-section-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(64, 158, 255, 0.5); }
-  60% { box-shadow: 0 0 0 8px rgba(64, 158, 255, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(64, 158, 255, 0); }
+.det-cat-popover-title {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 6px;
+  letter-spacing: 0.3px;
 }
 .op-section-title {
   font-size: 12px;
