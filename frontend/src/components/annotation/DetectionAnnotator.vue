@@ -84,6 +84,17 @@
       <div class="mode-overlay mode-smart">
         智能标注模式 · 拖空白画新 / 点 bbox 选中
       </div>
+      <!-- v2.5.5: bbox 标签右上角 X 删除按钮 (DOM overlay, 跟随选中 bbox 位置)
+           满足用户需求: 在每个已标注标签的右上角显示删除按钮 -->
+      <div
+        v-if="detXBtnPos"
+        class="bbox-delete-overlay"
+        :style="{ left: detXBtnPos.x + 'px', top: detXBtnPos.y + 'px' }"
+        :title="`删除 #${(selectedIndex ?? 0) + 1}「${selectedBBoxLabel}」`"
+        @click.stop="confirmAndRemove(selectedIndex ?? 0)"
+      >
+        <el-icon><Close /></el-icon>
+      </div>
     </div>
   </div>
 </template>
@@ -91,7 +102,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { ZoomIn, ZoomOut, Close } from '@element-plus/icons-vue'
 
 // ============== Props / Emits ==============
 interface BBox {
@@ -256,6 +267,35 @@ watch(
   },
   { immediate: true }
 )
+
+// v2.5.5: bbox 标签右上角 X 按钮位置 (DOM overlay, 放在 canvas-wrap 内 canvas-stage 外)
+// canvas-stage 用 transform: scale(zoom), 缩放后 bbox 在 canvas-wrap 坐标系下的视觉像素位置:
+// (x_max * canvasSize.w * zoom, y_min * canvasSize.h * zoom)
+// 但 canvas-stage 在 canvas-wrap 内居中, 所以还要加上 canvas-stage 相对 canvas-wrap 的偏移
+// X 按钮 16x16 大小固定, 用 transform: scale(1/zoom) 反向缩放, 抵消 canvas-stage 的 scale(zoom)
+const detXBtnPos = computed<{ x: number; y: number } | null>(() => {
+  const i = selectedIndex.value
+  if (i === null) return null
+  const b = props.modelValue?.[i]
+  if (!b) return null
+  if (!canvasSize.value.w || !canvasSize.value.h) return null
+  if (!canvasRef.value || !wrapRef.value) return null
+  // bbox 视觉像素坐标 (canvas 内部坐标 * zoom)
+  const xIn = b.x_max * canvasSize.value.w * zoom.value
+  const yIn = b.y_min * canvasSize.value.h * zoom.value
+  // canvas-stage 在 canvas-wrap 内的偏移 (居中布局)
+  const stageRect = canvasRef.value.parentElement!.getBoundingClientRect()
+  const wrapRect = wrapRef.value.getBoundingClientRect()
+  const offsetX = stageRect.left - wrapRect.left
+  const offsetY = stageRect.top - wrapRect.top
+  return { x: offsetX + xIn - 8, y: offsetY + yIn - 8 }  // 8 = X 按钮一半
+})
+// v2.5.5: 选中 bbox 类别名 (X 按钮 title 用)
+const selectedBBoxLabel = computed(() => {
+  const i = selectedIndex.value
+  if (i === null) return ''
+  return catName(props.modelValue?.[i]?.category_id)
+})
 
 watch(
   () => props.imageUrl,
@@ -496,24 +536,58 @@ function selectByIndex(i: number | null) {
   draw()
 }
 function removeAt(i: number) {
-  const list = [...(props.modelValue || [])]
-  list.splice(i, 1)
-  snapshot()
-  emit('update:modelValue', list)
-  if (selectedIndex.value === i) selectedIndex.value = null
-  else if (selectedIndex.value != null && selectedIndex.value > i) selectedIndex.value -= 1
-  draw()
+  // v2.5.5: 走确认对话框, 防止误删 (用户需求: 标签删除前弹确认对话框)
+  return confirmAndRemove(i)
 }
 function removeSelected() {
   if (selectedIndex.value === null) return
-  removeAt(selectedIndex.value)
+  confirmAndRemove(selectedIndex.value)
 }
 function changeSelectedCategory(catId: number | null) {
   if (selectedIndex.value === null || catId == null) return
   const list = [...(props.modelValue || [])]
   list[selectedIndex.value] = { ...list[selectedIndex.value], category_id: catId }
+  // v2.5.5: 撤销支持 (用户需求: 标签变更需支持撤销)
   snapshot()
   emit('update:modelValue', list)
+  ElMessage.success(`标签已变更为「${catName(catId)}」`)
+  draw()
+}
+/**
+ * v2.5.5: 删除前确认对话框 (用户需求: 删除操作需弹确认)
+ * - 选中 1 个: 显示该 bbox 类别名
+ * - 多个: 通用提示
+ * - 确认后: snapshot() 入撤销栈 + 删除
+ * - 取消: 静默
+ */
+async function confirmAndRemove(i: number) {
+  const list = props.modelValue || []
+  if (i < 0 || i >= list.length) return
+  const b = list[i]
+  const catLabel = catName(b.category_id)
+  try {
+    await ElMessageBox.confirm(
+      `确认删除 #${i + 1} 「${catLabel}」? 此操作可撤销 (Ctrl+Z)`,
+      '删除标签',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      }
+    )
+  } catch {
+    return  // 取消
+  }
+  // 确认后执行删除
+  const next = [...list]
+  next.splice(i, 1)
+  // v2.5.5: 撤销支持 (用户需求: 删除需支持撤销)
+  snapshot()
+  emit('update:modelValue', next)
+  if (selectedIndex.value === i) selectedIndex.value = null
+  else if (selectedIndex.value != null && selectedIndex.value > i) selectedIndex.value -= 1
+  ElMessage.success(`已删除 #${i + 1} 「${catLabel}」`)
   draw()
 }
 function clearDraft() {
@@ -647,20 +721,28 @@ onBeforeUnmount(() => {
 
 // ============== v2.3.1 S10: 暴露给父组件 (右侧操作面板) ==============
 // v2.5.4: 智能模式 — 移除 setMode/mode 暴露, 新增 removeAt/removeBBoxAt
+// v2.5.5: 所有删除走 confirmAndRemove (带确认对话框)
 defineExpose({
   undo,
   redo,
   clearDraft,
-  removeSelected,
+  removeSelected,             // 删除当前选中 (走确认)
   changeSelectedCategory,
   selectByIndex,
-  removeAt,                // 内部函数直接暴露
-  removeBBoxAt: removeAt,  // v2.5.4: 别名, 修复 Annotate.vue 1309 行 el-tag 关闭按钮静默失效
+  removeAt,                   // 走确认对话框
+  removeBBoxAt: removeAt,     // 别名 (兼容旧引用)
+  removeAtWithConfirm: confirmAndRemove,  // v2.5.5: 显式命名, 父组件可读性更好
+  confirmAndRemove,           // 内部函数直接暴露
   save: onSave,
   resetInitial,  // v2.3.2: 父组件保存后重置 dirty
   canUndo,
   canRedo,
   selectedIndex,
+  selectedBBox: computed(() => {  // v2.5.5: 当前选中的 bbox (供父组件算 overlay 位置)
+    const i = selectedIndex.value
+    if (i === null) return null
+    return props.modelValue?.[i] || null
+  }),
   defaultCategoryId,
   dirty,
   categories: computed(() => props.categories),
@@ -764,5 +846,32 @@ defineExpose({
 }
 .mode-overlay.mode-edit {
   background: rgba(230, 162, 60, 0.85);
+}
+/* v2.5.5: bbox 标签右上角 X 删除按钮 (DOM overlay, 跟随选中 bbox 位置) */
+.bbox-delete-overlay {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background: #f56c6c;
+  color: #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 12px;
+  z-index: 20;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease, background 0.15s ease;
+  /* 反向缩放抵消 canvas-stage 的 scale(zoom), 让按钮大小固定 */
+  /* 注意: 这里通过父级 detXBtnPos 已经按 zoom 计算坐标, 不需要反向缩放 */
+}
+.bbox-delete-overlay:hover {
+  background: #ff7875;
+  transform: scale(1.15);
+}
+.bbox-delete-overlay .el-icon {
+  font-size: 12px;
+  pointer-events: none;
 }
 </style>

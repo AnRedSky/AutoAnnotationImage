@@ -272,11 +272,32 @@ const applyCopySuggestions = () => {
   ElMessage.success(`已应用 ${newBoxes.length} 个建议 bbox, 可在画布上微调`)
   copySuggestions.value = []
 }
+// v2.5.5: 类别下拉排序 (按 id 升序, 用户需求: 下拉按预设分类排序提升选择效率)
+const sortedCategories = computed(() => {
+  return [...categories.value].sort((a: any, b: any) => Number(a.id) - Number(b.id))
+})
 // 类别名查表 (弹窗 tag 用) -- script setup 顶层 ref 必须用 .value
 function catName(catId: number): string {
   const c = categories.value.find((x: any) => x.id === catId)
   return c?.name || `cls_${catId}`
 }
+
+// v2.5.5: 选中 bbox 变化时, 给 Section 2 加高亮 + 滚动到视口, 让用户立刻看到"这里改类别"
+const detSelectedSectionRef = ref<HTMLElement | null>(null)
+const detSectionHighlight = ref(false)
+watch(
+  () => detAnnot.value?.selectedIndex?.value,
+  async (newIdx) => {
+    if (newIdx === null || newIdx === undefined) {
+      detSectionHighlight.value = false
+      return
+    }
+    await nextTick()
+    detSelectedSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    detSectionHighlight.value = true
+    setTimeout(() => { detSectionHighlight.value = false }, 1500)
+  }
+)
 // v2.3.1 S10: 类别调色板 (与 DetectionAnnotator 一致)
 const DET_PALETTE = [
   '#f56c6c', '#67c23a', '#409eff', '#e6a23c',
@@ -1123,7 +1144,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
               if (cat) submit(cat.id, cat.name, false)
             }"
           >
-            <el-option v-for="c in categories" :key="c.id" :label="c.name" :value="c.id" />
+            <el-option v-for="c in sortedCategories" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
           <div style="margin-top: 8px; display: flex; gap: 8px;">
             <el-button
@@ -1184,7 +1205,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                 style="width: 100%;" filterable
               >
                 <el-option
-                  v-for="c in categories" :key="c.id" :value="c.id" :label="c.name"
+                  v-for="c in sortedCategories" :key="c.id" :value="c.id" :label="c.name"
                 >
                   <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
                   {{ c.name }}
@@ -1207,8 +1228,14 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- 2. 选中 bbox 的属性 (有选中时, v2.5.4: 不再依赖 mode) -->
-          <div class="op-section" v-if="detAnnot.selectedIndex?.value !== null">
+          <!-- 2. 选中 bbox 的属性 (有选中时, v2.5.4: 不再依赖 mode)
+               v2.5.5: ref + highlight, 选中变化时滚动到视口 + 高亮动画 -->
+          <div
+            ref="detSelectedSectionRef"
+            class="op-section"
+            :class="{ 'op-section-highlight': detSectionHighlight }"
+            v-if="detAnnot.selectedIndex?.value !== null"
+          >
             <div class="op-section-title">
               2. 选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
             </div>
@@ -1218,7 +1245,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
               size="small" style="width: 100%; margin-top: 6px;" filterable
             >
               <el-option
-                v-for="c in categories" :key="c.id" :value="c.id" :label="c.name"
+                v-for="c in sortedCategories" :key="c.id" :value="c.id" :label="c.name"
               >
                 <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
                 {{ c.name }}
@@ -1300,7 +1327,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                 style="margin: 2px 4px 2px 0; cursor: pointer;"
                 @click="detAnnot.selectByIndex?.(idx)"
                 closable
-                @close="detAnnot.removeBBoxAt?.(idx)"
+                @close="detAnnot.removeAtWithConfirm?.(idx)"
               >
                 <span class="cat-dot" :style="{ background: catColor(b.category_id) }"></span>
                 #{{ idx + 1 }} {{ catName(b.category_id) }}
@@ -1476,6 +1503,20 @@ const detAnnot = computed(() => detAnnotRef.value || {})
   margin-bottom: 0;
   padding-bottom: 0;
   border-bottom: none;
+}
+/* v2.5.5: 选中 bbox 时, Section 2 高亮动画 (1.5s 后自动消失) */
+.op-section-highlight {
+  background: #f0f9ff;
+  border-left: 3px solid #409eff;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-left: -10px;
+  animation: op-section-pulse 1.5s ease-out;
+}
+@keyframes op-section-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(64, 158, 255, 0.5); }
+  60% { box-shadow: 0 0 0 8px rgba(64, 158, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(64, 158, 255, 0); }
 }
 .op-section-title {
   font-size: 12px;
