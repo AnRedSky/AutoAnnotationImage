@@ -200,7 +200,22 @@ async def get_mask(
         select(SegmentationMask).where(SegmentationMask.image_id == image_id)
     )).scalar_one_or_none()
     if not m:
-        raise HTTPException(404, f"Mask for image_id={image_id} not found")
+        # v2.5.0-s12.7: mask 未标注是常态 (新图), 不抛 404
+        # 改为 200 + {file_exists: false}, 前端 loadSegmentationMask 已能识别
+        # 避免 F12 Network 大量红色 404 噪音
+        return {
+            "id": None,
+            "image_id": image_id,
+            "mask_path": None,
+            "width": None,
+            "height": None,
+            "source": None,
+            "annotated_by": None,
+            "file_exists": False,
+            "file_size": None,
+            "created_at": None,
+            "updated_at": None,
+        }
 
     if download:
         # 返回 PNG 流
