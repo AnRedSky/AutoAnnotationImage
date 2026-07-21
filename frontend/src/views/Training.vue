@@ -397,7 +397,7 @@ watch(
     }
     try {
       // 优先用本地缓存, 减少一次请求; 否则拉 detail
-      let ds: any = datasets.value.find((d: any) => d.id === newId)
+      let ds: any = DATASET_OPTIONS.value.find((d: any) => d.id === newId)
       if (!ds) {
         ds = await datasetApi.get(newId)
       }

@@ -614,7 +614,7 @@ const runDetectionAutoAnnotate = async () => {
     if (useFinetune.value) {
       resp = await detectionApi.startAutoAnnotate({
         dataset_id: datasetId.value,
-        model_version_id: selectedModelId.value,
+        model_version_id: selectedModelId.value ?? 0,
         conf_threshold: threshold.value,
         iou_threshold: iouThreshold.value,
       })
@@ -992,7 +992,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <el-select v-if="categories.length > 0" placeholder="选择其他类别（修正）" style="width: 100%;"
             filterable
             @change="(id: number) => {
-              const cat = categories.value.find(c => c.id === id)
+              const cat = categories.find((c: any) => c.id === id)
               if (cat) submit(cat.id, cat.name, false)
             }"
           >
@@ -1177,7 +1177,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                 style="margin: 2px 4px 2px 0; cursor: pointer;"
                 @click="detAnnot.selectByIndex?.(idx)"
                 closable
-                @close="removeBBoxAt(idx)"
+                @close="detAnnot.removeBBoxAt?.(idx)"
               >
                 <span class="cat-dot" :style="{ background: catColor(b.category_id) }"></span>
                 #{{ idx + 1 }} {{ catName(b.category_id) }}
