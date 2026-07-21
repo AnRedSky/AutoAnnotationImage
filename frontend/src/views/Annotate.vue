@@ -283,10 +283,11 @@ function catName(catId: number): string {
 }
 
 // v2.5.5: 选中 bbox 变化时, 给 Section 2 加高亮 + 滚动到视口, 让用户立刻看到"这里改类别"
+// 注意: 直接读 detAnnotRef.value, 不要读 detAnnot (detAnnot 是后定义的 computed, 早期 watch 触发会 TDZ)
 const detSelectedSectionRef = ref<HTMLElement | null>(null)
 const detSectionHighlight = ref(false)
 watch(
-  () => detAnnot.value?.selectedIndex?.value,
+  () => detAnnotRef.value?.selectedIndex?.value,
   async (newIdx) => {
     if (newIdx === null || newIdx === undefined) {
       detSectionHighlight.value = false
