@@ -222,6 +222,12 @@ function resetInitial() {
   selectedIndex.value = null
 }
 
+// v2.3.2: 把当前 bboxes 通过 emit('save') 抛给父组件 Annotate.vue,
+// 父组件负责调后端 API + 切图重置 dirty
+function onSave() {
+  emit('save', JSON.parse(JSON.stringify(props.modelValue || [])))
+}
+
 const selectedCategoryId = computed(() => {
   if (selectedIndex.value === null) return null
   return props.modelValue?.[selectedIndex.value]?.category_id ?? null
