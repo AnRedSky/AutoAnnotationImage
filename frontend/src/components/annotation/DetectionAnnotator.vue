@@ -122,6 +122,8 @@ const emit = defineEmits<{
   (e: 'cancel'): void
   (e: 'next'): void
   (e: 'prev'): void
+  // v2.5.1: dirty 状态变化通知 (父组件保存按钮 disabled 用, 避免深层 ref 访问响应式追踪失效)
+  (e: 'dirty-change', dirty: boolean): void
 }>()
 
 // ============== State ==============
@@ -214,6 +216,9 @@ function redo() {
 // dirty
 const initial = ref<string>(JSON.stringify(props.modelValue || []))
 const dirty = computed(() => JSON.stringify(props.modelValue || []) !== initial.value)
+// v2.5.1: dirty 变化时通知父组件 (右侧 8 sections 保存按钮 disabled 用)
+// 解决: 父组件用 detAnnotRef?.dirty?.value 这种深层 ref 访问在模板中响应式追踪失效的问题
+watch(dirty, (v) => emit('dirty-change', v), { immediate: true })
 function resetInitial() {
   initial.value = JSON.stringify(props.modelValue || [])
   // 重置 dirty 时, 同步重置撤销栈 (否则切图后 undo 会回到旧图状态)

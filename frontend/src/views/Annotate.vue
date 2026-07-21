@@ -8,7 +8,7 @@
  * - 「使用项目训练模型」开关 ON 时, 显示项目微调模型下拉 (默认=激活的)
  * - 显示当前激活的模型名 + 训练后引导用户到标注页
  */
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, watch, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Close, Lightning, View, ArrowLeft, MagicStick, EditPen, Select, Delete, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
@@ -174,6 +174,15 @@ const segAnnotRef = ref<any>(null)
 const segMode = ref<'brush' | 'erase' | 'pan'>('brush')
 const segMaskStatsLabel = ref('—')
 
+// v2.5.1: 本地 dirty 状态 (替代 detAnnotRef?.dirty?.value / segAnnotRef?.dirty?.value 深层 ref 访问)
+// 子组件通过 emit('dirty-change', v) 通知父组件, 父组件同步本地 ref, 模板响应式追踪稳定
+const detDirty = ref(false)
+const segDirty = ref(false)
+
+// v2.5.1: dirty-change 事件 handler
+const onDetDirtyChange = (v: boolean) => { detDirty.value = v }
+const onSegDirtyChange = (v: boolean) => { segDirty.value = v }
+
 async function refreshStats() {
   if (!datasetId.value) return
   try {
@@ -277,9 +286,13 @@ function catColor(catId: number | null | undefined): string {
   return DET_PALETTE[Math.abs(Number(catId)) % DET_PALETTE.length]
 }
 /** v2.3.1 S10: 取消未保存的修改 (从服务器重读) */
+/** v2.5.1: 同步调子组件 resetInitial, 触发 dirty-change(false) 让保存按钮恢复 disabled */
 const cancelDetectionDraft = async () => {
   if (!image.value?.id) return
   await loadDetectionAnnotations(image.value.id)
+  // 等待 bboxList 更新传到子组件后, 重置 initial -> dirty=false -> emit dirty-change(false)
+  await nextTick()
+  detAnnotRef.value?.resetInitial?.()
   ElMessage.success('已撤销未保存修改')
 }
 
@@ -311,6 +324,7 @@ const loadSegmentationMask = async (imageId: number) => {
 }
 
 /** 保存 detection bbox 列表: clear 旧 + 批量 save 新 */
+/** v2.5.1: 保存成功后调 resetInitial, 确保子组件 dirty 重置 -> emit dirty-change(false) */
 const saveDetectionBBoxes = async (bboxes: any[]) => {
   if (!image.value?.id) return
   annotatorSaving.value = true
@@ -330,6 +344,9 @@ const saveDetectionBBoxes = async (bboxes: any[]) => {
     ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
     // 重新拉一次以同步 id 字段
     await loadDetectionAnnotations(image.value.id)
+    // v2.5.1: 等 bboxList 更新传到子组件后, 重置 initial -> dirty=false
+    await nextTick()
+    detAnnotRef.value?.resetInitial?.()
   } catch (e: any) {
     ElMessage.error('bbox 保存失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
@@ -345,6 +362,9 @@ const saveSegmentationMask = async (file: File) => {
     await segmentationApi.uploadMask(image.value.id, file, 'human')
     ElMessage.success('mask 已保存')
     await loadSegmentationMask(image.value.id)
+    // v2.5.1: 等 initialMaskUrl 更新传到子组件后, 显式重置 dirty (兜底)
+    await nextTick()
+    segAnnotRef.value?.resetInitial?.()
   } catch (e: any) {
     ElMessage.error('mask 保存失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
@@ -369,9 +389,9 @@ const onSegSave = () => {
   segAnnotRef.value?.save?.()
 }
 const onSegClear = () => {
-  segAnnotRef.value?.resetInitial?.()
-  // 触发子组件的 clearMask: 这里直接调 resetInitial 让画布重置为已保存的 mask
-  // (完整的清空逻辑在子组件 clearMask(), 这里提供快速重置入口)
+  // v2.5.1: 调子组件 cancel() 撤销未保存修改 (重新加载 initialMaskUrl 对应的 mask)
+  // 与检测任务的 cancelDetectionDraft 语义对齐
+  segAnnotRef.value?.cancel?.()
 }
 
 /**
@@ -389,13 +409,14 @@ const onSegClear = () => {
 const autoSaveBeforeSwitch = async (): Promise<boolean> => {
   if (currentTaskTypeRaw.value === 'classification') return true
   if (currentTaskTypeRaw.value === 'detection') {
+    // v2.5.1: 改用本地 detDirty (替代 detAnnotRef.value.dirty?.value 深层 ref 访问)
     if (!detAnnotRef.value) return true
-    if (!detAnnotRef.value.dirty?.value) return true
+    if (!detDirty.value) return true
     try {
       annotatorSaving.value = true
       const cur = detAnnotRef.value.modelValue || []
       await saveDetectionBBoxes(cur)
-      detAnnotRef.value.resetInitial?.()  // 通知组件把"初始"重置, 让 dirty=false
+      // saveDetectionBBoxes 内部已调 resetInitial, dirty-change(false) 会让 detDirty=false
       return true
     } catch (e: any) {
       ElMessage.error('自动保存失败: ' + (e?.response?.data?.detail || e?.message))
@@ -405,15 +426,16 @@ const autoSaveBeforeSwitch = async (): Promise<boolean> => {
     }
   }
   if (currentTaskTypeRaw.value === 'segmentation') {
+    // v2.5.1: 改用本地 segDirty
     if (!segAnnotRef.value) return true
-    if (!segAnnotRef.value.dirty?.value) return true
+    if (!segDirty.value) return true
     // 分割任务: emit('save') 触发 saveSegmentationMask,
     // 但 emit 不会返回 Promise, 这里用直接调子组件 save() 拿不到 file
     // 改方案: 调 segAnnotRef.value.save() 触发内部 emit,
-    // 然后在 watch dirty=false 时认为保存完成
+    // 然后在 watch segDirty=false 时认为保存完成
     return new Promise<boolean>((resolve) => {
       const stop = watch(
-        () => segAnnotRef.value?.dirty?.value,
+        segDirty,
         (v) => {
           if (!v) {
             stop()
@@ -945,6 +967,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                  - classification: 沿用原 img + AI 候选 (不变) -->
             <template v-if="image.task_type === 'detection'">
               <!-- v2.3.1 S10: DetectionAnnotator 极简版, 操作全在右侧面板 -->
+              <!-- v2.5.1: 增加 @dirty-change 监听, 同步本地 detDirty (修复保存按钮无法点击) -->
               <DetectionAnnotator
                 ref="detAnnotRef"
                 :image-url="imageApi.fileUrl(image.id)"
@@ -958,9 +981,11 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                 @cancel="loadDetectionAnnotations(image.id)"
                 @next="loadNext"
                 @prev="loadPrev"
+                @dirty-change="onDetDirtyChange"
               />
             </template>
             <template v-else-if="image.task_type === 'segmentation'">
+              <!-- v2.5.1: SegmentationAnnotator 极简版 (对齐 DetectionAnnotator), 操作全在右侧面板 -->
               <SegmentationAnnotator
                 ref="segAnnotRef"
                 :image-url="imageApi.fileUrl(image.id)"
@@ -972,6 +997,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                 :disabled="annotatorSaving"
                 @save="saveSegmentationMask"
                 @cancel="loadSegmentationMask(image.id)"
+                @dirty-change="onSegDirtyChange"
               />
             </template>
             <template v-else>
@@ -1079,10 +1105,11 @@ const detAnnot = computed(() => detAnnotRef.value || {})
         </el-card>
 
         <!-- v2.3.1 S10: 检测任务右侧操作面板 (所有标注相关操作统一在这里) -->
+        <!-- v2.5.1: 与分割面板统一 8 sections 编号风格 -->
         <el-card v-if="image && image.task_type === 'detection'" title="检测操作面板">
-          <!-- Section 1: 工具模式 (绘制/编辑) -->
+          <!-- 1. 工具模式 (绘制/编辑) -->
           <div class="op-section">
-            <div class="op-section-title">工具模式</div>
+            <div class="op-section-title">1. 工具模式</div>
             <el-button-group style="margin-top: 6px; display: flex;">
               <el-button
                 style="flex: 1;" :icon="EditPen"
@@ -1101,9 +1128,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- Section 2: 默认类别 (绘制模式时, 新 bbox 的类别) -->
+          <!-- 2. 新 bbox 类别 (绘制模式时) -->
           <div class="op-section" v-if="detAnnot.mode?.value === 'draw'">
-            <div class="op-section-title">新 bbox 类别</div>
+            <div class="op-section-title">2. 新 bbox 类别</div>
             <el-select
               v-model="detAnnot.defaultCategoryId"
               placeholder="选择类别" size="small"
@@ -1118,10 +1145,10 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </el-select>
           </div>
 
-          <!-- Section 3: 选中 bbox 的属性 (编辑模式时) -->
+          <!-- 3. 选中 bbox 的属性 (编辑模式时) -->
           <div class="op-section" v-if="detAnnot.mode?.value === 'edit' && detAnnot.selectedIndex?.value !== null">
             <div class="op-section-title">
-              选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
+              3. 选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
             </div>
             <el-select
               :model-value="detAnnot.selectedIndex.value !== null ? bboxList[detAnnot.selectedIndex.value]?.category_id : null"
@@ -1144,9 +1171,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </div>
 
-          <!-- Section 4: 撤销/重做/清空 -->
+          <!-- 4. 撤销/重做/清空 -->
           <div class="op-section">
-            <div class="op-section-title">历史操作</div>
+            <div class="op-section-title">4. 历史操作</div>
             <div style="display: flex; gap: 6px; margin-top: 6px;">
               <el-button
                 size="small" :icon="RefreshLeft" style="flex: 1;"
@@ -1165,7 +1192,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             >清空未保存</el-button>
           </div>
 
-          <!-- Section 5: 跨图 bbox 复制建议 -->
+          <!-- 5. 跨图 bbox 复制建议 (条件性显示) -->
           <el-alert
             v-if="copySuggestions.length > 0"
             type="info" :closable="true" show-icon
@@ -1174,7 +1201,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           >
             <template #title>
               <div style="font-size: 12px; line-height: 1.6;">
-                <strong>智能建议</strong>: 基于同数据集 {{ copySuggestionSourceCount }} 张已标注图,
+                <strong>5. 智能建议</strong>: 基于同数据集 {{ copySuggestionSourceCount }} 张已标注图,
                 <strong>{{ copySuggestions.length }}</strong> 个类别可复制
               </div>
             </template>
@@ -1196,12 +1223,13 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             </div>
           </el-alert>
 
-          <!-- Section 6: 图片导航 -->
+          <!-- 6. 图片导航 -->
           <div class="op-section">
-            <div class="op-section-title">图片导航</div>
+            <div class="op-section-title">6. 图片导航</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 style="flex: 1;" :icon="ArrowLeft"
+                :disabled="!canGoPrev"
                 @click="loadPrev"
               >上一张 (P)</el-button>
               <el-button
@@ -1213,14 +1241,14 @@ const detAnnot = computed(() => detAnnotRef.value || {})
               >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
             </div>
             <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-              当前: <strong>{{ image.filename }}</strong> · ID #{{ image.id }}
+              {{ historyCursor + 1 }} / {{ historyIds.length || '?' }} · <strong>{{ image.filename }}</strong>
             </div>
           </div>
 
-          <!-- Section 7: 当前 bbox 列表 -->
+          <!-- 7. 当前 bbox 列表 -->
           <div class="op-section">
             <div class="op-section-title">
-              当前 bbox ({{ bboxList.length }})
+              7. 当前 bbox ({{ bboxList.length }})
             </div>
             <el-empty v-if="bboxList.length === 0" description="尚未画任何 bbox" :image-size="50" />
             <div v-else style="margin-top: 6px; max-height: 180px; overflow-y: auto;">
@@ -1241,21 +1269,23 @@ const detAnnot = computed(() => detAnnotRef.value || {})
 
           <!-- Section 8: 保存/取消 -->
           <div class="op-section">
-            <div class="op-section-title">提交</div>
+            <div class="op-section-title">8. 提交</div>
             <div style="display: flex; gap: 8px; margin-top: 6px;">
               <el-button
                 type="primary"
                 :icon="Check"
-                :disabled="!detAnnotRef?.dirty?.value || bboxList.length === 0"
+                :disabled="!detDirty || bboxList.length === 0 || annotatorSaving"
+                :loading="annotatorSaving"
+                style="flex: 1;"
                 @click="detAnnotRef?.save?.()"
               >保存 ({{ bboxList.length }})</el-button>
               <el-button
                 :icon="Close" style="flex: 1;"
-                :disabled="!detAnnotRef?.dirty?.value"
+                :disabled="!detDirty || annotatorSaving"
                 @click="cancelDetectionDraft"
               >取消</el-button>
             </div>
-            <div v-if="detAnnotRef?.dirty?.value" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
+            <div v-if="detDirty" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
               ● 有未保存的修改
             </div>
           </div>
@@ -1269,12 +1299,8 @@ const detAnnot = computed(() => detAnnotRef.value || {})
         </el-card>
 
         <!-- v2.5.0 S12.3: 分割任务 8 sections 面板 -->
-        <el-card v-else-if="image && image.task_type === 'segmentation'">
-          <template #header>
-            <span style="font-size: 14px; font-weight: 600;">🖌️ 分割操作面板</span>
-            <el-tag size="small" type="success" style="margin-left: 8px;">8 sections</el-tag>
-          </template>
-
+        <!-- v2.5.1: 与检测面板统一风格 (el-card title= + 8 sections 编号 + 本地 segDirty) -->
+        <el-card v-else-if="image && image.task_type === 'segmentation'" title="分割操作面板">
           <!-- 1. 工具模式 -->
           <div class="op-section">
             <div class="op-section-title">1. 工具模式</div>
@@ -1283,6 +1309,11 @@ const detAnnot = computed(() => detAnnotRef.value || {})
               <el-radio-button value="erase" @click="segAnnotRef?.setMode?.('erase')">橡皮 (E)</el-radio-button>
               <el-radio-button value="pan" @click="segAnnotRef?.setMode?.('pan')">查看 (V)</el-radio-button>
             </el-radio-group>
+            <div style="margin-top: 4px; font-size: 11px; color: #909399;">
+              <template v-if="segMode === 'brush'">按住鼠标画当前类别, 释放停止</template>
+              <template v-else-if="segMode === 'erase'">按住鼠标擦除像素, 释放停止</template>
+              <template v-else>按住鼠标拖动查看画布</template>
+            </div>
           </div>
 
           <!-- 2. 当前画刷类别 -->
@@ -1292,13 +1323,17 @@ const detAnnot = computed(() => detAnnotRef.value || {})
               :model-value="segAnnotRef?.brushCategoryId?.value ?? null"
               placeholder="选择类别"
               size="small"
-              style="width: 100%;"
+              style="width: 100%; margin-top: 6px;"
+              filterable
               @change="onSegCategoryChange"
             >
               <el-option
                 v-for="c in categories" :key="c.id"
                 :label="c.name" :value="c.id"
-              />
+              >
+                <span class="cat-dot" :style="{ background: catColor(c.id) }"></span>
+                {{ c.name }}
+              </el-option>
             </el-select>
           </div>
 
@@ -1308,6 +1343,7 @@ const detAnnot = computed(() => detAnnotRef.value || {})
             <el-slider
               :model-value="segAnnotRef?.brushSize?.value ?? 12"
               :min="2" :max="40" :step="1"
+              style="margin-top: 6px;"
               @input="(v: number) => segAnnotRef?.setBrushSize?.(v)"
             />
           </div>
@@ -1315,10 +1351,10 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <!-- 4. 缩放控制 -->
           <div class="op-section">
             <div class="op-section-title">4. 画布缩放: {{ Math.round((segAnnotRef?.zoom?.value ?? 1) * 100) }}%</div>
-            <el-button-group size="small">
-              <el-button @click="segAnnotRef?.zoomOut?.()">-</el-button>
-              <el-button @click="segAnnotRef?.resetZoom?.()">100%</el-button>
-              <el-button @click="segAnnotRef?.zoomIn?.()">+</el-button>
+            <el-button-group size="small" style="margin-top: 6px; display: flex;">
+              <el-button style="flex: 1;" :icon="RefreshLeft" @click="segAnnotRef?.zoomOut?.()">缩小</el-button>
+              <el-button style="flex: 1;" @click="segAnnotRef?.resetZoom?.()">100%</el-button>
+              <el-button style="flex: 1;" :icon="RefreshRight" @click="segAnnotRef?.zoomIn?.()">放大</el-button>
             </el-button-group>
             <div style="font-size: 11px; color: #909399; margin-top: 4px;">Ctrl + 滚轮 缩放</div>
           </div>
@@ -1334,22 +1370,38 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <!-- 6. 图片导航 -->
           <div class="op-section">
             <div class="op-section-title">6. 图片导航</div>
-            <el-button-group size="small">
-              <el-button @click="loadPrev" :disabled="!historyCursor">上一张 (P)</el-button>
-              <el-button @click="loadNext">下一张 (N)</el-button>
-            </el-button-group>
-            <div style="font-size: 11px; color: #909399; margin-top: 4px;">
-              {{ historyCursor + 1 }} / {{ historyIds.length || '?' }}
-              <span v-if="image">· {{ image.filename }}</span>
+            <div style="display: flex; gap: 8px; margin-top: 6px;">
+              <el-button
+                style="flex: 1;" :icon="ArrowLeft"
+                :disabled="!canGoPrev"
+                @click="loadPrev"
+              >上一张 (P)</el-button>
+              <el-button
+                style="flex: 1;"
+                :type="noMore ? 'info' : 'primary'"
+                :plain="!noMore"
+                :disabled="noMore"
+                @click="loadNext"
+              >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
+            </div>
+            <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
+              {{ historyCursor + 1 }} / {{ historyIds.length || '?' }} · <strong>{{ image.filename }}</strong>
             </div>
           </div>
 
           <!-- 7. mask 统计 -->
           <div class="op-section">
             <div class="op-section-title">7. 当前 mask 状态</div>
-            <div style="font-size: 12px; color: #606266;">
+            <div style="font-size: 12px; color: #606266; margin-top: 6px;">
               <div>画布尺寸: {{ image?.width ?? '?' }} × {{ image?.height ?? '?' }} px</div>
-              <div>已标像素: <span style="color: #67c23a; font-weight: 600;">{{ segMaskStatsLabel }}</span></div>
+              <div v-if="segAnnotRef?.maskStats?.value">
+                已标像素:
+                <span style="color: #67c23a; font-weight: 600;">
+                  {{ segAnnotRef.maskStats.value.painted }} / {{ segAnnotRef.maskStats.value.total }}
+                </span>
+                ({{ (segAnnotRef.maskStats.value.painted / segAnnotRef.maskStats.value.total * 100).toFixed(1) }}%)
+              </div>
+              <div v-else>已标像素: <span style="color: #909399;">—</span></div>
               <div>坐标 (鼠标): x={{ segAnnotRef?.mousePos?.value?.x ?? '—' }}, y={{ segAnnotRef?.mousePos?.value?.y ?? '—' }} px</div>
             </div>
           </div>
@@ -1357,20 +1409,22 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <!-- 8. 提交 -->
           <div class="op-section">
             <div class="op-section-title">8. 提交</div>
-            <el-button
-              type="primary"
-              :icon="Check"
-              :disabled="!segAnnotRef?.dirty?.value || annotatorSaving"
-              :loading="annotatorSaving"
-              style="width: 100%;"
-              @click="onSegSave"
-            >保存 mask</el-button>
-            <el-button
-              size="small"
-              style="width: 100%; margin-top: 4px;"
-              @click="onSegClear"
-            >清空 mask</el-button>
-            <div v-if="segAnnotRef?.dirty?.value" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
+            <div style="display: flex; gap: 8px; margin-top: 6px;">
+              <el-button
+                type="primary"
+                :icon="Check"
+                :disabled="!segDirty || annotatorSaving"
+                :loading="annotatorSaving"
+                style="flex: 1;"
+                @click="onSegSave"
+              >保存 mask</el-button>
+              <el-button
+                :icon="Close" style="flex: 1;"
+                :disabled="!segDirty || annotatorSaving"
+                @click="onSegClear"
+              >取消</el-button>
+            </div>
+            <div v-if="segDirty" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
               ● 有未保存的修改
             </div>
           </div>
