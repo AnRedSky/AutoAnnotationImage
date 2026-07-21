@@ -1155,42 +1155,28 @@ const detAnnot = computed(() => detAnnotRef.value || {})
         <!-- v2.5.1: 与分割面板统一 8 sections 编号风格 -->
         <!-- v2.5.3: 工具模式 + 历史操作合并为一行, 增加"目标类型" 选择 -->
         <el-card v-if="image && image.task_type === 'detection'" title="检测操作面板">
-          <!-- 1. 工具与历史 (4 按钮一行) + 目标类型 (始终显示, 不分模式) -->
+          <!-- 1. 历史操作 + 目标类型 (v2.5.4: 智能模式, 移除绘制/编辑按钮) -->
           <div class="op-section">
             <div class="op-section-title">1. 工具与历史</div>
-            <!-- 4 按钮一行: 绘制 / 编辑 / 撤销 / 重做, 紧凑布局 -->
+            <!-- v2.5.4: 智能模式 - 无需绘制/编辑切换, 仅保留撤销/重做 -->
             <div style="display: flex; gap: 4px; margin-top: 6px;">
-              <el-button
-                size="small" :icon="EditPen"
-                style="flex: 1;"
-                :type="detAnnot.mode?.value === 'draw' ? 'primary' : 'default'"
-                @click="detAnnot.setMode?.('draw')"
-              >绘制 (D)</el-button>
-              <el-button
-                size="small" :icon="Select"
-                style="flex: 1;"
-                :type="detAnnot.mode?.value === 'edit' ? 'warning' : 'default'"
-                @click="detAnnot.setMode?.('edit')"
-              >编辑 (E)</el-button>
               <el-button
                 size="small" :icon="RefreshLeft"
                 style="flex: 1;"
                 :disabled="!detAnnot.canUndo?.value"
                 @click="detAnnot.undo?.()"
-              >撤销</el-button>
+              >撤销 (Ctrl+Z)</el-button>
               <el-button
                 size="small" :icon="RefreshRight"
                 style="flex: 1;"
                 :disabled="!detAnnot.canRedo?.value"
                 @click="detAnnot.redo?.()"
-              >重做</el-button>
+              >重做 (Ctrl+Y)</el-button>
             </div>
-            <!-- v2.5.3 新增: 目标类型选择 (始终显示, 不分模式; 绘制时用作新 bbox 默认类别, 编辑时仅展示当前默认) -->
+            <!-- v2.5.3: 目标类型选择 (始终显示, 画新 bbox 时使用) -->
             <div style="margin-top: 8px;">
               <div style="font-size: 11px; color: #909399; margin-bottom: 4px;">
-                目标类型
-                <span v-if="detAnnot.mode?.value === 'draw'" style="color: #67c23a;">(绘制时使用)</span>
-                <span v-else style="color: #909399;">(切回绘制模式时使用)</span>
+                目标类型 <span style="color: #67c23a;">(画新 bbox 时使用)</span>
               </div>
               <el-select
                 v-model="detAnnot.defaultCategoryId"
@@ -1205,20 +1191,24 @@ const detAnnot = computed(() => detAnnotRef.value || {})
                 </el-option>
               </el-select>
             </div>
-            <!-- 清空未保存 (尺寸小, 整行宽度, 不挤占按钮行) -->
+            <!-- 清空未保存 (整行宽度, 不挤占按钮行) -->
             <el-button
               size="small" type="warning" plain
               style="margin-top: 8px; width: 100%;"
               @click="detAnnot.clearDraft?.()"
             >清空未保存</el-button>
-            <div style="margin-top: 4px; font-size: 11px; color: #909399;">
-              <template v-if="detAnnot.mode?.value === 'draw'">在画布上拖拽画新 bbox</template>
-              <template v-else>点击选中, 拖动 body 平移, 8 handle 缩放</template>
+            <!-- v2.5.4: 智能模式操作提示 (合并绘制/编辑) -->
+            <div style="margin-top: 8px; padding: 6px 8px; background: #f0f9ff; border-left: 3px solid #409eff; border-radius: 3px; font-size: 11px; color: #606266; line-height: 1.6;">
+              <div><strong>💡 智能标注</strong> (无需切换模式):</div>
+              <div>• 拖空白处 → 画新 bbox</div>
+              <div>• 点 bbox → 选中 (出现 8 handle)</div>
+              <div>• 拖 body → 平移, 拖 8 handle → 缩放</div>
+              <div>• <kbd>Delete</kbd> 删除选中 / 点 <kbd>×</kbd> 删除对应</div>
             </div>
           </div>
 
-          <!-- 2. 选中 bbox 的属性 (编辑模式 + 有选中时) -->
-          <div class="op-section" v-if="detAnnot.mode?.value === 'edit' && detAnnot.selectedIndex?.value !== null">
+          <!-- 2. 选中 bbox 的属性 (有选中时, v2.5.4: 不再依赖 mode) -->
+          <div class="op-section" v-if="detAnnot.selectedIndex?.value !== null">
             <div class="op-section-title">
               2. 选中 bbox #{{ (detAnnot.selectedIndex.value ?? 0) + 1 }}
             </div>

@@ -80,9 +80,9 @@
       <div class="size-overlay">
         {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}% · 显示 {{ zoomPercent }}%
       </div>
-      <!-- 模式徽章 (左上角) -->
-      <div class="mode-overlay" :class="`mode-${mode}`">
-        {{ mode === 'draw' ? '绘制模式 (D)' : '编辑模式 (E)' }}
+      <!-- v2.5.4: 智能标注模式徽章 (合并绘制/编辑) -->
+      <div class="mode-overlay mode-smart">
+        智能标注模式 · 拖空白画新 / 点 bbox 选中
       </div>
     </div>
   </div>
@@ -127,7 +127,7 @@ const emit = defineEmits<{
 }>()
 
 // ============== State ==============
-const mode = ref<'draw' | 'edit'>('draw')
+// v2.5.4: 智能模式 — 移除 mode ref, 鼠标按下智能判定操作 (draw / select / drag)
 const selectedIndex = ref<number | null>(null)
 const defaultCategoryId = ref<number | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -336,11 +336,9 @@ function handleCursor(h: ResizeHandle | null): string {
 
 function onMouseDown(e: MouseEvent) {
   const p = eventToImage(e)
-  if (mode.value === 'draw') {
-    drawing.value = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }
-    return
-  }
   const pn = pixelToNorm(p)
+  // v2.5.4: 智能模式 — 鼠标按下按优先级判定操作
+  // 1) 命中选中 bbox 的 handle -> resize drag
   if (selectedIndex.value !== null) {
     const sel = props.modelValue?.[selectedIndex.value]
     if (sel) {
@@ -354,9 +352,10 @@ function onMouseDown(e: MouseEvent) {
       }
     }
   }
+  // 2) 命中任意已有 bbox -> 选中 + 启动 move drag
   const hitIdx = findHitIndex(pn)
-  selectByIndex(hitIdx)
   if (hitIdx !== null) {
+    selectByIndex(hitIdx)
     const sel = props.modelValue?.[hitIdx]
     if (sel) {
       dragging.value = {
@@ -364,7 +363,14 @@ function onMouseDown(e: MouseEvent) {
         start: p, orig: { ...sel },
       }
     }
+    return
   }
+  // 3) 点空白处 -> 画新 bbox (无需先切到 draw 模式)
+  if (defaultCategoryId.value == null) {
+    ElMessage.warning('请先在右侧选一个类别')
+    return
+  }
+  drawing.value = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }
 }
 function onMouseMove(e: MouseEvent) {
   const p = eventToImage(e)
@@ -381,7 +387,8 @@ function onMouseMove(e: MouseEvent) {
     draw()
     return
   }
-  if (mode.value === 'edit' && selectedIndex.value !== null) {
+  // v2.5.4: hover handle 高亮, 无论有无模式都生效 (智能模式)
+  if (selectedIndex.value !== null) {
     const sel = props.modelValue?.[selectedIndex.value]
     const h = sel ? hitTestHandle(p, sel) : null
     if (h !== hoverHandle.value) {
@@ -389,7 +396,8 @@ function onMouseMove(e: MouseEvent) {
       if (canvasRef.value) canvasRef.value.style.cursor = handleCursor(h)
     }
   } else {
-    if (canvasRef.value) canvasRef.value.style.cursor = mode.value === 'draw' ? 'crosshair' : 'default'
+    // 无选中时: crosshair 提示可画新 bbox
+    if (canvasRef.value) canvasRef.value.style.cursor = 'crosshair'
   }
 }
 function onMouseUp(_e: MouseEvent) {
@@ -418,11 +426,8 @@ function onMouseUp(_e: MouseEvent) {
       },
     ]
     emit('update:modelValue', next)
-    // v2.3.2: 画完新 bbox 立即选中, 用户可立即改类别
+    // v2.5.4: 智能模式 - 画完新 bbox 立即选中, 8 handle 立即可见, 无需切模式
     selectByIndex(next.length - 1)
-    // v2.5.3: 画完新 bbox 自动切到编辑模式, 用户无需按 E 即可调整大小/位置
-    // 符合 Figma / 主流标注工具习惯. 如需继续画下一个, 按 D 切回绘制即可.
-    setMode('edit')
     draw()
     return
   }
@@ -525,17 +530,11 @@ function clearDraft() {
   }).catch(() => {})
 }
 
-function setMode(m: 'draw' | 'edit') {
-  mode.value = m
-  if (m === 'draw') {
-    selectedIndex.value = null
-    if (canvasRef.value) canvasRef.value.style.cursor = 'crosshair'
-  } else {
-    if (canvasRef.value) canvasRef.value.style.cursor = 'default'
-  }
-}
+// v2.5.4: 合并绘制/编辑为智能模式, 移除 setMode
+// 鼠标按下智能判定: 命中 handle -> resize; 命中 bbox -> 选中+move; 空白处 -> 画新 bbox
+// 不再需要手动切换模式 (D/E 快捷键已废弃)
 
-// 键盘快捷键 (保留画布强相关: Delete / Ctrl+Z / d/e)
+// 键盘快捷键 (保留画布强相关: Delete / Ctrl+Z / Y)
 function onKey(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) {
@@ -550,9 +549,8 @@ function onKey(e: KeyboardEvent) {
     return
   }
   const k = e.key.toLowerCase()
-  if (k === 'd') setMode('draw')
-  else if (k === 'e') setMode('edit')
-  else if (k === 'n') emit('next')
+  // v2.5.4: 移除 d/e 切模式快捷键 (智能模式, 无需切)
+  if (k === 'n') emit('next')
   else if (k === 'p') emit('prev')
 }
 onMounted(() => window.addEventListener('keydown', onKey))
@@ -605,7 +603,7 @@ function draw() {
     ctx.textAlign = 'left'
     ctx.fillText(label, x + 4, y - 4)
   })
-  if (mode.value === 'edit' && selectedIndex.value !== null) {
+  if (selectedIndex.value !== null) {  // v2.5.4: 智能模式 — 选中即显示 handle
     const sel = list[selectedIndex.value]
     if (sel) {
       const handles = getHandles(sel)
@@ -648,17 +646,18 @@ onBeforeUnmount(() => {
 })
 
 // ============== v2.3.1 S10: 暴露给父组件 (右侧操作面板) ==============
+// v2.5.4: 智能模式 — 移除 setMode/mode 暴露, 新增 removeAt/removeBBoxAt
 defineExpose({
-  setMode,
   undo,
   redo,
   clearDraft,
   removeSelected,
   changeSelectedCategory,
   selectByIndex,
+  removeAt,                // 内部函数直接暴露
+  removeBBoxAt: removeAt,  // v2.5.4: 别名, 修复 Annotate.vue 1309 行 el-tag 关闭按钮静默失效
   save: onSave,
   resetInitial,  // v2.3.2: 父组件保存后重置 dirty
-  mode,
   canUndo,
   canRedo,
   selectedIndex,
