@@ -39,6 +39,7 @@ uploads/
 /backend/models/yolo_data/
 
 # 兜底: 任何位置的模型文件
+*.pt
 *.pth
 *.onnx
 *.safetensors
