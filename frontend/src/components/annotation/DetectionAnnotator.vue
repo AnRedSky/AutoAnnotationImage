@@ -420,6 +420,9 @@ function onMouseUp(_e: MouseEvent) {
     emit('update:modelValue', next)
     // v2.3.2: 画完新 bbox 立即选中, 用户可立即改类别
     selectByIndex(next.length - 1)
+    // v2.5.3: 画完新 bbox 自动切到编辑模式, 用户无需按 E 即可调整大小/位置
+    // 符合 Figma / 主流标注工具习惯. 如需继续画下一个, 按 D 切回绘制即可.
+    setMode('edit')
     draw()
     return
   }
