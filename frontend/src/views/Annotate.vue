@@ -1279,9 +1279,9 @@ const detAnnot = computed(() => detAnnotRef.value || {})
           <div class="op-section">
             <div class="op-section-title">1. 工具模式</div>
             <el-radio-group v-model="segMode" size="small" @change="onSegModeChange">
-              <el-radio-button label="brush" @click="segAnnotRef?.setMode?.('brush')">画刷 (B)</el-radio-button>
-              <el-radio-button label="erase" @click="segAnnotRef?.setMode?.('erase')">橡皮 (E)</el-radio-button>
-              <el-radio-button label="pan" @click="segAnnotRef?.setMode?.('pan')">查看 (V)</el-radio-button>
+              <el-radio-button value="brush" @click="segAnnotRef?.setMode?.('brush')">画刷 (B)</el-radio-button>
+              <el-radio-button value="erase" @click="segAnnotRef?.setMode?.('erase')">橡皮 (E)</el-radio-button>
+              <el-radio-button value="pan" @click="segAnnotRef?.setMode?.('pan')">查看 (V)</el-radio-button>
             </el-radio-group>
           </div>
 
