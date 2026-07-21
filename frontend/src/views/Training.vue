@@ -25,6 +25,10 @@ interface EpochData {
   map_50_95?: number
   precision?: number
   recall?: number
+  // v2.5.0 S12.4: 分割训练专属字段 (segmentation 任务专属)
+  miou?: number
+  pixel_acc?: number
+  dice?: number
 }
 
 // ============== 基础选项 ==============
@@ -1000,10 +1004,12 @@ const refreshDetailHistory = async (taskId: string) => {
 const initDetailChart = () => {
   if (!detailChartEl.value) return
   detailChart = echarts.init(detailChartEl.value)
-  // v2.2.0 S9.4: 根据 task_type 切换图表系列
+  // v2.2.0 S9.4 + v2.5.0 S12.4: 根据 task_type 切换图表系列
   // classification: loss/accuracy 双轴
   // detection:     box_loss/cls_loss 左轴 + mAP50/precision/recall 右轴
+  // segmentation:  train_loss/val_loss 左轴 + mIoU/pixel_acc/dice 右轴
   const isDetection = detailJob.value?.task_type === 'detection'
+  const isSegmentation = detailJob.value?.task_type === 'segmentation'
   if (isDetection) {
     detailChart.setOption({
       title: {
@@ -1029,6 +1035,33 @@ const initDetailChart = () => {
         { name: 'mAP50-95', type: 'line', yAxisIndex: 1, data: [], smooth: true, lineStyle: { color: '#722ed1', width: 2 }, itemStyle: { color: '#722ed1' }, symbolSize: 6 },
         { name: 'precision', type: 'line', yAxisIndex: 1, data: [], smooth: true, lineStyle: { color: '#13c2c2', width: 2 }, itemStyle: { color: '#13c2c2' }, symbolSize: 6 },
         { name: 'recall', type: 'line', yAxisIndex: 1, data: [], smooth: true, lineStyle: { color: '#fa541c', width: 2 }, itemStyle: { color: '#fa541c' }, symbolSize: 6 },
+      ],
+    })
+  } else if (isSegmentation) {
+    // v2.5.0 S12.4: 分割任务曲线 (loss + mIoU/pixel_acc/dice)
+    detailChart.setOption({
+      title: {
+        text: '分割训练曲线 (Loss / mIoU / Pixel Acc / Dice)',
+        left: 'center',
+        textStyle: { fontSize: 14, fontWeight: 600, color: '#1f2937' },
+      },
+      tooltip: { trigger: 'axis' },
+      legend: {
+        data: ['train_loss', 'val_loss', 'mIoU', 'pixel_acc', 'dice'],
+        top: 30, type: 'scroll', textStyle: { color: '#6b7280' },
+      },
+      grid: { top: 80, left: 55, right: 55, bottom: 40, containLabel: true },
+      xAxis: { type: 'category', name: 'Epoch', data: [], axisLine: { lineStyle: { color: '#d6d8de' } } },
+      yAxis: [
+        { type: 'value', name: 'Loss', position: 'left', axisLine: { lineStyle: { color: '#4f7cff' } }, splitLine: { lineStyle: { color: '#eef0f4' } } },
+        { type: 'value', name: 'mIoU / Acc / Dice', position: 'right', min: 0, max: 1, axisLine: { lineStyle: { color: '#00c48c' } }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: 'train_loss', type: 'line', yAxisIndex: 0, data: [], smooth: true, lineStyle: { color: '#4f7cff', width: 2 }, itemStyle: { color: '#4f7cff' }, symbolSize: 6 },
+        { name: 'val_loss', type: 'line', yAxisIndex: 0, data: [], smooth: true, lineStyle: { color: '#ff8a4c', width: 2 }, itemStyle: { color: '#ff8a4c' }, symbolSize: 6 },
+        { name: 'mIoU', type: 'line', yAxisIndex: 1, data: [], smooth: true, lineStyle: { color: '#00c48c', width: 2 }, itemStyle: { color: '#00c48c' }, symbolSize: 6 },
+        { name: 'pixel_acc', type: 'line', yAxisIndex: 1, data: [], smooth: true, lineStyle: { color: '#722ed1', width: 2 }, itemStyle: { color: '#722ed1' }, symbolSize: 6 },
+        { name: 'dice', type: 'line', yAxisIndex: 1, data: [], smooth: true, lineStyle: { color: '#13c2c2', width: 2 }, itemStyle: { color: '#13c2c2' }, symbolSize: 6 },
       ],
     })
   } else {
@@ -1092,6 +1125,7 @@ const initDetailChart = () => {
 watch(detailHistory, (h) => {
   if (!detailChart || h.length === 0) return
   const isDetection = detailJob.value?.task_type === 'detection'
+  const isSegmentation = detailJob.value?.task_type === 'segmentation'
   if (isDetection) {
     detailChart.setOption({
       xAxis: { data: h.map((x) => x.epoch) },
@@ -1102,6 +1136,18 @@ watch(detailHistory, (h) => {
         { data: h.map((x) => +(x.map_50_95 ?? 0).toFixed(4)) },
         { data: h.map((x) => +(x.precision ?? 0).toFixed(4)) },
         { data: h.map((x) => +(x.recall ?? 0).toFixed(4)) },
+      ],
+    })
+  } else if (isSegmentation) {
+    // v2.5.0 S12.4: 分割曲线数据更新 (后端 train.py 推 train_loss/val_loss/mIoU/pixel_acc/dice)
+    detailChart.setOption({
+      xAxis: { data: h.map((x) => x.epoch) },
+      series: [
+        { data: h.map((x) => +((x.train_loss ?? 0)).toFixed(4)) },
+        { data: h.map((x) => +((x.val_loss ?? 0)).toFixed(4)) },
+        { data: h.map((x) => +((x.miou ?? 0)).toFixed(4)) },
+        { data: h.map((x) => +((x.pixel_acc ?? 0)).toFixed(4)) },
+        { data: h.map((x) => +((x.dice ?? 0)).toFixed(4)) },
       ],
     })
   } else {
