@@ -1,11 +1,11 @@
-# 后端审查与迭代文档 (Backend Audit & Iteration Docs)
+# 后端审查文档 (Backend Audit Docs)
 
 > **编制日期**: 2026-07-22
 > **审查范围**: `backend/app/` 全量代码 + `backend/tests/` 测试覆盖
 > **审查基准**: v2.5.9 ~ v2.5.14 (commit 29ccfec)
 > **审查人员**: 后端开发 + 测试 + 架构三方联合
 
-本目录包含后端代码审查 + 迭代计划 + 编排工具的完整文档, 涵盖**审查、业务、优化、迭代、工具**五大主题。
+本目录包含后端代码审查输出的完整文档, 涵盖**审查总览、业务功能、优化建议、性能优化**四大主题。
 
 ---
 
@@ -17,43 +17,6 @@
 | 02 | [业务功能完整清单](./02-业务功能完整清单.md) | 13 个业务域 + 94 个端点 + 业务流程 | ~12K |
 | 03 | [系统优化建议](./03-系统优化建议.md) | 6 维度 (性能/安全/可维护/可观测/部署/测试) | ~10K |
 | 04 | [性能优化与监控建议](./04-性能优化与监控建议.md) | 性能瓶颈 + 优化方案 + Prometheus + 压测 | ~13K |
-| 05 | [分阶段迭代计划](./05-分阶段迭代计划.md) | 8 阶段 + 自动化流转 + 进度跟踪 + 报告模板 | ~14K |
-| 06 | [阶段编排工具使用指南](./06-阶段编排工具使用指南.md) | 6 个脚本 + CLI + AI 协作 | ~9K |
-
-## 🛠️ 编排工具 (`backend/scripts/`)
-
-| 脚本 | 用途 |
-|---|---|
-| `stage_runner.py` | 主编排器 (执行阶段/标记完成/推进) |
-| `progress_tracker.py` | 单独更新进度看板 |
-| `task_done.py` | 单独标记/取消任务完成 |
-| `ai_task_helper.py` | 输出 AI 上下文 + 记录 AI 协助 |
-| `verify_exit.py` | 单独验证 exit_checks |
-| `rollback.py` | 回滚到上一阶段 |
-
-## 📊 进度跟踪
-
-- [PROGRESS.md](./PROGRESS.md) - 实时进度看板 (自动更新)
-- [stage_config.yaml](./stage_config.yaml) - 阶段配置 (编排器读取)
-- [templates/stage_report.md](./templates/stage_report.md) - 阶段报告模板
-
-## 🚀 快速开始
-
-```bash
-# 1. 查看进度
-python backend/scripts/stage_runner.py --status
-
-# 2. 执行当前阶段
-python backend/scripts/stage_runner.py
-
-# 3. 标记任务完成
-python backend/scripts/stage_runner.py --mark-complete S1-T1
-
-# 4. 查看任务上下文 (供 AI 协助)
-python backend/scripts/ai_task_helper.py context S1-T1
-```
-
-详细使用见 [06-阶段编排工具使用指南](./06-阶段编排工具使用指南.md)
 
 ---
 
