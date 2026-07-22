@@ -193,14 +193,21 @@
             <el-option v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m" />
           </el-select>
         </el-form-item>
-        <!-- 启动 AI 预标注 (与上方控件同一行) + 当前激活模型徽章 -->
+        <!-- 启动 AI 预标注 (与上方控件同一行) + 当前激活模型徽章
+             v2.5.21: 分类任务隐藏"当前激活"tag
+             · 分类任务已有"是否使用项目训练模型"开关 + fine-tune/基础模型下拉,
+               选哪个一目了然, 再显示"当前激活"语义重复
+             · 检测/分割任务没有这种模型选择下拉, 需要"当前激活"提示用户后端用哪个模型跑 -->
         <el-form-item>
           <el-button
             type="primary" :icon="MagicStick"
             :loading="autoLabeling"
             @click="emit('ai-start')"
           >启动 AI 预标注</el-button>
-          <el-tag v-if="activeModel" type="success" effect="plain" size="small" style="margin-left: 8px;">
+          <el-tag
+            v-if="activeModel && currentTaskTypeRaw !== 'classification'"
+            type="success" effect="plain" size="small" style="margin-left: 8px;"
+          >
             当前激活: {{ activeModel.name }}
           </el-tag>
         </el-form-item>
