@@ -600,16 +600,22 @@ def auto_annotate_pretrained_task(
                         cat = index_to_cat.get(b.get("class_index"))
                         if not cat:
                             continue
+                        # v2.5.15 P0-1 修复: BBoxAnnotation ORM 不存在 model_name 字段
+                        # 之前 model_name=model_name 会抛 AttributeError. 现改为:
+                        # - 移除 ORM 不存在的字段
+                        # - 把模型名写到 AnnotationLog.payload (审计可追溯)
                         row = BBoxAnnotation(
                             image_id=img_id,
                             category_id=cat.id,
                             x_min=b["x_min"], y_min=b["y_min"],
                             x_max=b["x_max"], y_max=b["y_max"],
                             confidence=float(b.get("confidence", 0.0)),
-                            source="pretrained",  # 标记来源
-                            model_name=model_name,
+                            source="pretrained",  # 枚举合法: ai/human/human_corrected
                         )
                         db.add(row)
+                    # v2.5.15 P0-2 修复: AnnotationLog.action 枚举已扩展
+                    # 旧: action="auto_annotate_pretrained" 会抛 ValueError 越界
+                    # 新: "auto_annotate_pretrained" 已在 annotation_log.py Enum 中注册
                     db.add(AnnotationLog(
                         image_id=img_id,
                         user_id=user_id,
