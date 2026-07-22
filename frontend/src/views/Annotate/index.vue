@@ -35,6 +35,8 @@ import DetectionPanel from './components/DetectionPanel.vue'
 import SegmentationPanel from './components/SegmentationPanel.vue'
 import AnnotationToolbar from './components/AnnotationToolbar.vue'
 import AnnotationCanvas from './components/AnnotationCanvas.vue'
+// v2.5.9 新增: 标注工作台左侧"操作指导"侧栏
+import AnnotationGuideSidebar from './components/AnnotationGuideSidebar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -200,6 +202,12 @@ const sortedCategories = computed(() => {
 const currentTaskTypeRaw = computed(() => {
   const ds = datasets.value.find((d: any) => d.id === datasetId.value)
   return ds?.task_type || 'classification'
+})
+// v2.5.9 新增: 当前图像的实际 task_type (用于左侧指导栏), 优先用 image.task_type
+// - image 存在时取 image.task_type (用户从 URL 跳转过来时可能与 dataset 任务不同)
+// - image 不存在时取 dataset 的 task_type (默认状态)
+const currentImageTaskType = computed<'classification' | 'detection' | 'segmentation'>(() => {
+  return (image.value?.task_type as any) || currentTaskTypeRaw.value
 })
 // 全部 AI 候选标签都不在项目 category 里 → 等同于基础模型 (ImageNet) 输出
 const allUnknown = computed(() => {
@@ -494,9 +502,14 @@ const autoLabelAll = () => {
       @auto-ai-start="autoLabelAll"
     />
 
-    <!-- 主体: 左侧画布 + 右侧任务面板 -->
+    <!-- 主体: 左侧操作指导 + 中间画布 + 右侧任务面板 (v2.5.9: 由 2 栏扩为 3 栏) -->
     <el-row :gutter="16">
-      <el-col :span="14">
+      <!-- 左侧: 操作指导栏 (新增, v2.5.9) -->
+      <el-col :span="4">
+        <AnnotationGuideSidebar :task-type="currentImageTaskType" />
+      </el-col>
+      <!-- 中间: 画布 (由 span=14 缩为 span=12) -->
+      <el-col :span="12">
         <AnnotationCanvas :image="image" :loading="loading">
           <template v-if="image?.task_type === 'detection'">
             <DetectionAnnotator
@@ -541,7 +554,8 @@ const autoLabelAll = () => {
           </template>
         </AnnotationCanvas>
       </el-col>
-      <el-col :span="10">
+      <!-- 右侧: 任务面板 (由 span=10 缩为 span=8) -->
+      <el-col :span="8">
         <ClassificationPanel
           v-if="!image || image.task_type === 'classification'"
           :image="image"
