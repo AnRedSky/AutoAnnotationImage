@@ -6,7 +6,7 @@
  * 职责:
  * - 分类任务的 AI 预标注 (走 fine-tune / ImageNet 预训练)
  * - 检测任务的 AI 预标注 (走 fine-tune / 预训练 yolov8n/s/m/l/x)
- * - 分割任务不接入 (提示去训练页)
+ * - 分割任务的 AI 预标注 (仅走 fine-tune; 分割暂无预训练模型自动标注接口)
  * - 严格模式: 默认走 fine-tune, 走基础模型前弹窗警告
  *
  * 依赖:
@@ -17,7 +17,7 @@
  */
 import { ref, type Ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { autoAnnotateApi, detectionApi, modelApi } from '@/api'
+import { autoAnnotateApi, detectionApi, modelApi, segmentationApi } from '@/api'
 
 export function useAutoAnnotate(options: {
   datasetId: Ref<number | null>
@@ -43,6 +43,8 @@ export function useAutoAnnotate(options: {
 
   /**
    * 启动按钮 dispatcher: 按当前 dataset task_type 分派
+   * - 共享 useFinetune state, 由父组件按 dataset 自动隔离
+   * - 分割任务: 关闭 useFinetune 时弹 warning 阻止 (后端无预训练分割接口)
    */
   const onStartAutoLabelClick = async (taskType: string) => {
     if (!datasetId.value) {
@@ -54,7 +56,7 @@ export function useAutoAnnotate(options: {
     } else if (taskType === 'detection') {
       await runDetectionAutoAnnotate()
     } else if (taskType === 'segmentation') {
-      ElMessage.info('分割任务的 AI 预标注请到「训练任务」页启动')
+      await runSegmentationAutoAnnotate()
     } else {
       ElMessage.warning('未知任务类型: ' + taskType)
     }
@@ -198,10 +200,57 @@ export function useAutoAnnotate(options: {
     }
   }
 
+  /**
+   * 分割任务 AI 预标注 (仅走 fine-tune; 分割暂无预训练模型自动标注接口)
+   * - 与分类/检测对齐: useFinetune 关闭时弹 warning 阻止, 引导用户切回项目模型
+   * - 走后端 POST /api/segmentation/auto-annotate?model_version_id=N&dataset_id=D
+   *   (后端 worker: auto_annotate_segmentation_task → predict_to_mask_image → 写 SegmentationMask source=ai)
+   */
+  const runSegmentationAutoAnnotate = async () => {
+    if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
+    if (!useFinetune.value) {
+      ElMessage.warning(
+        '分割任务暂未提供预训练模型自动标注接口. 请保持「项目模型」开关开启, 训练 fine-tune 模型后再做预标注.'
+      )
+      return
+    }
+    if (finetuneModels.value.length === 0) {
+      ElMessage.warning(
+        '当前项目还没有训练好的 fine-tune 模型! 请先到「训练任务」页训练一个分割模型并激活, 再回这里做预标注.'
+      )
+      return
+    }
+    if (!selectedModelId.value) {
+      ElMessage.warning('请先在「项目模型」下拉中选择一个 fine-tune 模型.')
+      return
+    }
+    autoLabeling.value = true
+    try {
+      const resp: any = await segmentationApi.startAutoAnnotate({
+        dataset_id: datasetId.value,
+        model_version_id: selectedModelId.value,
+      })
+      // 后端返回 { task_id, state, message }
+      const taskMsg = resp?.task_id
+        ? `任务 ID: ${resp.task_id}`
+        : (resp?.message || '已入队')
+      ElMessage.success(
+        `[分割 Fine-tune] 任务已入队, 等待 Celery worker 启动... ${taskMsg}`
+      )
+      // 任务异步执行, 前端不阻塞等待完成; 仅刷新 stats 让用户看到 mask 数量变化
+      await refreshStats()
+    } catch (e: any) {
+      ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
+    } finally {
+      autoLabeling.value = false
+    }
+  }
+
   return {
     autoLabeling,
     onStartAutoLabelClick,
     runAutoAnnotate,
     runDetectionAutoAnnotate,
+    runSegmentationAutoAnnotate,
   }
 }

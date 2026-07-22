@@ -466,6 +466,8 @@ export const detectionApi = {
     device?: string
   }) => http.post('/detection/train', data),
   // ---- 自动标注 ----
+  // 注意: 后端 /detection/auto-annotate 端点用 Query(...) 接收参数,
+  //       必须走 query string, 不能放 body (否则 422)
   startAutoAnnotate: (data: {
     dataset_id: number
     model_version_id: number
@@ -474,7 +476,7 @@ export const detectionApi = {
     imgsz?: number
     device?: string
     overwrite_existing?: boolean
-  }) => http.post('/detection/auto-annotate', data),
+  }) => http.post('/detection/auto-annotate', null, { params: data }),
   // v2.3.2: 用预训练 yolov8n/s/m/l/x (无需 ModelVersion)
   startAutoAnnotatePretrained: (data: {
     dataset_id: number
@@ -484,7 +486,7 @@ export const detectionApi = {
     imgsz?: number
     device?: string
     overwrite_existing?: boolean
-  }) => http.post('/detection/auto-annotate-pretrained', data),
+  }) => http.post('/detection/auto-annotate-pretrained', null, { params: data }),
   // ---- 进度 (旧: 轮询; 新: SSE) ----
   progress: (taskId: string) => http.get(`/detection/progress/${taskId}`),
   history: (taskId: string) => http.get(`/detection/history/${taskId}`),
@@ -604,12 +606,14 @@ export const segmentationApi = {
     val_ratio?: number
   }) => http.post('/segmentation/train', data),
   // ---- 自动标注 ----
+  // 注意: 后端 /segmentation/auto-annotate 端点用 Query(...) 接收参数,
+  //       必须走 query string, 不能放 body (否则 422)
   startAutoAnnotate: (data: {
     dataset_id: number
     model_version_id: number
     device?: string
     overwrite_existing?: boolean
-  }) => http.post('/segmentation/auto-annotate', data),
+  }) => http.post('/segmentation/auto-annotate', null, { params: data }),
   // ---- 进度 ----
   progress: (taskId: string) => http.get(`/segmentation/progress/${taskId}`),
   history: (taskId: string) => http.get(`/segmentation/history/${taskId}`),
