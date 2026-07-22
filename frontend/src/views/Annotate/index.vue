@@ -88,7 +88,15 @@ const {
   onPopoverVisibleChange,
   onDetTargetCategoryChange,
   removeBboxByIndex,
-} = useDetectionAnnotate({ image, detAnnotRef, annotatorSaving })
+} = useDetectionAnnotate({
+  image,
+  detAnnotRef,
+  annotatorSaving,
+  // v2.5.15: 检测保存成功后立刻重拉 stats
+  // - 后端 save_bbox 会把 image.status 提升到 human_confirmed
+  // - 前端需主动刷新才能让"待标注"数字减少
+  onSaved: refreshStats,
+})
 
 // ============== 分割任务 composable ==============
 const {
@@ -104,7 +112,15 @@ const {
   onSegSave,
   onSegClear,
   onSegDirtyChange,
-} = useSegmentationAnnotate({ image, segAnnotRef, annotatorSaving })
+} = useSegmentationAnnotate({
+  image,
+  segAnnotRef,
+  annotatorSaving,
+  // v2.5.15: 分割保存成功后立刻重拉 stats
+  // - 后端 upload_mask 会把 image.status 提升到 human_confirmed
+  // - 前端需主动刷新才能让"待标注"数字减少
+  onSaved: refreshStats,
+})
 
 // ============== 浏览历史栈 (按访问顺序记录看过的 image id) ==============
 const historyIds = ref<number[]>([])
@@ -503,17 +519,29 @@ const autoLabelAll = () => {
     />
 
     <!-- 主体: 左侧操作指导 + 中间画布 + 右侧任务面板 (v2.5.9: 由 2 栏扩为 3 栏)
-         v2.5.8 调整: 固定画布尺寸 600×480 需要至少 span=14 才能在常见屏幕 (>=1366px) 容纳
-         · span=3  (12.5%) 左侧操作指导 (AnnotationGuideSidebar, 静态文案, 紧凑布局)
-         · span=14 (58.3%) 中间画布 (固定 600×480, 提供 letterbox 安全区)
-         · span=7  (29.2%) 右侧任务面板 (检测 5 sections / 分割 / 分类, 内容较密) -->
-    <el-row :gutter="16">
-      <!-- 左侧: 操作指导栏 (新增, v2.5.9, span 由 4 缩为 3 让出空间给画布) -->
-      <el-col :span="3">
+         v2.5.11 关键调整: 脱离 Element Plus 24 栏网格, 改用纯 flex 布局
+         原因: 之前的左 266px(强制) + 中 span=14(58.3%) + 右 span=7(29.2%) 总和
+         远超 100% 宽度 (266 + 0.583W + 0.292W = 266 + 0.875W > W, 需要 W >= 2384px 才不溢出)
+         导致 el-row flex-wrap: wrap 把右栏挤到下一行, 视觉上"右栏不见"
+         新方案: 左 266px 固定 / 右 340px 固定 / 中 flex:1 1 0 填满, flex-wrap: nowrap
+         · 左侧固定 266px (含 Element Plus gutter 16px 的 8px×2 内边距, 可视卡片正好 250px)
+         · 中间 flex: 1 1 0 (随行宽自适应, 画布 useCanvasSize 已支持响应式缩放)
+         · 右侧固定 340px (含 16px gutter, 可视面板约 324px, 容纳检测 5 sections 不挤压)
+
+         v2.5.12 关键调整: 高度从 min-height 改为 固定 height (calc(100vh - 360px))
+         原因: 原 min-height: 600px + 画布 min-height: 480px + 画布内部 fixed 600×480 wrap
+         会让 el-row 高度随画布实际渲染尺寸增长, 进而通过 align-items: stretch 把左/右栏一起撑高
+         新方案: 用 calc(100vh - 360px) 锁定行高 (扣减 toolbar+alert+padding+面包屑 约 360px)
+         · 高度由视口决定, 与图片实际像素无关, 三列永远等高
+         · 列内部已用 height:100% + overflow:auto, 内容过长自动滚动 (左/右栏 body, 画布 wrap) -->
+    <el-row :gutter="16" class="annotate-main-row" style="flex-wrap: nowrap;">
+      <!-- 左侧: 操作指导栏 (固定可视宽度 250px)
+           box-sizing: border-box + gutter 内边距 8px×2, 故 el-col 总宽 266px 即可 -->
+      <el-col style="flex: 0 0 266px; max-width: 266px;">
         <AnnotationGuideSidebar :task-type="currentImageTaskType" />
       </el-col>
-      <!-- 中间: 画布 (由 span=12 扩为 span=14, 容纳固定 600px 画布) -->
-      <el-col :span="14">
+      <!-- 中间: 画布 (flex: 1 1 0 填满剩余宽度, min-width: 0 允许缩到 0 而非按内容撑开) -->
+      <el-col style="flex: 1 1 0; min-width: 0;">
         <AnnotationCanvas :image="image" :loading="loading">
           <template v-if="image?.task_type === 'detection'">
             <DetectionAnnotator
@@ -558,8 +586,8 @@ const autoLabelAll = () => {
           </template>
         </AnnotationCanvas>
       </el-col>
-      <!-- 右侧: 任务面板 (由 span=8 缩为 span=7 让出空间给画布) -->
-      <el-col :span="7">
+      <!-- 右侧: 任务面板 (固定可视宽度 324px = 340 - 16 gutter) -->
+      <el-col style="flex: 0 0 340px; max-width: 340px;">
         <ClassificationPanel
           v-if="!image || image.task_type === 'classification'"
           :image="image"
@@ -574,6 +602,9 @@ const autoLabelAll = () => {
           @next="loadNext"
           @view-dataset="viewDataset"
         />
+        <!-- v2.5.14: 移除 @undo, @redo, @clear-draft, @cancel 监听
+             撤销、重做、清空 改为 DetectionPanel 直接调 detAnnotRef 子组件方法
+             取消功能被「撤销本次修改」按钮替代 -->
         <DetectionPanel
           v-else-if="image.task_type === 'detection'"
           :det-annot-ref="detAnnotRef"
@@ -589,11 +620,7 @@ const autoLabelAll = () => {
           :history-ids="historyIds"
           :image="image"
           :det-open-popover-idx="detOpenPopoverIdx"
-          @undo="detAnnotRef?.undo?.()"
-          @redo="detAnnotRef?.redo?.()"
-          @clear-draft="detAnnotRef?.clearDraft?.()"
           @save="detAnnotRef?.save?.()"
-          @cancel="cancelDetectionDraft"
           @apply-copy-suggestions="applyCopySuggestions"
           @ignore-copy-suggestions="ignoreCopySuggestions"
           @prev="loadPrev"
@@ -637,5 +664,22 @@ const autoLabelAll = () => {
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+/* v2.5.12: 三列主体行 — 固定高度 (calc(100vh - 360px))
+   · 360px = 顶部 alert(80) + toolbar(120) + breadcrumb(40) + page padding(80) + 安全余量(40)
+   · 不用 min-height, 避免画布实际渲染尺寸把整行撑高, 进而把左/右栏一起拉伸
+   · 三列 el-col 通过 height:100% 继承此高度, 内部用 overflow:auto 各自滚动 */
+.annotate-main-row {
+  height: calc(100vh - 360px);
+  min-height: 500px;     /* 兜底: 极窄窗口下不至于过小, 但仍允许 row 在 500~视口-360 之间 */
+  max-height: 900px;     /* 兜底: 超大窗口下不至于过高, 避免右栏空白过多 */
+}
+/* 让 el-col 子项也继承 100% 高度 (el-row 默认 align-items: stretch 已能撑开,
+   但显式写 height:100% 防止某些 flex 容器算高度时漏算) */
+.annotate-main-row :deep(.el-col) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 </style>

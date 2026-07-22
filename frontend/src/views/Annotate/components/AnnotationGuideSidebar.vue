@@ -8,11 +8,12 @@
 
   设计原则:
   - 静态文案: 不依赖任何业务 state, 仅按 taskType prop 切换显示
-  - 单文件 < 250 行: 文案硬编码在 script, template 仅做渲染
-  - 与画布 (el-col span=13) + 右侧面板 (el-col span=7) 配套使用
+  - 单文件 < 500 行: 文案硬编码在 script, template 仅做渲染
+  - 与画布 (el-col span=14) + 右侧面板 (el-col span=7) 配套使用
+  - 父级 el-col 固定可视宽度 250px (266px - 16px gutter)
 -->
 <template>
-  <el-card class="guide-sidebar" shadow="never" body-style="padding: 12px;">
+  <el-card ref="cardRef" class="guide-sidebar" shadow="never" body-style="padding: 12px;">
     <!-- 顶部标题 -->
     <div class="guide-header">
       <el-icon :size="16" color="#409eff"><InfoFilled /></el-icon>
@@ -84,7 +85,7 @@
  * - 静态数据, 与后端 / 前端 state 解耦
  * - 任何一条文案修改只动本文件, 不影响业务逻辑
  */
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { InfoFilled, Aim, Brush, View, List, Histogram, Key } from '@element-plus/icons-vue'
 import { getTaskTypeMeta, type TaskTypeMeta } from '@/utils/taskType'
 
@@ -258,12 +259,60 @@ const currentTaskType = computed(() => props.taskType)
 const otherGuides = computed<Guide[]>(() =>
   allGuides.filter((g) => g.taskType !== props.taskType)
 )
+
+// ============== 滚动行为 ==============
+// 任务类型切换时, 自动将卡片内容滚到顶部, 避免用户停留在上一任务的中间位置
+const cardRef = ref<InstanceType<typeof import('element-plus')['ElCard']> | null>(null)
+
+const scrollToTop = () => {
+  const body = (cardRef.value?.$el as HTMLElement | undefined)?.querySelector?.('.el-card__body') as HTMLElement | null
+  if (body) body.scrollTop = 0
+}
+
+watch(() => props.taskType, () => {
+  // 等待 DOM 切换 + 高度重算完成后再滚, 防止滚到旧高度
+  nextTick(scrollToTop)
+})
 </script>
 
 <style scoped>
+/* 卡片整体: 跟随父行高, 与画布/右栏三列同高
+   关键: 不再使用 viewport max-height, 否则会与 el-row 的 stretch 行为冲突 */
 .guide-sidebar {
   font-size: 12px;
   line-height: 1.5;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* 子项 overflow 必备, 否则 flex 子项会撑出容器 */
+  min-height: 0;
+}
+/* body 内部滚动 + 自定义细滚动条 */
+.guide-sidebar :deep(.el-card__body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  /* Firefox 细滚动条 */
+  scrollbar-width: thin;
+  scrollbar-color: #dcdfe6 transparent;
+}
+/* WebKit / Blink (Chrome/Edge/Safari) 细滚动条 */
+.guide-sidebar :deep(.el-card__body)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.guide-sidebar :deep(.el-card__body)::-webkit-scrollbar-track {
+  background: transparent;
+}
+.guide-sidebar :deep(.el-card__body)::-webkit-scrollbar-thumb {
+  background: #dcdfe6;
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+.guide-sidebar :deep(.el-card__body)::-webkit-scrollbar-thumb:hover {
+  background: #909399;
 }
 .guide-header {
   display: flex;
@@ -272,6 +321,8 @@ const otherGuides = computed<Guide[]>(() =>
   padding-bottom: 8px;
   border-bottom: 1px dashed #ebeef5;
   margin-bottom: 8px;
+  /* 标题始终钉在顶部, 不随内部内容滚动 */
+  flex-shrink: 0;
 }
 .guide-title-text {
   font-size: 13px;
@@ -305,7 +356,7 @@ const otherGuides = computed<Guide[]>(() =>
 .current-guide-content {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 .guide-section { }
 .guide-section-title {
@@ -315,7 +366,7 @@ const otherGuides = computed<Guide[]>(() =>
   font-size: 12px;
   font-weight: 600;
   color: #303133;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
 }
 .guide-section-list {
   list-style: none;
@@ -325,7 +376,7 @@ const otherGuides = computed<Guide[]>(() =>
 .guide-section-list li {
   font-size: 11.5px;
   color: #606266;
-  line-height: 1.7;
+  line-height: 1.6;
   position: relative;
 }
 .guide-section-list li::before {

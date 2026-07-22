@@ -611,6 +611,11 @@ defineExpose({
   min-height: 0;
 }
 /* v2.5.10: wrap 容器响应式填充父容器 */
+/* v2.5.10: canvas-wrap — 100% 填充父容器, 内容超长时内部滚动
+   v2.5.12: 移除 min-height: 480px
+   · 父级 annotate-main-row 高度已锁, 此处不能强行 min-height
+   · 画布实际像素由 useCanvasSize 监听父容器宽度计算, 不需要固定最小高度
+   · height: 100% + overflow: auto 让画布自适应填充 + 必要时滚动 */
 .canvas-wrap {
   position: relative;
   background: #fafafa;
@@ -618,8 +623,8 @@ defineExpose({
   border-radius: 4px;
   overflow: auto;
   width: 100%;
-  height: 100%;
-  min-height: 480px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 /* v2.5.10: canvas-stage 完全填充 wrap (1:1 同步, 无 flex) */
 .canvas-stage {

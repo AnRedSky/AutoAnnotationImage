@@ -578,15 +578,16 @@ watch(() => route.params.id, () => load())
       </div>
     </div>
 
-    <!-- 统计卡 (与 Dashboard 风格统一: 2 行 x 3 列, 避免卡片过窄导致中文换行) -->
-    <el-row v-if="stats" :gutter="14" class="ds-stats">
-      <el-col :xs="12" :sm="8" :md="8">
+    <!-- 统计卡 (单行 x 6 列, 紧凑展示: 图片总数 / 已人工标注 / AI 已标 / 平均耗时 / AI 节省时间 / 类别数)
+         内部 padding/icon/字号 全部下调, 避免 6 列下中文换行; 卡片等高由 .ds-stats :deep(.el-col) 拉伸 -->
+    <el-row v-if="stats" :gutter="12" class="ds-stats">
+      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
         <el-card shadow="hover" class="stat-card stat-card--blue">
           <div class="stat-icon"><el-icon><Picture /></el-icon></div>
           <el-statistic title="图片总数" :value="dataset?.image_count || 0" />
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="8">
+      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
         <el-card shadow="hover" class="stat-card stat-card--green">
           <div class="stat-icon"><el-icon><CircleCheck /></el-icon></div>
           <el-statistic title="已人工标注"
@@ -597,7 +598,7 @@ watch(() => route.params.id, () => load())
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="8">
+      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
         <el-card shadow="hover" class="stat-card stat-card--orange">
           <div class="stat-icon"><el-icon><Lightning /></el-icon></div>
           <el-statistic title="AI 已标"
@@ -609,7 +610,7 @@ watch(() => route.params.id, () => load())
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="8">
+      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
         <el-card shadow="hover" class="stat-card stat-card--purple">
           <div class="stat-icon"><el-icon><Clock /></el-icon></div>
           <el-statistic title="平均耗时"
@@ -617,7 +618,7 @@ watch(() => route.params.id, () => load())
             suffix="秒/张" />
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="8">
+      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
         <el-card shadow="hover" class="stat-card stat-card--warm">
           <div class="stat-icon"><el-icon><MagicStick /></el-icon></div>
           <el-statistic title="AI 节省时间"
@@ -628,7 +629,7 @@ watch(() => route.params.id, () => load())
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="8">
+      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
         <el-card shadow="hover" class="stat-card stat-card--cyan">
           <div class="stat-icon"><el-icon><CollectionTag /></el-icon></div>
           <el-statistic title="类别数" :value="dataset?.category_count || 0" />
@@ -1182,8 +1183,10 @@ watch(() => route.params.id, () => load())
 .stat-card--cyan::before   { background: linear-gradient(135deg, #00a3e0 0%, #00c48c 100%); }
 
 .stat-card :deep(.el-card__body) {
-  padding: 22px 24px;
+  padding: 14px 16px;
   position: relative;
+  /* 覆盖 theme.css 的 min-height: 116px, 1 行 6 列卡片更紧凑 */
+  min-height: 92px;
   /* 让卡片在同 row 内等高: 撑满父级 (theme.css 已设 .stat-card height: 100%) */
   display: flex;
   flex-direction: column;
@@ -1191,32 +1194,40 @@ watch(() => route.params.id, () => load())
 }
 .stat-card :deep(.el-statistic__head) {
   color: var(--text-secondary) !important;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
-  margin-bottom: 8px;
-  /* 给右上角图标留位, 避免标题被覆盖 */
-  padding-right: 56px;
-  min-height: 18px;
+  margin-bottom: 6px;
+  /* 给右上角图标留位, 避免标题被覆盖 (图标 28px + 间距 8px) */
+  padding-right: 40px;
+  min-height: 16px;
+  /* 标题过长时, 截断省略, 避免 6 列下中文换行把布局撑乱 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stat-card :deep(.el-statistic__content) {
-  font-size: 28px;
+  font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
-  padding-right: 56px;
+  padding-right: 40px;
   line-height: 1.15;
+  /* 大数字过长时也避免撑破卡片 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stat-icon {
   position: absolute;
-  right: 18px;
-  top: 18px;
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  right: 14px;
+  top: 14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-.stat-icon :deep(.el-icon) { font-size: 22px; }
+.stat-icon :deep(.el-icon) { font-size: 16px; }
 .stat-card--blue   .stat-icon { background: rgba(79, 124, 255, 0.1);  color: #4f7cff; }
 .stat-card--green  .stat-icon { background: rgba(0, 196, 140, 0.1);  color: #00c48c; }
 .stat-card--orange .stat-icon { background: rgba(255, 138, 76, 0.1);  color: #ff8a4c; }
@@ -1225,9 +1236,12 @@ watch(() => route.params.id, () => load())
 .stat-card--cyan   .stat-icon { background: rgba(0, 163, 224, 0.1);   color: #00a3e0; }
 .stat-meta {
   color: var(--text-placeholder);
-  margin-top: 6px;
-  font-size: 12px;
-  padding-right: 56px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  padding-right: 40px;
+  /* 6 列窄卡片下, meta 文案过长可优雅换行, 避免撑破卡片 */
+  line-height: 1.4;
+  word-break: break-all;
 }
 
 /* ===========================================================

@@ -80,22 +80,28 @@ defineProps<{
 /* v2.5.10: 画布壳响应式填充父容器 (card body)
    - 父容器 (el-card body) 由 flex column 主导
    - .annotate-canvas 用 flex: 1 撑满剩余高度 (元信息占底部)
-   - 加载占位与画布都按此自适应 */
+   - 加载占位与画布都按此自适应
+   v2.5.12: 移除 min-height: 480px, 改为 height: 100% + overflow: hidden
+   · 父级 annotate-main-row 高度已锁 (calc(100vh - 360px))
+   · 此处不能再设 min-height, 否则会突破父级高度, 撑大整行
+   · 内容超长时, 内部 .canvas-wrap 用 overflow: auto 滚动 */
 .annotate-canvas {
   position: relative;
   width: 100%;
   flex: 1 1 auto;
-  min-height: 480px;  /* 画布最小高度, 保证可视区域 */
+  min-height: 0;        /* 关键: flex 子项需要 min-height: 0 才能正确收缩 */
+  height: 100%;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
+  overflow: hidden;
 }
 
-/* v2.5.10: 加载占位使用 100% 高度, spinner 居中 */
+/* v2.5.12: 加载占位使用 100% 高度, spinner 居中 (移除 min-height: 480px 兜底) */
 .annotate-loading {
   flex: 1 1 auto;
-  min-height: 480px;
+  min-height: 0;
   width: 100%;
   display: flex;
   align-items: center;

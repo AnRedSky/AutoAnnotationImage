@@ -177,6 +177,14 @@ async def upload_mask(
 
     await db.commit()
     await db.refresh(m)
+    # v2.5.15: mask 上传成功后, 把 image.status 提升到 human_confirmed
+    # - 之前只 insert/update SegmentationMask, image.status 一直停留在 pending/ai_labeled
+    # - 导致前端 stats 的"待标注"数字永远不减
+    # - 仅当原状态是 pending/ai_labeled 时才升级, 不降级 (保留 human_corrected 语义)
+    if img.status in ('pending', 'ai_labeled'):
+        img.status = 'human_confirmed'
+        await db.commit()
+        await db.refresh(img)
 
     # 把 counts 转成 {category_id: pixel_count}, 0 也保留 (代表背景)
     return {

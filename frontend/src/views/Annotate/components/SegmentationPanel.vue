@@ -1,10 +1,12 @@
 <!--
-  SegmentationPanel.vue (v2.5.7 拆分自 Annotate.vue)
+  SegmentationPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本)
   ===================================================
-  图像分割任务右侧操作面板 (6 sections)
+  图像分割任务右侧操作面板 (4 sections, 仅保留操作)
 
   设计:
-  - 6 sections: 1 工具模式 / 2 类别 / 3 笔刷大小 / 4 (空, 缩放冗余已删) / 5 图片导航 / 6 mask 状态 / 7 提交
+  - 4 sections: 1 工具模式 / 2 类别 / 3 笔刷大小 / 4 图片导航 / 5 提交
+  - 已移除: 工具模式下方说明文字、图片导航的 meta 信息、整个 mask 状态 section、未保存提示
+    (这些信息在画布底部 meta 条 + 左侧操作指导已有, 重复占用空间)
   - 接收 segAnnotRef (模板 ref, 用 ?.value?.xx 访问内部状态)
   - 通过 emit 抛出操作
 
@@ -22,7 +24,7 @@
     save, cancel
 -->
 <template>
-  <el-card title="分割操作面板">
+  <el-card class="op-card" title="分割操作面板">
     <!-- 1. 工具模式 -->
     <div class="op-section">
       <div class="op-section-title">1. 工具模式</div>
@@ -31,18 +33,16 @@
         <el-radio-button value="erase">橡皮 (E)</el-radio-button>
         <el-radio-button value="pan">查看 (V)</el-radio-button>
       </el-radio-group>
-      <div style="margin-top: 4px; font-size: 11px; color: #909399;">
-        <template v-if="segMode === 'brush'">按住鼠标画当前类别, 释放停止</template>
-        <template v-else-if="segMode === 'erase'">按住鼠标擦除像素, 释放停止</template>
-        <template v-else>按住鼠标拖动查看画布</template>
-      </div>
     </div>
 
-    <!-- 2. 当前画刷类别 -->
+    <!-- 2. 当前画刷类别
+         v2.5.13 修复: 移除 ?.value
+         · segAnnotRef.brushCategoryId 在 Vue 3 defineExpose 已被自动解包, 不能再加 .value
+         · 原写法拿不到值, 下拉只显示占位符 -->
     <div class="op-section" v-if="categories.length">
       <div class="op-section-title">2. 当前画刷类别</div>
       <el-select
-        :model-value="segAnnotRef?.brushCategoryId?.value ?? null"
+        :model-value="segAnnotRef?.brushCategoryId ?? null"
         placeholder="选择类别"
         size="small"
         style="width: 100%; margin-top: 6px;"
@@ -59,20 +59,21 @@
       </el-select>
     </div>
 
-    <!-- 3. 当前画刷大小 -->
+    <!-- 3. 当前画刷大小
+         v2.5.13: 同样移除 ?.value, 笔刷大小需正确反映 segAnnotRef.brushSize 的当前值 -->
     <div class="op-section">
-      <div class="op-section-title">3. 笔刷大小: {{ segAnnotRef?.brushSize?.value ?? 12 }}px</div>
+      <div class="op-section-title">3. 笔刷大小: {{ segAnnotRef?.brushSize ?? 12 }}px</div>
       <el-slider
-        :model-value="segAnnotRef?.brushSize?.value ?? 12"
+        :model-value="segAnnotRef?.brushSize ?? 12"
         :min="2" :max="40" :step="1"
         style="margin-top: 6px;"
         @input="(v: number) => emit('brush-size-change', v)"
       />
     </div>
 
-    <!-- 5. 图片导航 -->
+    <!-- 4. 图片导航 -->
     <div class="op-section">
-      <div class="op-section-title">5. 图片导航</div>
+      <div class="op-section-title">4. 图片导航</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
         <el-button
           style="flex: 1;" :icon="ArrowLeft"
@@ -87,31 +88,11 @@
           @click="emit('next')"
         >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
       </div>
-      <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-        {{ historyCursor + 1 }} / {{ historyIds.length || '?' }} · <strong>{{ image.filename }}</strong>
-      </div>
     </div>
 
-    <!-- 6. mask 状态 -->
+    <!-- 5. 提交 -->
     <div class="op-section">
-      <div class="op-section-title">6. 当前 mask 状态</div>
-      <div style="font-size: 12px; color: #606266; margin-top: 6px;">
-        <div>画布尺寸: {{ image?.width ?? '?' }} × {{ image?.height ?? '?' }} px</div>
-        <div v-if="segAnnotRef?.maskStats?.value">
-          已标像素:
-          <span style="color: #67c23a; font-weight: 600;">
-            {{ segAnnotRef.maskStats.value.painted }} / {{ segAnnotRef.maskStats.value.total }}
-          </span>
-          ({{ (segAnnotRef.maskStats.value.painted / segAnnotRef.maskStats.value.total * 100).toFixed(1) }}%)
-        </div>
-        <div v-else>已标像素: <span style="color: #909399;">—</span></div>
-        <div>坐标 (鼠标): x={{ segAnnotRef?.mousePos?.value?.x ?? '—' }}, y={{ segAnnotRef?.mousePos?.value?.y ?? '—' }} px</div>
-      </div>
-    </div>
-
-    <!-- 7. 提交 -->
-    <div class="op-section">
-      <div class="op-section-title">7. 提交</div>
+      <div class="op-section-title">5. 提交</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
         <el-button
           type="primary"
@@ -126,9 +107,6 @@
           :disabled="!segDirty || annotatorSaving"
           @click="emit('cancel')"
         >取消</el-button>
-      </div>
-      <div v-if="segDirty" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
-        ● 有未保存的修改
       </div>
     </div>
 
@@ -187,6 +165,20 @@ function catColor(catId: number | null | undefined): string {
 </script>
 
 <style scoped>
+/* 跟随父 el-col 高度, 与左侧侧栏/中间画布三列同高
+   - el-card 本体 100% 填充 el-col
+   - body 内部 flex 1 + auto overflow, 内容过长时本卡片内部滚动 */
+.op-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.op-card :deep(.el-card__body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .op-section {
   margin-bottom: 12px;
   padding-bottom: 12px;

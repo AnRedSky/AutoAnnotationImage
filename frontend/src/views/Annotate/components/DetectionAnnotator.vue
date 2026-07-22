@@ -46,7 +46,7 @@
     prev               请求跳到上一张图
 
   Expose:
-    setMode(m) / mode / canUndo / canRedo / undo() / redo() / clearDraft()
+    setMode(m) / mode / canUndo / canRedo / undo() / redo() / clearAllWithConfirm() / undoAll()
     removeSelected() / changeSelectedCategory(catId) / selectByIndex(i) / selectedIndex
     defaultCategoryId
 -->
@@ -244,6 +244,59 @@ function redo() {
   const next = redoStack.value.pop()!
   emit('update:modelValue', next.bboxes)
   ElMessage.success('已重做')
+}
+
+/**
+ * v2.5.14: 一键撤销全部未保存修改 (恢复到 last saved 状态)
+ * - 替代原右侧 "取消" 按钮: 一次性回到上次保存的 bbox 列表
+ * - 内部直接调用 resetInitial + 清空历史栈, 避免循环 undo
+ * - 没有修改就不响应
+ * - 快捷键 Ctrl+Z 仍然走单步 undo(), 此方法专给按钮调用
+ */
+function undoAll() {
+  if (!dirty.value) {
+    ElMessage.info('当前无未保存修改')
+    return
+  }
+  // 直接 reset initial -> dirty=false
+  resetInitial()
+  // 清空历史栈, 避免点撤销按钮后又多次触发
+  undoStack.value = []
+  redoStack.value = []
+  ElMessage.success('已撤销本次所有修改')
+}
+
+/**
+ * v2.5.14: 清空全部标注 (弹窗确认)
+ * - 替代原右侧 "清空未保存" 按钮: 一次性清空当前 draft
+ * - 弹窗让用户确认, 避免误操作
+ * - 确认后清空并 snapshot, 允许 Ctrl+Z 撤销此次清空
+ * - 同样给按钮调用, 不绑定快捷键
+ */
+async function clearAllWithConfirm() {
+  if (!props.modelValue || props.modelValue.length === 0) {
+    ElMessage.info('当前画布已为空, 无需清空')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定清空全部 ${props.modelValue.length} 个标注? 此操作可通过「撤销」恢复`,
+      '清空确认',
+      {
+        type: 'warning',
+        confirmButtonText: '清空',
+        cancelButtonText: '取消',
+      }
+    )
+    // 确认后: 推入 undoStack, 允许撤销
+    snapshot()
+    emit('update:modelValue', [])
+    selectedIndex.value = null
+    draw()
+    ElMessage.success('已清空全部标注')
+  } catch {
+    // 用户取消弹窗, 不做任何处理
+  }
 }
 
 // dirty
@@ -645,19 +698,10 @@ async function confirmAndRemove(i: number) {
   ElMessage.success(`已删除 #${i + 1} 「${catLabel}」`)
   draw()
 }
-function clearDraft() {
-  if (!props.modelValue || props.modelValue.length === 0) return
-  ElMessageBox.confirm('清空所有 bbox? (未保存)', '确认', {
-    type: 'warning',
-    confirmButtonText: '清空',
-    cancelButtonText: '取消',
-  }).then(() => {
-    snapshot()
-    emit('update:modelValue', [])
-    selectedIndex.value = null
-    draw()
-  }).catch(() => {})
-}
+// v2.5.14: 移除原 clearDraft 方法
+// - 原方法被右侧 "清空未保存" 按钮调用 (emit('clear-draft'))
+// - 现已替换为 clearAllWithConfirm (弹窗更友好, 提示更清晰)
+// - 该方法无其它调用方, 直接删除
 
 // v2.5.4: 合并绘制/编辑为智能模式, 移除 setMode
 // 鼠标按下智能判定: 命中 handle -> resize; 命中 bbox -> 选中+move; 空白处 -> 画新 bbox
@@ -784,7 +828,6 @@ onBeforeUnmount(() => {
 defineExpose({
   undo,
   redo,
-  clearDraft,
   removeSelected,             // 删除当前选中 (走确认)
   changeSelectedCategory,
   selectByIndex,
@@ -803,6 +846,14 @@ defineExpose({
     return props.modelValue?.[i] || null
   }),
   defaultCategoryId,
+  /** v2.5.13: 父组件 (右侧目标类型下拉) 修改默认类别时调用, 同步给子组件
+   *  父组件通过 useDetectionAnnotate 的 onDetTargetCategoryChange 触发
+   *  之前用 ?. 静默吞掉调用, 导致选了下拉后画布仍按旧 defaultCategoryId 画框 */
+  setDefaultCategory: (id: number | null) => { defaultCategoryId.value = id },
+  /** v2.5.14: 一键撤销全部未保存修改 (替代右侧「取消」按钮) */
+  undoAll,
+  /** v2.5.14: 清空全部标注带确认 (替代右侧「清空未保存」按钮) */
+  clearAllWithConfirm,
   dirty,
   categories: computed(() => props.categories),
   colorOf,
@@ -828,7 +879,11 @@ defineExpose({
 /* v2.5.10: wrap 容器响应式填充父容器 — 不再写死 600×480
    - 父容器 (AnnotationCanvas 内的 .annotate-canvas) 提供宽高
    - wrap 用 100% × 100% 填满父容器
-   - min-height: 480 保留最小可视区域 (避免极小容器下画布不可用)
+   v2.5.12: 移除 min-height: 480px
+   · 父级 annotate-main-row 高度已锁 (calc(100vh - 360px))
+   · 此处不能再设 min-height, 否则突破父级固定高度, 撑大整行
+   · 画布实际像素由 useCanvasSize 监听父容器宽度计算
+   · 极小容器场景由父级 min-height: 500px 兜底, 此处无需再设
    - overflow: auto 允许缩放后滚动查看 */
 .canvas-wrap {
   position: relative;
@@ -837,8 +892,8 @@ defineExpose({
   border-radius: 4px;
   overflow: auto;
   width: 100%;
-  height: 100%;
-  min-height: 480px;
+  flex: 1 1 auto;
+  min-height: 0;
   /* 父容器可能给到 0, 这里保证有合理的最小高度 */
 }
 /* v2.5.10: canvas-stage 完全填充 wrap (无 flex, 1:1 同步)

@@ -21,8 +21,15 @@ export function useSegmentationAnnotate(options: {
   image: Ref<SegmentationImage | null>
   segAnnotRef: Ref<any>
   annotatorSaving: Ref<boolean>
+  /**
+   * v2.5.15: 保存成功后的副作用钩子
+   * - 父组件 (index.vue) 传入 refreshStats, 在后端 image.status 升级后立刻拉新统计
+   * - 之前: 保存成功后不刷新, 前端"待标注"数字永远不减
+   * - 可选: 不传则只完成"重置 dirty"基础动作
+   */
+  onSaved?: () => void | Promise<void>
 }) {
-  const { image, segAnnotRef, annotatorSaving } = options
+  const { image, segAnnotRef, annotatorSaving, onSaved } = options
 
   // state ---------------------------------------------------------------
   /** 已有 mask 的 blob URL (后端 /api/segmentation/masks/{id}?download=true 返回的 PNG) */
@@ -74,6 +81,10 @@ export function useSegmentationAnnotate(options: {
       await loadSegmentationMask(image.value.id)
       await nextTick()
       segAnnotRef.value?.resetInitial?.()
+      // v2.5.15: 保存成功 → 触发父组件的 onSaved 钩子 (典型: refreshStats)
+      // - 后端 segmentation.py 已把 image.status 提升到 human_confirmed
+      // - 前端需主动重拉 stats, 才能让"待标注"数字减少
+      if (onSaved) await onSaved()
     } catch (e: any) {
       ElMessage.error('mask 保存失败: ' + (e?.response?.data?.detail || e?.message))
     } finally {

@@ -230,7 +230,10 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-height: 0;
 }
-/* v2.5.10: wrap 容器响应式填充父容器 */
+/* v2.5.10: wrap 容器响应式填充父容器
+   v2.5.12: 移除 min-height: 480px
+   · 父级 annotate-main-row 高度已锁, 此处不能再设 min-height
+   · height: 100% + flex: 1 1 auto + min-height: 0 让 wrap 正确填充并允许内部滚动 */
 .canvas-wrap {
   position: relative;
   background: #fafafa;
@@ -238,8 +241,8 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   overflow: auto;
   width: 100%;
-  height: 100%;
-  min-height: 480px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 /* v2.5.10: canvas-stage 完全填充 wrap (1:1 同步) */
 .canvas-stage {

@@ -1,7 +1,13 @@
 <!--
-  ClassificationPanel.vue (v2.5.7 拆分自 Annotate.vue)
+  ClassificationPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本)
   ====================================================
-  图像分类任务右侧 AI 候选面板
+  图像分类任务右侧 AI 候选面板 (仅保留操作)
+
+  v2.5.11 精简:
+  - 简化 allUnknown 块: 只保留 "未知" 标签, 删除 2 行解释文字
+  - 简化未知候选 tag: 只显示 "未知", 删除括号说明
+  - 删除 "所有待标注图片已加载完毕" 提示行
+    (此提示在 el-empty 已有 "暂无 AI 预测" 提示, 重复占用空间)
 
   包含: AI Top-5 候选 + 修正下拉 + 上一张/下一张 + 去数据集详情
 
@@ -18,18 +24,14 @@
     prev, next, view-dataset
 -->
 <template>
-  <el-card title="AI 候选标签（Top-5）">
+  <el-card class="op-card" title="AI 候选标签（Top-5）">
     <el-empty v-if="!image && candidates.length === 0" description="请选择数据集" :image-size="80" />
     <el-empty v-else-if="candidates.length === 0" description="该图无 AI 预测, 请直接选择其他类别" :image-size="60" />
     <!-- 关键简化: 基础模型 (ImageNet 预训练) 输出 = 全部 Top-5 都不在项目类目
          -> 整组归一为「未知」, 不再分 5 个候选 + 各自置信度 -->
     <div v-else-if="allUnknown" class="model-confidence-bar"
-      style="text-align: center; padding: 32px 12px; border: 1px dashed #f56c6c; border-radius: 6px; background: #fef0f0;">
+      style="text-align: center; padding: 24px 12px; border: 1px dashed #f56c6c; border-radius: 6px; background: #fef0f0;">
       <el-tag type="danger" size="large" effect="dark">未知</el-tag>
-      <div style="color: #f56c6c; font-size: 13px; margin-top: 12px; line-height: 1.6;">
-        AI 基础模型标注信息不在项目类别内<br />
-        统一归类为「未知」, 请从下方下拉框手动选择正确类别
-      </div>
     </div>
     <div v-for="(c, idx) in candidates" v-show="!allUnknown" :key="`${c.label}-${idx}`" class="model-confidence-bar">
       <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -56,9 +58,7 @@
             强制采用
           </el-button>
         </template>
-        <el-tag v-else type="danger" size="small">
-          未知（AI 预训练模型输出, 禁止采纳）
-        </el-tag>
+        <el-tag v-else type="danger" size="small">未知</el-tag>
       </div>
     </div>
     <el-divider v-if="categories.length > 0">或选择其他类别</el-divider>
@@ -85,9 +85,6 @@
         :disabled="noMore"
         @click="emit('next')"
       >{{ noMore ? '已是最后一张' : '下一张' }}</el-button>
-    </div>
-    <div v-if="noMore" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-      所有待标注图片已加载完毕，可点击「启动 AI 预标注」继续
     </div>
     <div v-if="image" style="margin-top: 8px; text-align: center;">
       <el-link type="primary" :icon="View" @click="emit('view-dataset')">
@@ -137,6 +134,20 @@ function onCategoryChange(id: number) {
 </script>
 
 <style scoped>
+/* 跟随父 el-col 高度, 与左侧侧栏/中间画布三列同高
+   - el-card 本体 100% 填充 el-col
+   - body 内部 flex 1 + auto overflow, 内容过长时本卡片内部滚动 */
+.op-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.op-card :deep(.el-card__body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .model-confidence-bar {
   padding: 8px 0;
   border-bottom: 1px dashed #ebeef5;

@@ -1,12 +1,18 @@
 <!--
-  DetectionPanel.vue (v2.5.7 拆分自 Annotate.vue)
+  DetectionPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本)
   ===============================================
   目标检测任务右侧操作面板 (5 sections + el-popover)
 
   v2.5.6 关键设计:
-  - 类别下拉已迁移到 Section 5 el-popover (点 el-tag 弹出改类别)
+  - 类别下拉已迁移到 Section 4 el-popover (点 el-tag 弹出改类别)
   - 删除按钮: el-tag × 按钮承担 (走 confirmAndRemove)
   - 移除原 Section 2「选中 bbox」
+
+  v2.5.14 精简:
+  - 移除 Section 1 末尾的「清空未保存」按钮 (v2.5.14: 用 undoAll + clearAllWithConfirm 替代, 见 Section 5 重做按钮)
+  - 移除 Section 5 提交后的「取消」按钮 (v2.5.14: 用撤销按钮替代, 一键回到 last saved 状态)
+  - 撤销按钮语义升级: 一键撤销本次所有修改 (替代取消)
+  - 重做按钮语义升级: 清空全部标注带弹窗确认 (替代清空未保存)
 
   父组件 (Annotate.vue) 通过 v-bind 传入所有 props, 通过 emit 抛出用户操作.
 
@@ -32,31 +38,37 @@
     tag-click(idx), category-change(idx, catId), popover-visible-change(idx, v)
 -->
 <template>
-  <el-card title="检测操作面板">
-    <!-- 1. 工具与历史 -->
+  <el-card class="op-card" title="检测操作面板">
+    <!-- 1. 工具与历史
+         v2.5.14 调整:
+         - 撤销按钮: 一键撤销本次所有修改 (替代原"取消"按钮)
+         - 重做按钮: 清空全部标注 (弹窗确认, 替代原"清空未保存"按钮)
+         - 移除原"清空未保存"按钮 (合并到重做按钮) -->
     <div class="op-section">
       <div class="op-section-title">1. 工具与历史</div>
       <div style="display: flex; gap: 4px; margin-top: 6px;">
         <el-button
           size="small" :icon="RefreshLeft"
           style="flex: 1;"
-          :disabled="!detAnnotRef?.canUndo?.value"
-          @click="emit('undo')"
-        >撤销 (Ctrl+Z)</el-button>
+          :disabled="!detDirty"
+          @click="detAnnotRef?.undoAll?.()"
+        >撤销本次修改</el-button>
         <el-button
           size="small" :icon="RefreshRight"
           style="flex: 1;"
-          :disabled="!detAnnotRef?.canRedo?.value"
-          @click="emit('redo')"
-        >重做 (Ctrl+Y)</el-button>
+          :disabled="bboxList.length === 0"
+          @click="detAnnotRef?.clearAllWithConfirm?.()"
+        >清空全部</el-button>
       </div>
-      <!-- 目标类型选择 (始终显示, 画新 bbox 时使用) -->
+      <!-- 目标类型选择 (画新 bbox 时使用)
+           v2.5.13 修复: 移除 ?.value
+           · detAnnotRef.defaultCategoryId 在 Vue 3 defineExpose 已被自动解包, 不能再加 .value
+           · 原写法 detAnnotRef?.defaultCategoryId?.value 永远拿到 undefined
+           · 导致 el-select 的 model-value 始终是 null, 选完类别不显示选中标签 -->
       <div style="margin-top: 8px;">
-        <div style="font-size: 11px; color: #909399; margin-bottom: 4px;">
-          目标类型 <span style="color: #67c23a;">(画新 bbox 时使用)</span>
-        </div>
+        <div style="font-size: 11px; color: #909399; margin-bottom: 4px;">目标类型</div>
         <el-select
-          :model-value="detAnnotRef?.defaultCategoryId?.value ?? null"
+          :model-value="detAnnotRef?.defaultCategoryId ?? null"
           @update:model-value="onTargetCategoryChange"
           placeholder="选择目标类型" size="small"
           style="width: 100%;" filterable
@@ -69,18 +81,7 @@
           </el-option>
         </el-select>
       </div>
-      <el-button
-        size="small" type="warning" plain
-        style="margin-top: 8px; width: 100%;"
-        @click="emit('clear-draft')"
-      >清空未保存</el-button>
-      <div style="margin-top: 8px; padding: 6px 8px; background: #f0f9ff; border-left: 3px solid #409eff; border-radius: 3px; font-size: 11px; color: #606266; line-height: 1.6;">
-        <div><strong>💡 智能标注</strong> (无需切换模式):</div>
-        <div>• 拖空白处 → 画新 bbox</div>
-        <div>• 点 bbox → 选中 (出现 8 handle)</div>
-        <div>• 拖 body → 平移, 拖 8 handle → 缩放</div>
-        <div>• <kbd>Delete</kbd> 删除选中 / 点 <kbd>×</kbd> 删除对应</div>
-      </div>
+      <!-- v2.5.14: 移除原"清空未保存"按钮 (合并到 Section 1 重做按钮, 弹窗更友好) -->
     </div>
 
     <!-- 2. 智能建议 (条件性显示) -->
@@ -130,9 +131,6 @@
           :disabled="noMore"
           @click="emit('next')"
         >{{ noMore ? '已是最后一张' : '下一张 (N)' }}</el-button>
-      </div>
-      <div v-if="image" style="margin-top: 6px; font-size: 12px; color: #909399; text-align: center;">
-        {{ historyCursor + 1 }} / {{ historyIds.length || '?' }} · <strong>{{ image.filename }}</strong>
       </div>
     </div>
 
@@ -185,7 +183,10 @@
       </div>
     </div>
 
-    <!-- 5. 提交 -->
+    <!-- 5. 提交
+         v2.5.14: 移除「取消」按钮 (功能由 Section 1 的「撤销本次修改」承担)
+         · 取消按钮原本是"放弃本次修改, 回到 last saved 状态"
+         · 现改为更明确的「撤销本次修改」按钮, 用户语义更清晰 -->
     <div class="op-section">
       <div class="op-section-title">5. 提交</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
@@ -197,14 +198,6 @@
           style="flex: 1;"
           @click="emit('save')"
         >保存 ({{ bboxList.length }})</el-button>
-        <el-button
-          :icon="Close" style="flex: 1;"
-          :disabled="!detDirty || annotatorSaving"
-          @click="emit('cancel')"
-        >取消</el-button>
-      </div>
-      <div v-if="detDirty" style="margin-top: 4px; font-size: 11px; color: #e6a23c;">
-        ● 有未保存的修改
       </div>
     </div>
 
@@ -256,11 +249,10 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'undo'): void
-  (e: 'redo'): void
-  (e: 'clear-draft'): void
+  // v2.5.14: 移除 undo, redo, clear-draft, cancel 事件
+  // · 撤销/重做/清空 改为直接调用 detAnnotRef 子组件方法 (无需经过父组件)
+  // · 取消功能被「撤销本次修改」按钮替代
   (e: 'save'): void
-  (e: 'cancel'): void
   (e: 'apply-copy-suggestions'): void
   (e: 'ignore-copy-suggestions'): void
   (e: 'prev'): void
@@ -296,6 +288,20 @@ function onTargetCategoryChange(catId: number | null) {
 </script>
 
 <style scoped>
+/* 跟随父 el-col 高度, 与左侧侧栏/中间画布三列同高
+   - el-card 本体 100% 填充 el-col
+   - body 内部 flex 1 + auto overflow, 内容过长时本卡片内部滚动 */
+.op-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.op-card :deep(.el-card__body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .op-section {
   margin-bottom: 12px;
   padding-bottom: 12px;

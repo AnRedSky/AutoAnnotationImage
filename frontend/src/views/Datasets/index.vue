@@ -82,6 +82,35 @@ onMounted(() => load())
 
 watch(catDs, (v) => { if (v) loadCategories(v.id) })
 
+/**
+ * 类别汇总: 弹窗顶部 4 张统计卡的实时数据
+ * (基于后端 list_categories 实时聚合返回, 这里只做前端求和, 不再二次拉接口)
+ */
+const totalHuman = computed(
+  () => categories.value.reduce((sum, c) => sum + (c.human_labeled_count || 0), 0)
+)
+const totalAi = computed(
+  () => categories.value.reduce((sum, c) => sum + (c.ai_labeled_count || 0), 0)
+)
+const totalCandidate = computed(
+  () => categories.value.reduce((sum, c) => sum + (c.ai_candidate_count || 0), 0)
+)
+// 全数据集已落标的总样本 (已确认 + AI 已标), 用于计算每个类别的占比分母
+const grandTotal = computed(
+  () => totalHuman.value + totalAi.value
+)
+// 同步给 categories 每行附加 totalPct 字段 (用 watch + 浅赋值避免改原引用)
+watch(
+  [categories, grandTotal],
+  () => {
+    const denom = grandTotal.value || 1
+    categories.value.forEach((c: any) => {
+      c.totalPct = Math.round(((c.sample_count || 0) / denom) * 100)
+    })
+  },
+  { immediate: true, deep: true }
+)
+
 const onCreate = async () => {
   const v = createForm.value
   if (!v.name) { ElMessage.warning('请输入名称'); return }
@@ -324,19 +353,81 @@ const closeUpload = async () => {
       />
     </el-dialog>
 
-    <!-- 类别管理 -->
-    <el-dialog v-model="catOpen" :title="`类别管理 -「${catDs?.name}」`" width="500px">
+    <!-- 类别管理 (v2.x: 显示各类别实时统计, 包括已确认/AI 已标/AI 候选/总样本) -->
+    <el-dialog v-model="catOpen" :title="`类别管理 -「${catDs?.name}」`" width="760px" top="6vh">
       <el-input v-model="newCatName" placeholder="输入类别名称" @keyup.enter="onAddCategory">
         <template #append>
           <el-button type="primary" @click="onAddCategory">添加</el-button>
         </template>
       </el-input>
-      <el-table :data="categories" size="small" style="margin-top: 16px;">
-        <el-table-column prop="id" label="ID" width="60" />
-        <el-table-column prop="name" label="类别名" />
-        <el-table-column prop="sample_count" label="样本数" width="100">
+
+      <!-- 顶部: 4 张数据集级统计卡 (实时计算) -->
+      <div v-if="categories.length > 0" class="cat-summary">
+        <div class="cat-summary__card cat-summary__card--total">
+          <div class="cat-summary__num">{{ categories.length }}</div>
+          <div class="cat-summary__label">类别总数</div>
+        </div>
+        <div class="cat-summary__card cat-summary__card--human">
+          <div class="cat-summary__num">{{ totalHuman }}</div>
+          <div class="cat-summary__label">已确认样本</div>
+        </div>
+        <div class="cat-summary__card cat-summary__card--ai">
+          <div class="cat-summary__num">{{ totalAi }}</div>
+          <div class="cat-summary__label">AI 已标</div>
+        </div>
+        <div class="cat-summary__card cat-summary__card--cand">
+          <div class="cat-summary__num">{{ totalCandidate }}</div>
+          <div class="cat-summary__label">AI 候选</div>
+        </div>
+      </div>
+
+      <!-- 类别明细表: 名称 (色块) + 4 列统计 + 总样本 -->
+      <el-table :data="categories" size="small" style="margin-top: 14px;" class="cat-table">
+        <el-table-column prop="id" label="ID" width="56" />
+        <el-table-column prop="name" label="类别名" min-width="120">
           <template #default="{ row }">
-            <el-tag size="small">{{ row.sample_count || 0 }}</el-tag>
+            <div class="cat-name">
+              <span class="cat-name__swatch" :style="{ background: row.color || '#409EFF' }" />
+              <span class="cat-name__text">{{ row.name }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="已确认" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.human_labeled_count" type="success" size="small" effect="dark">
+              {{ row.human_labeled_count }}
+            </el-tag>
+            <span v-else class="dim">0</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="AI 已标" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.ai_labeled_count" type="primary" size="small" effect="dark">
+              {{ row.ai_labeled_count }}
+            </el-tag>
+            <span v-else class="dim">0</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="AI 候选" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.ai_candidate_count" type="warning" size="small" effect="plain">
+              {{ row.ai_candidate_count }}
+            </el-tag>
+            <span v-else class="dim">0</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="总样本" width="160" align="center">
+          <template #default="{ row }">
+            <div class="cat-total">
+              <span class="cat-total__num">{{ row.sample_count || 0 }}</span>
+              <el-progress
+                :percentage="row.totalPct"
+                :stroke-width="6"
+                :show-text="false"
+                :color="row.color || '#409EFF'"
+                class="cat-total__bar"
+              />
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -461,4 +552,97 @@ const closeUpload = async () => {
 .data-table :deep(.el-table__empty-text) {
   line-height: 1.6;
 }
+
+/* ===========================================================
+   类别管理弹窗 (v2.x): 顶部 4 张统计卡 + 类别明细
+   =========================================================== */
+.cat-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  background: var(--bg-soft);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+}
+.cat-summary__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 8px;
+  background: #fff;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  position: relative;
+  overflow: hidden;
+}
+.cat-summary__card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--gradient-brand);
+  opacity: 0.85;
+}
+.cat-summary__card--total::before { background: var(--gradient-brand); }
+.cat-summary__card--human::before { background: var(--gradient-success); }
+.cat-summary__card--ai::before { background: var(--gradient-cool); }
+.cat-summary__card--cand::before { background: linear-gradient(135deg, #ffa940 0%, #ff7676 100%); }
+.cat-summary__num {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.cat-summary__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* 类别名: 色块 + 名称 */
+.cat-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cat-name__swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+.cat-name__text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+/* 总样本: 数字 + 占比进度条 */
+.cat-total {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.cat-total__num {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  text-align: right;
+  font-size: 13px;
+}
+.cat-total__bar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 表格内边距收紧, 容纳 5 列更紧凑 */
+.cat-table :deep(.el-table__cell) { padding: 6px 0; }
+.cat-table :deep(th.el-table__cell) {
+  background: var(--bg-soft) !important;
+  font-weight: 600;
+}
+.dim { color: var(--text-placeholder); font-size: 12px; }
 </style>
