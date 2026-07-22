@@ -13,9 +13,12 @@ celery_app = Celery(
     backend=settings.CELERY_BACKEND,
     # include 让 worker 启动时自动 import 任务模块，
     # 这样 @celery_app.task 装饰器就会运行并把任务注册到 celery_app.tasks
+    # v2.5.15 P0-3 修复: 增加 segmentation_tasks, 否则 worker 启动时不会自动 import
+    # 分割任务, 调 train_segmentation_task / auto_annotate_segmentation_task 会报 NotRegistered
     include=[
         "app.workers.tasks",
         "app.workers.detection_tasks",  # v2.0.0 目标检测
+        "app.workers.segmentation_tasks",  # v2.0.0 图像分割 (v2.5.15 补)
     ],
 )
 
