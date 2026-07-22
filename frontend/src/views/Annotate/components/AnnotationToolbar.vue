@@ -7,7 +7,7 @@
   - 数据集选择 + 任务类型徽章 (popover 详解)
   - 模型选择 (fine-tune / 基础模型)
   - 置信度阈值 + IoU 阈值 + AI 模型
-  - 启动 AI 预标注 按钮 (与其它控件同一行, 末尾 + 当前激活模型 tag)
+  - 启动 AI 预标注 按钮 (与其它控件同一行)
 
   Props (页面私有子组件, 接收父组件状态):
     datasets, datasetId, currentTaskTypeRaw
@@ -198,23 +198,16 @@
             </el-select>
           </el-form-item>
         </template>
-        <!-- 启动 AI 预标注 (与上方控件同一行) + 当前激活模型徽章
-             v2.5.21: 分类任务隐藏"当前激活"tag
-             · 分类任务已有"是否使用项目训练模型"开关 + fine-tune/基础模型下拉,
-               选哪个一目了然, 再显示"当前激活"语义重复
-             · 检测/分割任务没有这种模型选择下拉, 需要"当前激活"提示用户后端用哪个模型跑 -->
+        <!-- 启动 AI 预标注 (与上方控件同一行)
+             v2.5.23: 移除"当前激活"tag — 切换 task_type 时分类/检测的 form-item
+             进出导致"当前激活: xxx"文本闪出, 信息本身也跟模型下拉语义重复
+             (用户在分类下拉里选哪个, 跟后端激活哪个是同步的) -->
         <el-form-item>
           <el-button
             type="primary" :icon="MagicStick"
             :loading="autoLabeling"
             @click="emit('ai-start')"
           >启动 AI 预标注</el-button>
-          <el-tag
-            v-if="activeModel && currentTaskTypeRaw !== 'classification'"
-            type="success" effect="plain" size="small" style="margin-left: 8px;"
-          >
-            当前激活: {{ activeModel.name }}
-          </el-tag>
         </el-form-item>
       </el-form>
     </el-card>
