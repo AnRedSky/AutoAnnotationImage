@@ -142,7 +142,7 @@
               <el-select
                 :model-value="selectedModelId"
                 @update:model-value="(v: number | null) => emit('selected-model-change', v)"
-                class="app-select" style="width: 160px;"
+                class="app-select" style="width: 260px;"
                 :fit-input-width="false" popper-class="app-select-dropdown"
                 :disabled="finetuneModels.length === 0"
                 :placeholder="finetuneModels.length === 0 ? '选择 fine-tune 模型 (仅本数据集已激活)' : '选择 fine-tune 模型'"
@@ -164,7 +164,7 @@
               <el-select
                 :model-value="modelName"
                 @update:model-value="(v: string) => emit('model-name-change', v)"
-                class="app-select" style="width: 160px;"
+                class="app-select" style="width: 260px;"
                 :fit-input-width="false" popper-class="app-select-dropdown"
               >
                 <el-option v-for="m in models" :key="m.name" :label="`${m.name} (${m.params})`" :value="m.name">
