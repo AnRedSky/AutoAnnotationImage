@@ -1,28 +1,34 @@
 <!--
-  DetectionAnnotator.vue (v2.3.1 极简版)
-  ==========================================
+  DetectionAnnotator.vue (v2.5.8 固定画布 + 边界检测)
+  =================================================
   目标检测 bbox 画布组件 (只负责画布渲染 + 鼠标交互)
 
-  v2.3.1 S10 重构:
-  - 移除所有标注相关操作 UI (draw/edit 切换、撤销/重做、保存/取消、类别下拉、bbox 列表、快捷键提示)
-  - 统一由父组件 (Annotate.vue 右侧操作面板) 触发
-  - 通过 defineExpose 暴露 setMode / undo / redo / clearDraft / removeSelected / changeSelectedCategory / selectByIndex
-    + defaultCategoryId / mode / canUndo / canRedo / selectedIndex 供父组件读
+  v2.5.8 关键变更 (画布布局优化):
+  - 画布尺寸固定为 600×400 (CANVAS_W × CANVAS_H), 不再随图片内容调整
+  - 外层 wrap 固定 600×480 (WRAP_W × WRAP_H), 上下各 40px 安全区
+  - 图片按原始长宽比 letterbox 居中渲染, 空白区域由背景色填充
+  - 顶部 40px 安全区: 缩放控制条 / 模式徽章 / 智能标注提示
+  - 底部 40px 安全区: 坐标浮标 / 画布尺寸
+  - bbox 右上角 X 按钮新增边界检测, 防止靠近边缘时越界
+  - 文案/overlay 元素永远落在预设安全区内, 不与核心图片区域重叠
+
+  v2.5.4 智能模式: 鼠标按下智能判定 (draw / select / drag), 无需切模式
+  v2.5.5: bbox 删除走确认对话框, 所有变更支持撤销
+  v2.5.1 极简版: 移除所有标注操作 UI, 统一由父组件触发
 
   职责:
-  - 加载原图到 canvas (含缩放)
+  - 加载原图到固定画布 (含 letterbox 缩放)
   - 鼠标拖拽绘制新 bbox (mousedown -> mousemove -> mouseup)
   - 渲染已有 bbox 列表 (颜色按 category_id 分配)
   - 选中 / 删除 / 改类别 bbox (通过父组件调方法)
   - 拖拽整体 bbox + 8 handle 缩放
-  - 画布坐标浮标 + 尺寸提示
-  - 键盘快捷键: Delete 删选中, Ctrl+Z/Y 撤销/重做, d/e 切模式 (保留, 跟画布操作强耦合)
+  - 画布坐标浮标 + 尺寸提示 (固定在底部安全区)
 
   设计原则:
   - 零业务耦合: 不直接调 API, 不引 store
   - 坐标存储: 归一化 (0-1), 与后端 BBoxAnnotation 一致
-  - 渲染坐标系: 实际像素 (canvas size), 由组件内部转换
-  - 上下文菜单/标注相关操作按钮 → 全部移到父组件 (v2.3.1 目标)
+  - 渲染坐标系: 实际像素 (固定 canvas size), 由组件内部转换
+  - 单向数据流: 画布尺寸/安全区常量从 utils/canvasLayout 统一导入, 三个 annotator 共用
 
   Props:
     imageUrl:    原图 URL (必填)
@@ -39,7 +45,7 @@
     next               请求跳到下一张图
     prev               请求跳到上一张图
 
-  Expose (v2.3.1 新增):
+  Expose:
     setMode(m) / mode / canUndo / canRedo / undo() / redo() / clearDraft()
     removeSelected() / changeSelectedCategory(catId) / selectByIndex(i) / selectedIndex
     defaultCategoryId
@@ -48,7 +54,7 @@
   <div class="det-annotator">
     <!-- 画布区域 (只渲染, 不带任何操作 UI) -->
     <div ref="wrapRef" class="canvas-wrap" @wheel.prevent="onWheel">
-      <div class="canvas-stage" :style="{ width: canvasSize.w + 'px', height: canvasSize.h + 'px', transform: `scale(${zoom})` }">
+      <div class="canvas-stage" :style="{ transform: `scale(${zoom})` }">
         <canvas
           ref="canvasRef"
           class="canvas"
@@ -68,24 +74,34 @@
           <el-button @click="zoomIn" :icon="ZoomIn" circle />
         </el-button-group>
       </div>
-      <!-- 画布坐标浮标 (左下角) -->
-      <div class="coord-overlay">
-        <span v-if="cursorPos">
-          x: <b>{{ cursorPos.x.toFixed(0) }}</b> ({{ (cursorPos.nx * 100).toFixed(1) }}%)
-          &nbsp;y: <b>{{ cursorPos.y.toFixed(0) }}</b> ({{ (cursorPos.ny * 100).toFixed(1) }}%)
-        </span>
-        <span v-else>移入画布查看坐标</span>
+      <!-- v2.5.10: 整合信息面板 (右上角) — 画布坐标浮标 + 画布尺寸 统一整合
+           紧凑布局, 两行信息 (坐标行 + 尺寸行), 占据图片右上角小区域
+           半透明深色背景, 不喧宾夺主, 关键内容仍可正常查看 -->
+      <div class="info-panel">
+        <div class="info-row coord-row">
+          <span v-if="cursorPos" class="coord-text">
+            x: <b>{{ cursorPos.x.toFixed(0) }}</b>
+            <span class="coord-pct">({{ (cursorPos.nx * 100).toFixed(1) }}%)</span>
+            <span class="info-sep">·</span>
+            y: <b>{{ cursorPos.y.toFixed(0) }}</b>
+            <span class="coord-pct">({{ (cursorPos.ny * 100).toFixed(1) }}%)</span>
+          </span>
+          <span v-else class="coord-placeholder">移入画布查看坐标</span>
+        </div>
+        <div class="info-row size-row">
+          <span><b>{{ canvasSize.w }}</b>×<b>{{ canvasSize.h }}</b>px</span>
+          <span class="info-sep">·</span>
+          <span>缩放 {{ scalePercent }}%</span>
+          <span class="info-sep">·</span>
+          <span>显示 {{ zoomPercent }}%</span>
+        </div>
       </div>
-      <!-- 画布尺寸 (右下角) -->
-      <div class="size-overlay">
-        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}% · 显示 {{ zoomPercent }}%
-      </div>
-      <!-- v2.5.4: 智能标注模式徽章 (合并绘制/编辑) -->
+      <!-- v2.5.4: 智能标注模式徽章 (左上角) -->
       <div class="mode-overlay mode-smart">
         智能标注模式 · 拖空白画新 / 点 bbox 选中
       </div>
       <!-- v2.5.5: bbox 标签右上角 X 删除按钮 (DOM overlay, 跟随选中 bbox 位置)
-           满足用户需求: 在每个已标注标签的右上角显示删除按钮 -->
+           v2.5.10: 使用 clampToWrap 边界检测, 永远落在 wrap 内部, 防止越界 -->
       <div
         v-if="detXBtnPos"
         class="bbox-delete-overlay"
@@ -103,6 +119,8 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ZoomIn, ZoomOut, Close } from '@element-plus/icons-vue'
+// v2.5.10: 响应式画布尺寸 (跟随 wrap 容器变化) + letterbox 渲染 + 边界检测
+import { getImageDrawRect, useCanvasSize } from '@/utils/canvasLayout'
 
 // ============== Props / Emits ==============
 interface BBox {
@@ -144,7 +162,11 @@ const defaultCategoryId = ref<number | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const wrapRef = ref<HTMLDivElement | null>(null)
 const imgEl = new Image()
-const canvasSize = ref<{ w: number; h: number }>({ w: 0, h: 0 })
+// v2.5.10: 画布尺寸响应式 — 由 useCanvasSize 监听 wrap 容器变化
+// - 容器尺寸变化时自动同步, 窗口/侧栏调整都会触发重绘
+// - 切换图片时: 图片按原始长宽比 letterbox 渲染到当前画布中
+// - 初始 fallback 600×400 (来自 canvasLayout 常量, 避免初始化时尺寸为 0)
+const { size: canvasSize } = useCanvasSize({ containerRef: wrapRef })
 
 // 绘制中临时状态
 const drawing = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
@@ -273,6 +295,10 @@ watch(
 // (x_max * canvasSize.w * zoom, y_min * canvasSize.h * zoom)
 // 但 canvas-stage 在 canvas-wrap 内居中, 所以还要加上 canvas-stage 相对 canvas-wrap 的偏移
 // X 按钮 16x16 大小固定, 用 transform: scale(1/zoom) 反向缩放, 抵消 canvas-stage 的 scale(zoom)
+// v2.5.8: 边界检测 — 当 bbox 靠近画布边缘时, X 按钮可能超出 wrap 范围
+//          使用 clampToWrap 强制限制在 wrap 边界内, 防止越界遮挡
+// v2.5.10: wrap 尺寸响应式 (useCanvasSize), X 按钮的边界检测使用 canvasSize 实时尺寸
+const X_BTN_SIZE = 18  // X 按钮尺寸 (与 CSS .bbox-delete-overlay 一致)
 const detXBtnPos = computed<{ x: number; y: number } | null>(() => {
   const i = selectedIndex.value
   if (i === null) return null
@@ -284,18 +310,51 @@ const detXBtnPos = computed<{ x: number; y: number } | null>(() => {
   const xIn = b.x_max * canvasSize.value.w * zoom.value
   const yIn = b.y_min * canvasSize.value.h * zoom.value
   // canvas-stage 在 canvas-wrap 内的偏移 (居中布局)
+  // v2.5.10: stage 现在使用 100% 填充 wrap, 偏移为 0
   const stageRect = canvasRef.value.parentElement!.getBoundingClientRect()
   const wrapRect = wrapRef.value.getBoundingClientRect()
   const offsetX = stageRect.left - wrapRect.left
   const offsetY = stageRect.top - wrapRect.top
-  return { x: offsetX + xIn - 8, y: offsetY + yIn - 8 }  // 8 = X 按钮一半
+  // 原始位置: bbox 右上角 - 按钮一半
+  const rawX = offsetX + xIn - X_BTN_SIZE / 2
+  const rawY = offsetY + yIn - X_BTN_SIZE / 2
+  // 边界检测: 限制在 wrap 内部, 留 4px padding
+  // v2.5.10: 使用 wrapRect 的实时尺寸而非常量
+  return clampToWrapBounds(rawX, rawY, X_BTN_SIZE, X_BTN_SIZE, wrapRect.width, wrapRect.height, 4)
 })
+
+/**
+ * 边界检测: 限制坐标在 wrap 范围内
+ * - 与 utils/canvasLayout 的 clampToWrap 类似, 但接受自定义 wrap 尺寸
+ * - 用于响应式 wrap (useCanvasSize) 场景
+ */
+function clampToWrapBounds(
+  x: number, y: number, w: number, h: number,
+  wrapW: number, wrapH: number,
+  padding: number = 4,
+): { x: number; y: number } {
+  return {
+    x: Math.max(padding, Math.min(wrapW - w - padding, x)),
+    y: Math.max(padding, Math.min(wrapH - h - padding, y)),
+  }
+}
 // v2.5.5: 选中 bbox 类别名 (X 按钮 title 用)
 const selectedBBoxLabel = computed(() => {
   const i = selectedIndex.value
   if (i === null) return ''
   return catName(props.modelValue?.[i]?.category_id)
 })
+
+// v2.5.10: 画布尺寸响应式 — 尺寸变化时自动重绘
+// - 容器 resize / 窗口缩放 / 侧栏展开折叠 都会触发
+// - nextTick 等待 DOM 更新完成, 再调用 draw 拿到正确 canvas 尺寸
+watch(
+  () => [canvasSize.value.w, canvasSize.value.h],
+  () => {
+    nextTick(() => draw())
+  },
+  { flush: 'post' },
+)
 
 watch(
   () => props.imageUrl,
@@ -311,12 +370,8 @@ function loadImage() {
   if (!props.imageUrl) return
   imgEl.crossOrigin = 'anonymous'
   imgEl.onload = () => {
-    const maxW = 600
-    const scale = Math.min(1, maxW / (imgEl.naturalWidth || props.imageWidth || 1))
-    canvasSize.value = {
-      w: Math.round((imgEl.naturalWidth || props.imageWidth) * scale),
-      h: Math.round((imgEl.naturalHeight || props.imageHeight) * scale),
-    }
+    // v2.5.10: 画布尺寸由 useCanvasSize 响应式管理, 不再手动设置
+    // 图片按 letterbox 居中渲染到当前画布中 (由 draw() 处理)
     nextTick(() => draw())
   }
   imgEl.onerror = () => ElMessage.error('图片加载失败')
@@ -647,11 +702,15 @@ function draw() {
   const ctx = c.getContext('2d')
   if (!ctx) return
   ctx.clearRect(0, 0, c.width, c.height)
+  // v2.5.8: 画布尺寸固定, 图片按 letterbox 方式渲染到固定画布
+  // - 先用背景色填充整个画布
+  // - 再按图片原始长宽比缩放并居中绘制, 空白区域保留背景色
+  ctx.fillStyle = '#f5f5f5'
+  ctx.fillRect(0, 0, c.width, c.height)
   if (imgEl.complete && imgEl.naturalWidth > 0) {
-    ctx.drawImage(imgEl, 0, 0, c.width, c.height)
+    const rect = getImageDrawRect(imgEl.naturalWidth, imgEl.naturalHeight, c.width, c.height)
+    ctx.drawImage(imgEl, rect.x, rect.y, rect.w, rect.h)
   } else {
-    ctx.fillStyle = '#f5f5f5'
-    ctx.fillRect(0, 0, c.width, c.height)
     ctx.fillStyle = '#999'
     ctx.font = '14px sans-serif'
     ctx.textAlign = 'center'
@@ -762,31 +821,44 @@ defineExpose({
   flex-direction: column;
   gap: 8px;
   width: 100%;
+  /* v2.5.10: 父容器由 flex 主导, 画布可按比例自适应 */
+  flex: 1 1 auto;
+  min-height: 0;
 }
+/* v2.5.10: wrap 容器响应式填充父容器 — 不再写死 600×480
+   - 父容器 (AnnotationCanvas 内的 .annotate-canvas) 提供宽高
+   - wrap 用 100% × 100% 填满父容器
+   - min-height: 480 保留最小可视区域 (避免极小容器下画布不可用)
+   - overflow: auto 允许缩放后滚动查看 */
 .canvas-wrap {
   position: relative;
   background: #fafafa;
   border: 1px solid #ebeef5;
   border-radius: 4px;
   overflow: auto;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  min-height: 360px;
-  max-height: 70vh;
+  width: 100%;
+  height: 100%;
+  min-height: 480px;
+  /* 父容器可能给到 0, 这里保证有合理的最小高度 */
 }
+/* v2.5.10: canvas-stage 完全填充 wrap (无 flex, 1:1 同步)
+   - width/height 100% 保证画布与 wrap 边界无缝贴合
+   - transform-origin: top left 让缩放从左上角展开 */
 .canvas-stage {
   position: relative;
   transform-origin: top left;
-  flex-shrink: 0;
+  width: 100%;
+  height: 100%;
+  /* 关键: stage 高度与 wrap 一致, 画布内的 letterbox 由 canvas 自身处理 */
 }
 .canvas {
   display: block;
-  max-width: 100%;
+  width: 100%;
+  height: 100%;
   cursor: crosshair;
   user-select: none;
 }
-/* v2.3.2: 缩放控制条 (顶部中间) */
+/* v2.5.10: 缩放控制条 (顶部中间) */
 .zoom-overlay {
   position: absolute;
   top: 8px;
@@ -798,39 +870,69 @@ defineExpose({
   padding: 2px;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
 }
-/* 坐标浮标 (左下角) */
-.coord-overlay {
+/* v2.5.10: 整合信息面板 (右上角) — coord + size 合并
+   - 紧凑双行布局, 占据图片右上角小区域
+   - 半透明深色背景, 不喧宾夺主
+   - 与左下角的 mode 徽章和顶部中间的 zoom 控件形成清晰的视觉分区 */
+.info-panel {
   position: absolute;
-  left: 8px;
-  bottom: 8px;
-  padding: 4px 10px;
-  background: rgba(0, 0, 0, 0.55);
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.62);
   color: #fff;
+  padding: 5px 10px;
   border-radius: 4px;
-  font-size: 12px;
-  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   pointer-events: none;
-  z-index: 5;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: right;
+  max-width: calc(100% - 16px);  /* 防止窗口过窄时撑出 wrap */
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
-.coord-overlay b {
+.info-panel .info-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  white-space: nowrap;
+}
+.info-panel .info-row.coord-row {
+  /* 坐标行: 突出关键数字 */
+  font-weight: 500;
+}
+.info-panel .info-row.size-row {
+  /* 尺寸行: 略低对比度, 与坐标行拉开层次 */
+  opacity: 0.85;
+  font-size: 10.5px;
+}
+.info-panel b {
   color: #67c23a;
   font-weight: 600;
-  margin: 0 2px;
+  margin: 0 1px;
 }
-/* 画布尺寸 (右下角) */
-.size-overlay {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  padding: 4px 10px;
-  background: rgba(64, 158, 255, 0.85);
-  color: #fff;
-  border-radius: 4px;
-  font-size: 12px;
-  pointer-events: none;
-  z-index: 5;
+.info-panel .coord-pct {
+  color: #b3d8a8;  /* 浅绿, 与 x/y 数字色 (#67c23a) 区分 */
+  font-size: 10px;
+  margin-left: 2px;
 }
-/* 模式徽章 (左下角上方) */
+.info-panel .coord-placeholder {
+  color: #c0c4cc;
+  font-style: italic;
+  font-size: 10.5px;
+}
+.info-panel .info-sep {
+  color: #6b7280;
+  margin: 0 1px;
+  user-select: none;
+}
+/* 模式徽章 (左上角) */
 .mode-overlay {
   position: absolute;
   left: 8px;
@@ -847,7 +949,8 @@ defineExpose({
 .mode-overlay.mode-edit {
   background: rgba(230, 162, 60, 0.85);
 }
-/* v2.5.5: bbox 标签右上角 X 删除按钮 (DOM overlay, 跟随选中 bbox 位置) */
+/* v2.5.5: bbox 标签右上角 X 删除按钮 (DOM overlay, 跟随选中 bbox 位置)
+   v2.5.10: 位置由 detXBtnPos 通过 clampToWrapBounds 边界检测, 永远落在 wrap 内部 */
 .bbox-delete-overlay {
   position: absolute;
   width: 18px;
@@ -863,8 +966,6 @@ defineExpose({
   z-index: 20;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.25);
   transition: transform 0.15s ease, background 0.15s ease;
-  /* 反向缩放抵消 canvas-stage 的 scale(zoom), 让按钮大小固定 */
-  /* 注意: 这里通过父级 detXBtnPos 已经按 zoom 计算坐标, 不需要反向缩放 */
 }
 .bbox-delete-overlay:hover {
   background: #ff7875;

@@ -1,14 +1,19 @@
 <!--
-  SegmentationAnnotator.vue (v2.5.1 极简版, 对齐 DetectionAnnotator)
+  SegmentationAnnotator.vue (v2.5.8 固定画布 + 边界检测)
   ================================================================
   图像分割 mask 画布组件 (只负责画布渲染 + 鼠标交互)
 
-  v2.5.1 统一布局重构:
+  v2.5.8 关键变更 (画布布局优化):
+  - 画布尺寸固定为 600×400 (CANVAS_W × CANVAS_H), 不再随图片内容调整
+  - 外层 wrap 固定 600×480 (WRAP_W × WRAP_H), 上下各 40px 安全区
+  - 原图按原始长宽比 letterbox 居中渲染, 空白区域由背景色填充
+  - 顶部 40px 安全区: 缩放控制条 / 模式徽章
+  - 底部 40px 安全区: 坐标浮标 / 画布尺寸
+  - 文案/overlay 元素永远落在预设安全区内, 不与核心图片区域重叠
+
+  v2.5.1 统一布局重构 (与 DetectionAnnotator 对齐):
   - 移除所有标注相关操作 UI (工具栏 / 调色板 / 操作按钮 / 元信息条)
   - 统一由父组件 (Annotate.vue 右侧操作面板) 触发
-  - 通过 defineExpose 暴露 setMode / setCategory / setBrushSize / zoomIn / zoomOut / resetZoom
-    / save / resetInitial + mode / dirty / brushCategoryId / brushSize / zoom / mousePos 供父组件读
-  - 风格与 DetectionAnnotator (v2.3.1 S10 极简版) 完全一致
 
   v2.5.0-s12.8 关键修复 (mask 数据层重构, 保留):
   - 维护 maskData (Uint16Array, 单通道 category_id 索引)
@@ -17,15 +22,16 @@
 
   职责 (保留):
   - 加载原图 + 已存在的 mask (来自后端 /api/segmentation/masks/{image_id})
-  - 渲染: 原图为底, mask 用半透明彩色叠层
+  - 渲染: 原图为底 (letterbox 居中), mask 用半透明彩色叠层
   - 画刷 / 橡皮 / 平移 三种模式 (鼠标交互)
-  - 画布坐标浮标 + 模式徽章 + 尺寸提示
+  - 画布坐标浮标 + 模式徽章 + 尺寸提示 (固定在底部安全区)
   - 键盘快捷键: B/E/V 切模式, Space 临时平移 (保留, 跟画布操作强耦合)
 
   设计原则:
   - 零业务耦合: 不直接调 API, 不引 store
   - 单向数据流: 父组件通过 props 传 initialMaskUrl, 子组件 emit save/cancel/clear/dirty-change
   - 与 DetectionAnnotator 模板结构对齐: .seg-annotator > .canvas-wrap
+  - 画布尺寸/安全区常量从 utils/canvasLayout 统一导入
 
   Props:
     imageUrl:        原图 URL (必填)
@@ -53,11 +59,7 @@
       <!-- 双 canvas 叠层: 底层原图, 上层 mask 半透明 -->
       <div
         class="canvas-stage"
-        :style="{
-          width: canvasSize.w + 'px',
-          height: canvasSize.h + 'px',
-          transform: `scale(${zoom})`,
-        }"
+        :style="{ transform: `scale(${zoom})` }"
       >
         <canvas ref="imgCanvasRef" class="layer" :width="canvasSize.w" :height="canvasSize.h" />
         <canvas
@@ -70,18 +72,7 @@
           @mouseleave="onMouseUp"
         />
       </div>
-      <!-- 画布坐标浮标 (左下角) -->
-      <div class="coord-overlay">
-        <span v-if="mousePos">
-          x: <b>{{ mousePos.x }}</b>
-          &nbsp;y: <b>{{ mousePos.y }}</b> px
-        </span>
-        <span v-else>移入画布查看坐标</span>
-        <span v-if="brushCategoryId != null" class="coord-cat" :style="{ color: colorOf(brushCategoryId) }">
-          &nbsp;● {{ catName(brushCategoryId) }}
-        </span>
-      </div>
-      <!-- v2.5.2: 缩放控制条 (顶部中间, 与 DetectionAnnotator/ClassificationAnnotator 同款) -->
+      <!-- v2.5.10: 缩放控制条 (顶部中间) -->
       <div class="zoom-overlay">
         <el-button-group size="small">
           <el-button @click="zoomOut" :icon="ZoomOut" circle />
@@ -89,13 +80,30 @@
           <el-button @click="zoomIn" :icon="ZoomIn" circle />
         </el-button-group>
       </div>
-      <!-- 画布尺寸 (右下角, v2.5.2: 与检测端同款 scalePercent + zoomPercent) -->
-      <div class="size-overlay">
-        {{ canvasSize.w }} × {{ canvasSize.h }}px · 缩放 {{ scalePercent }}% · 显示 {{ zoomPercent }}%
-        <span v-if="maskStats">
-          · 已标 {{ maskStats.painted }} / {{ maskStats.total }}
-          ({{ (maskStats.painted / maskStats.total * 100).toFixed(1) }}%)
-        </span>
+      <!-- v2.5.10: 整合信息面板 (右上角) — 画布坐标 + 画布尺寸 + mask 进度
+           紧凑双行布局, 占据图片右上角小区域, 与检测端风格统一 -->
+      <div class="info-panel">
+        <div class="info-row coord-row">
+          <span v-if="mousePos" class="coord-text">
+            x: <b>{{ mousePos.x }}</b>
+            <span class="info-sep">·</span>
+            y: <b>{{ mousePos.y }}</b>
+            <span class="coord-unit">px</span>
+          </span>
+          <span v-else class="coord-placeholder">移入画布查看坐标</span>
+          <span v-if="brushCategoryId != null" class="coord-cat" :style="{ color: colorOf(brushCategoryId) }">
+            <span class="info-sep">·</span>● {{ catName(brushCategoryId) }}
+          </span>
+        </div>
+        <div class="info-row size-row">
+          <span><b>{{ canvasSize.w }}</b>×<b>{{ canvasSize.h }}</b>px</span>
+          <span class="info-sep">·</span>
+          <span>缩放 {{ scalePercent }}%</span>
+          <span class="info-sep">·</span>
+          <span>显示 {{ zoomPercent }}%</span>
+          <span v-if="maskStats" class="info-sep">·</span>
+          <span v-if="maskStats">已标 {{ maskStats.painted }} / {{ maskStats.total }} ({{ (maskStats.painted / maskStats.total * 100).toFixed(1) }}%)</span>
+        </div>
       </div>
       <!-- 模式徽章 (左上角) -->
       <div class="mode-overlay" :class="`mode-${mode}`">
@@ -109,6 +117,8 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+// v2.5.10: 响应式画布尺寸 (跟随 wrap 容器变化) + letterbox 渲染
+import { getImageDrawRect, useCanvasSize } from '@/utils/canvasLayout'
 
 interface Category { id: number; name: string }
 const props = defineProps<{
@@ -130,10 +140,13 @@ const emit = defineEmits<{
 const mode = ref<'brush' | 'erase' | 'pan'>('brush')
 const brushSize = ref(12)
 const brushCategoryId = ref<number | null>(null)
-const canvasSize = ref<{ w: number; h: number }>({ w: 0, h: 0 })
+// v2.5.10: 画布尺寸响应式 — 由 useCanvasSize 监听 wrap 容器变化
+// - 容器尺寸变化时自动同步, 触发 image + mask 重绘
+// - maskData 也会按新尺寸重新分配 (但已标注数据无法迁移, 故在尺寸稳定前不重置 maskData)
+const wrapRef = ref<HTMLDivElement | null>(null)
+const { size: canvasSize } = useCanvasSize({ containerRef: wrapRef })
 const imgCanvasRef = ref<HTMLCanvasElement | null>(null)
 const maskCanvasRef = ref<HTMLCanvasElement | null>(null)
-const wrapRef = ref<HTMLDivElement | null>(null)
 const imgEl = new Image()
 const maskEl = new Image()
 const dirty = ref(false)
@@ -249,17 +262,27 @@ onBeforeUnmount(() => {
   maskEl.onerror = null
 })
 
+// v2.5.10: 画布尺寸响应式 — 尺寸变化时自动重绘 image 层
+// - 容器 resize / 窗口缩放 / 侧栏展开折叠 都会触发
+// - mask 数据按画布尺寸分配, 尺寸稳定后切换图片时再重新分配
+watch(
+  () => [canvasSize.value.w, canvasSize.value.h],
+  () => {
+    nextTick(() => {
+      drawImage()
+      renderMaskFromData()
+    })
+  },
+  { flush: 'post' },
+)
+
 function loadAll() {
   if (!props.imageUrl) return
   imgEl.crossOrigin = 'anonymous'
   imgEl.onload = () => {
-    const maxW = 600
-    const scale = Math.min(1, maxW / (imgEl.naturalWidth || props.imageWidth || 1))
-    canvasSize.value = {
-      w: Math.round((imgEl.naturalWidth || props.imageWidth) * scale),
-      h: Math.round((imgEl.naturalHeight || props.imageHeight) * scale),
-    }
-    // v2.5.0-s12.8: 初始化 mask 数据层
+    // v2.5.10: 画布尺寸由 useCanvasSize 响应式管理, 不再手动设置
+    // 按当前画布尺寸分配 mask 数据 (切图时按当前 wrap 实际尺寸)
+    if (maskData) maskData.fill(0)
     maskData = new Uint16Array(canvasSize.value.w * canvasSize.value.h)
     nextTick(() => {
       drawImage()
@@ -318,12 +341,13 @@ function drawImage() {
   if (!c) return
   const ctx = c.getContext('2d')
   if (!ctx) return
+  // v2.5.8: 画布尺寸固定, 原图按 letterbox 居中渲染
   ctx.clearRect(0, 0, c.width, c.height)
+  ctx.fillStyle = '#f5f5f5'
+  ctx.fillRect(0, 0, c.width, c.height)
   if (imgEl.complete && imgEl.naturalWidth > 0) {
-    ctx.drawImage(imgEl, 0, 0, c.width, c.height)
-  } else {
-    ctx.fillStyle = '#f5f5f5'
-    ctx.fillRect(0, 0, c.width, c.height)
+    const rect = getImageDrawRect(imgEl.naturalWidth, imgEl.naturalHeight, c.width, c.height)
+    ctx.drawImage(imgEl, rect.x, rect.y, rect.w, rect.h)
   }
 }
 
@@ -577,36 +601,40 @@ defineExpose({
 </script>
 
 <style scoped>
-/* v2.5.1: 与 DetectionAnnotator 风格完全对齐 */
+/* v2.5.1 + v2.5.10: 与 DetectionAnnotator 风格严格对齐, 响应式填充容器 */
 .seg-annotator {
   display: flex;
   flex-direction: column;
   gap: 8px;
   width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
+/* v2.5.10: wrap 容器响应式填充父容器 */
 .canvas-wrap {
   position: relative;
   background: #fafafa;
   border: 1px solid #ebeef5;
   border-radius: 4px;
   overflow: auto;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  min-height: 360px;
-  max-height: 70vh;
+  width: 100%;
+  height: 100%;
+  min-height: 480px;
 }
+/* v2.5.10: canvas-stage 完全填充 wrap (1:1 同步, 无 flex) */
 .canvas-stage {
   position: relative;
   transform-origin: top left;
-  flex-shrink: 0;
+  width: 100%;
+  height: 100%;
 }
 .layer {
   display: block;
-  max-width: 100%;
   position: absolute;
   top: 0;
   left: 0;
+  width: 100%;
+  height: 100%;
   user-select: none;
 }
 .layer:first-child {
@@ -615,50 +643,84 @@ defineExpose({
 .layer.interactive {
   cursor: crosshair;
 }
-/* 画布坐标浮标 (左下角) - 与检测端同款 */
-.coord-overlay {
-  position: absolute;
-  left: 8px;
-  bottom: 8px;
-  padding: 4px 10px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  border-radius: 4px;
-  font-size: 12px;
-  font-family: 'Consolas', 'Monaco', monospace;
-  pointer-events: none;
-  z-index: 5;
-  white-space: nowrap;
-}
-.coord-overlay b {
-  color: #67c23a;
-  font-weight: 600;
-  margin: 0 2px;
-}
-.coord-cat {
-  font-weight: 600;
-}
-/* 画布尺寸 (右下角) */
-.size-overlay {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  padding: 4px 10px;
-  background: rgba(64, 158, 255, 0.85);
-  color: #fff;
-  border-radius: 4px;
-  font-size: 12px;
-  pointer-events: none;
-  z-index: 5;
-}
-/* v2.5.2: 缩放控制条 (顶部中间, 与检测端同款) */
+
+/* v2.5.10: 缩放控制条 (顶部中间) */
 .zoom-overlay {
   position: absolute;
   top: 8px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 5;
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  padding: 2px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
 }
+
+/* v2.5.10: 整合信息面板 (右上角) — coord + size + mask 进度 合并
+   - 与 DetectionAnnotator 风格完全一致 */
+.info-panel {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  pointer-events: none;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: right;
+  max-width: calc(100% - 16px);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+.info-panel .info-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  white-space: nowrap;
+  flex-wrap: wrap;
+}
+.info-panel .info-row.coord-row {
+  font-weight: 500;
+}
+.info-panel .info-row.size-row {
+  opacity: 0.85;
+  font-size: 10.5px;
+}
+.info-panel b {
+  color: #67c23a;
+  font-weight: 600;
+  margin: 0 1px;
+}
+.info-panel .coord-unit {
+  color: #c0c4cc;
+  font-size: 10px;
+  margin-left: 2px;
+}
+.info-panel .coord-placeholder {
+  color: #c0c4cc;
+  font-style: italic;
+  font-size: 10.5px;
+}
+.info-panel .coord-cat {
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.info-panel .info-sep {
+  color: #6b7280;
+  margin: 0 1px;
+  user-select: none;
+}
+
 /* 模式徽章 (左上角) */
 .mode-overlay {
   position: absolute;

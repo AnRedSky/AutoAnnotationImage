@@ -502,14 +502,18 @@ const autoLabelAll = () => {
       @auto-ai-start="autoLabelAll"
     />
 
-    <!-- 主体: 左侧操作指导 + 中间画布 + 右侧任务面板 (v2.5.9: 由 2 栏扩为 3 栏) -->
+    <!-- 主体: 左侧操作指导 + 中间画布 + 右侧任务面板 (v2.5.9: 由 2 栏扩为 3 栏)
+         v2.5.8 调整: 固定画布尺寸 600×480 需要至少 span=14 才能在常见屏幕 (>=1366px) 容纳
+         · span=3  (12.5%) 左侧操作指导 (AnnotationGuideSidebar, 静态文案, 紧凑布局)
+         · span=14 (58.3%) 中间画布 (固定 600×480, 提供 letterbox 安全区)
+         · span=7  (29.2%) 右侧任务面板 (检测 5 sections / 分割 / 分类, 内容较密) -->
     <el-row :gutter="16">
-      <!-- 左侧: 操作指导栏 (新增, v2.5.9) -->
-      <el-col :span="4">
+      <!-- 左侧: 操作指导栏 (新增, v2.5.9, span 由 4 缩为 3 让出空间给画布) -->
+      <el-col :span="3">
         <AnnotationGuideSidebar :task-type="currentImageTaskType" />
       </el-col>
-      <!-- 中间: 画布 (由 span=14 缩为 span=12) -->
-      <el-col :span="12">
+      <!-- 中间: 画布 (由 span=12 扩为 span=14, 容纳固定 600px 画布) -->
+      <el-col :span="14">
         <AnnotationCanvas :image="image" :loading="loading">
           <template v-if="image?.task_type === 'detection'">
             <DetectionAnnotator
@@ -554,8 +558,8 @@ const autoLabelAll = () => {
           </template>
         </AnnotationCanvas>
       </el-col>
-      <!-- 右侧: 任务面板 (由 span=10 缩为 span=8) -->
-      <el-col :span="8">
+      <!-- 右侧: 任务面板 (由 span=8 缩为 span=7 让出空间给画布) -->
+      <el-col :span="7">
         <ClassificationPanel
           v-if="!image || image.task_type === 'classification'"
           :image="image"
