@@ -610,7 +610,9 @@ def auto_annotate_pretrained_task(
                             x_min=b["x_min"], y_min=b["y_min"],
                             x_max=b["x_max"], y_max=b["y_max"],
                             confidence=float(b.get("confidence", 0.0)),
-                            source="pretrained",  # 枚举合法: ai/human/human_corrected
+                            # v2.5.15 P0-1.1 修复: bbox_source 枚举仅 ai/human/human_corrected,
+                            # 之前误写 "pretrained" 会抛 LookupError. 改为 "ai" (AI 自动标注语义一致)
+                            source="ai",
                         )
                         db.add(row)
                     # v2.5.15 P0-2 修复: AnnotationLog.action 枚举已扩展
