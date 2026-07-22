@@ -578,6 +578,40 @@ async def list_images(
     result = await db.execute(stmt)
     images = result.scalars().all()
 
+    # v2.5.17: 批量补齐 detection/segmentation 的"实际标注数"
+    # - 之前只读 image.status, 但 status 仅反映"最近一次操作", 老数据可能 status='pending'
+    #   但 BBoxAnnotation / SegmentationMask 仍有残留, 导致「去标」按钮不显示
+    # - 一次 SQL 拉全部 detection 图的 bbox 计数, 一次拉全部 segmentation 图的 mask 存在标记
+    # - 关联到 items 上, 前端用 OR 逻辑判断"是否有标注"
+    img_ids = [img.id for img in images]
+    bbox_count_by_img: dict = {}
+    has_mask_by_img: dict = {}
+    if img_ids:
+        ds_id = dataset_id
+        from app.models.bbox_annotation import BBoxAnnotation
+        from app.models.segmentation_mask import SegmentationMask
+        det_ids_subq = select(Image.id).where(
+            Image.dataset_id == ds_id,
+            Image.id.in_(img_ids),
+            Image.task_type == "detection",
+        )
+        seg_ids_subq = select(Image.id).where(
+            Image.dataset_id == ds_id,
+            Image.id.in_(img_ids),
+            Image.task_type == "segmentation",
+        )
+        r = await db.execute(
+            select(BBoxAnnotation.image_id, func.count(BBoxAnnotation.id))
+            .where(BBoxAnnotation.image_id.in_(det_ids_subq))
+            .group_by(BBoxAnnotation.image_id)
+        )
+        bbox_count_by_img = {row[0]: int(row[1]) for row in r.all()}
+        r = await db.execute(
+            select(SegmentationMask.image_id)
+            .where(SegmentationMask.image_id.in_(seg_ids_subq))
+        )
+        has_mask_by_img = {row[0]: True for row in r.all()}
+
     return {
         "total": total,
         "page": page,
@@ -603,6 +637,11 @@ async def list_images(
                 "annotated_at": img.annotated_at.isoformat() if img.annotated_at else None,
                 "created_at": img.created_at.isoformat() if img.created_at else None,
                 "file_url": f"/api/files/{img.id}",
+                # v2.5.17: 实际标注数, 供前端「去标」按钮 / 状态徽章使用
+                # - 检测: bbox 行数 (0 = 无标注)
+                # - 分割: 1=有 mask, 0=无
+                "bbox_count": bbox_count_by_img.get(img.id, 0),
+                "has_mask": has_mask_by_img.get(img.id, False),
             }
             for img in images
         ],

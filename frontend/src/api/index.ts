@@ -131,9 +131,20 @@ export const annotationApi = {
     http.get(`/annotations/list/${datasetId}`, { params }),
   recent: (limit = 20) => http.get('/annotations/recent', { params: { limit } }),
   /**
-   * 批量去除图片的人工标注 (不清空 AI 预标注)
+   * 批量去除图片的标注 (v2.5.16+ 支持检测/分割)
+   * - 分类: 清 final_label_id / ai_prediction / status → pending
+   * - 检测: 删 BBoxAnnotation 行 (按 image_id)
+   * - 分割: 删 SegmentationMask 行 + 物理 mask PNG
    * @param imageIds 图片 id 列表 (单/多张都行)
-   * @returns { cleared, skipped, missing, items: [{image_id, filename, result, ...}] }
+   * @returns {
+   *   cleared, skipped, missing,
+   *   bbox_cleared_count, mask_cleared_count,  // v2.5.16+
+   *   items: [{
+   *     image_id, filename, task_type, result,
+   *     old_label_id, had_ai, ai_cleared,
+   *     bbox_cleared, mask_cleared  // v2.5.16+ 每张图实际清理量
+   *   }]
+   * }
    */
   clear: (imageIds: number[]) => http.post('/annotations/clear', { image_ids: imageIds })
 }

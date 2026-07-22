@@ -4,7 +4,7 @@ Dataset API: CRUD + Category Management
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select, update as sa_update, func
 from app.config import settings
 from pydantic import BaseModel
 
@@ -274,15 +274,36 @@ async def list_categories(
 ):
     """
     列出数据集的所有类别, 同时返回每个类别的**实时**统计信息
-    (基于 Image 表聚合, 不依赖 Category.sample_count 缓存字段, 避免 AI 预标注后字段不更新)
 
-    每个 category 额外返回:
-      - human_labeled_count: 人工已标 (status ∈ human_confirmed/human_corrected/trained 且 final_label_id = cat.id)
-      - ai_labeled_count:    AI 已标 (status = ai_labeled 且 final_label_id = cat.id)
-      - ai_candidate_count:  AI 候选 (ai_prediction.top1 = cat.name 但 final_label_id 还未落)
-      - sample_count:        上述前两者之和 (与原字段语义保持一致, 实时值)
+    v2.5.18 修复 (类别统计):
+      之前只按 Image.final_label_id (分类场景) + Image.ai_prediction.top1 (分类 AI 候选) 统计,
+      检测 (BBoxAnnotation) / 分割 (SegmentationMask) 表的样本数据被完全忽略,
+      导致 DatasetDetail 类别管理弹窗"已确认 / AI 已标 / 总样本" 全是 0
+    修复: 按 dataset.task_type 分派:
+      - classification: 原逻辑 (final_label_id + ai_prediction.top1)
+      - detection:      统计 BBoxAnnotation 行数, 按 category_id + source (human/ai) 分桶
+      - segmentation:   读每张 mask PNG 解析 category_pixel_counts,
+                        按 (image 包含的类别) + source 分桶, 一张图有 N 类算 N 次"出现"
+
+    返回字段 (各类别):
+      - human_labeled_count: 人工已标 (source ∈ human/human_corrected)
+      - ai_labeled_count:    AI 已标 (source = ai)
+      - ai_candidate_count:  AI 候选 (仅分类有效, 检测/分割恒为 0)
+      - sample_count:        human + ai 之和
     """
     from app.models.image import Image
+    from app.models.bbox_annotation import BBoxAnnotation
+    from app.models.segmentation_mask import SegmentationMask
+    from app.services.storage_service import storage_service
+    from pathlib import Path as _P
+    from PIL import Image as _PIL
+    import io as _io
+
+    # 0) 拿 dataset.task_type 以决定统计策略
+    dataset = await db.get(Dataset, dataset_id)
+    if not dataset:
+        raise HTTPException(404, f"Dataset id={dataset_id} not found")
+    task_type: str = dataset.task_type or "classification"
 
     # 1) 取本数据集全部 category
     result = await db.execute(
@@ -293,36 +314,115 @@ async def list_categories(
         return {"items": []}
 
     name_to_id = {c.name: c.id for c in cats}
-
-    # 2) 一次性聚合: 拉出本数据集所有"有 ai_prediction 或已 final_label"的图片,
-    #    在 Python 端分桶聚合 (避免多表 JOIN + JSON 提取, 跨 SQLite/MySQL 兼容)
-    stmt = select(
-        Image.final_label_id,
-        Image.status,
-        Image.ai_prediction,
-    ).where(
-        Image.dataset_id == dataset_id,
-        # 只筛有 final_label 或有 ai_prediction 的图, 减少空扫
-        (Image.final_label_id.isnot(None)) | (Image.ai_prediction.isnot(None)),
-    )
-    rows = (await db.execute(stmt)).all()
-
-    # 初始化桶
     stats: dict = {c.id: {"human": 0, "ai": 0, "candidate": 0} for c in cats}
-    for final_label_id, status, ai_pred in rows:
-        # 1) 已在某 category 上的 (按 final_label_id 分桶)
-        if final_label_id is not None and final_label_id in stats:
-            if status in ("human_confirmed", "human_corrected", "trained"):
-                stats[final_label_id]["human"] += 1
-            elif status == "ai_labeled":
-                stats[final_label_id]["ai"] += 1
-            # 其它状态不会带 final_label_id, 这里不需考虑
 
-        # 2) AI 候选: final_label_id 为空, 但 ai_prediction.top1 命中本数据集某个 category 名
-        if final_label_id is None and ai_pred:
-            top1 = (ai_pred or {}).get("top1") if isinstance(ai_pred, dict) else None
-            if top1 and top1 in name_to_id:
-                stats[name_to_id[top1]]["candidate"] += 1
+    # ============== 分派: classification (原逻辑) ==============
+    if task_type == "classification":
+        # 2) 一次性聚合: 拉出本数据集所有"有 ai_prediction 或已 final_label"的图片,
+        #    在 Python 端分桶聚合 (避免多表 JOIN + JSON 提取, 跨 SQLite/MySQL 兼容)
+        stmt = select(
+            Image.final_label_id,
+            Image.status,
+            Image.ai_prediction,
+        ).where(
+            Image.dataset_id == dataset_id,
+            # 只筛有 final_label 或有 ai_prediction 的图, 减少空扫
+            (Image.final_label_id.isnot(None)) | (Image.ai_prediction.isnot(None)),
+        )
+        rows = (await db.execute(stmt)).all()
+
+        for final_label_id, status, ai_pred in rows:
+            # 1) 已在某 category 上的 (按 final_label_id 分桶)
+            if final_label_id is not None and final_label_id in stats:
+                if status in ("human_confirmed", "human_corrected", "trained"):
+                    stats[final_label_id]["human"] += 1
+                elif status == "ai_labeled":
+                    stats[final_label_id]["ai"] += 1
+                # 其它状态不会带 final_label_id, 这里不需考虑
+
+            # 2) AI 候选: final_label_id 为空, 但 ai_prediction.top1 命中本数据集某个 category 名
+            if final_label_id is None and ai_pred:
+                top1 = (ai_pred or {}).get("top1") if isinstance(ai_pred, dict) else None
+                if top1 and top1 in name_to_id:
+                    stats[name_to_id[top1]]["candidate"] += 1
+
+    # ============== 分派: detection (BBoxAnnotation) ==============
+    elif task_type == "detection":
+        # 按 category_id + source 分桶
+        stmt = (
+            select(
+                BBoxAnnotation.category_id,
+                BBoxAnnotation.source,
+                func.count(BBoxAnnotation.id),
+            )
+            .join(Image, Image.id == BBoxAnnotation.image_id)
+            .where(Image.dataset_id == dataset_id)
+            .group_by(BBoxAnnotation.category_id, BBoxAnnotation.source)
+        )
+        rows = (await db.execute(stmt)).all()
+        for cat_id, source, cnt in rows:
+            if cat_id is None or cat_id not in stats:
+                continue  # 兜底: bbox 可能 category_id=NULL (非法) 或属于已删类别
+            if source in ("human", "human_corrected"):
+                stats[cat_id]["human"] += int(cnt)
+            elif source == "ai":
+                stats[cat_id]["ai"] += int(cnt)
+            # 其它 source: 忽略
+
+    # ============== 分派: segmentation (SegmentationMask + 解析 PNG) ==============
+    elif task_type == "segmentation":
+        # 拉所有 mask 的 source + 物理路径
+        stmt = (
+            select(
+                SegmentationMask.source,
+                SegmentationMask.mask_path,
+            )
+            .join(Image, Image.id == SegmentationMask.image_id)
+            .where(Image.dataset_id == dataset_id)
+        )
+        mask_rows = (await db.execute(stmt)).all()
+
+        # 一次 Python 循环: 读 PNG, 解析像素分布, 按 (image 内含的 cat_id, source) +1
+        # 性能: mask 通常是 100x100 ~ 500x500, 单文件解析 < 5ms; 100 张图 < 500ms 可接受
+        for source, mask_path in mask_rows:
+            try:
+                abs_path = _P(storage_service.base_dir) / mask_path
+                if not abs_path.is_file():
+                    continue
+                with open(abs_path, "rb") as f:
+                    content = f.read()
+                pil = _PIL.open(_io.BytesIO(content))
+                # 与 segmentation.py 保持一致的解析规则
+                if pil.mode == "P":
+                    arr = pil
+                elif pil.mode == "L":
+                    arr = pil
+                elif pil.mode in ("RGB", "RGBA"):
+                    arr = pil.getchannel("R")
+                elif pil.mode == "1":
+                    arr = pil.convert("L")
+                else:
+                    continue
+                # 收集"本 mask 包含哪些 cat_id" (0 跳过, 0 = 背景)
+                present_cats = set()
+                for v in arr.getdata():
+                    cv = int(v)
+                    if cv == 0:
+                        continue  # 0 = 背景, 不算任何类别的样本
+                    if cv in stats:
+                        present_cats.add(cv)
+                # 增量
+                for cat_id in present_cats:
+                    if source in ("human", "human_corrected"):
+                        stats[cat_id]["human"] += 1
+                    elif source == "ai":
+                        stats[cat_id]["ai"] += 1
+                    # 其它 source 忽略
+            except Exception:
+                # 单张 mask 解析失败不影响整批, 跳过即可
+                continue
+
+    # 其它未识别 task_type: 当作 classification 兜底 (空统计)
 
     return {
         "items": [

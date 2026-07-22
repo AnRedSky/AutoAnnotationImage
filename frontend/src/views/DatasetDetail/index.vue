@@ -397,20 +397,24 @@ async function deleteOne(img: any) {
   }
 }
 
-/** 单张去除标注 (人工 + AI 预标注) */
+/** 单张去除标注 (人工 + AI 预标注 + 检测 bbox + 分割 mask) */
 async function clearOneAnnotation(img: any) {
-  const hadHuman = ['human_confirmed', 'human_corrected', 'trained'].includes(img.status)
-  const hadAi = img.status === 'ai_labeled' && img.ai_prediction
-  if (!hadHuman && !hadAi && !img.final_label_id) {
+  // v2.5.17: 用统一 hasAnnotation 判断, 兼容 detection/segmentation 老数据
+  if (!hasAnnotation(img)) {
     ElMessage.warning('该图片尚无标注, 无需去除')
     return
   }
-  // 提示文案根据是否含 AI 标注区分
-  const tip = hadHuman
-    ? `确认去除「${img.filename}」的人工标注? 该图片将回到待标注状态, 历史会保留在审计日志`
-    : hadAi
-      ? `确认去除「${img.filename}」的 AI 预标注? 该图片将回到待标注状态, 下次自动标注会重新预测`
-      : `确认去除「${img.filename}」的标注? 该图片将回到待标注状态, 历史会保留在审计日志`
+  const hadAi = img.status === 'ai_labeled' && img.ai_prediction
+  // 提示文案根据 task_type 区分
+  const tt: string = img.task_type || 'classification'
+  const tipMap: Record<string, string> = {
+    classification: `确认去除「${img.filename}」的人工标注? 该图片将回到待标注状态, 历史会保留在审计日志`,
+    detection: `确认去除「${img.filename}」的所有检测框? 该图片将回到待标注状态, 训练/导出将不再含这些框`,
+    segmentation: `确认去除「${img.filename}」的分割 mask? 该图片将回到待标注状态, 训练/导出将不再含该 mask`,
+  }
+  const tip = hadAi
+    ? `确认去除「${img.filename}」的 AI 预标注? 该图片将回到待标注状态, 下次自动标注会重新预测`
+    : (tipMap[tt] || tipMap.classification)
   try {
     await ElMessageBox.confirm(tip, '去除标注', { type: 'warning' })
   } catch { return }
@@ -420,8 +424,16 @@ async function clearOneAnnotation(img: any) {
     const skip = r?.skipped || 0
     if (ok > 0) {
       const aiN = (r?.items || []).filter((x: any) => x.ai_cleared).length
+      const bboxN = r?.bbox_cleared_count || 0
+      const maskN = r?.mask_cleared_count || 0
+      // 根据 task_type 拼装更精确的提示
+      const detailParts: string[] = []
+      if (aiN > 0) detailParts.push(`含 AI 预标注 ${aiN} 张`)
+      if (bboxN > 0) detailParts.push(`清理 ${bboxN} 个检测框`)
+      if (maskN > 0) detailParts.push(`清理 ${maskN} 个分割 mask`)
+      const detailSuffix = detailParts.length > 0 ? `, ${detailParts.join(', ')}` : ''
       ElMessage.success(
-        `已去除标注 (${ok} 张${aiN > 0 ? `, 含 AI 预标注 ${aiN} 张` : ''}${skip > 0 ? `, 跳过 ${skip} 张` : ''})`
+        `已去除标注 (${ok} 张${detailSuffix}${skip > 0 ? `, 跳过 ${skip} 张` : ''})`
       )
     } else {
       ElMessage.info(`无需处理 (跳过 ${skip} 张)`)
@@ -433,7 +445,7 @@ async function clearOneAnnotation(img: any) {
   }
 }
 
-/** 批量去除标注 (勾选的多张) */
+/** 批量去除标注 (人工 + AI + 检测 + 分割 一起清) */
 async function batchClearAnnotation() {
   if (selectedIds.value.length === 0) {
     ElMessage.warning('请先选择图片')
@@ -442,7 +454,7 @@ async function batchClearAnnotation() {
   try {
     await ElMessageBox.confirm(
       `确认对选中的 ${selectedIds.value.length} 张图片执行"去除标注"?` +
-      `\n对人工标注和 AI 预标注都会生效, 无标注的图片会跳过; 历史会保留在审计日志`,
+      `\n分类图会清人工/AI 类别, 检测图会清所有检测框, 分割图会清 mask 物理文件; 无标注的图片会跳过; 历史会保留在审计日志`,
       '批量去除标注',
       { type: 'warning' }
     )
@@ -451,10 +463,17 @@ async function batchClearAnnotation() {
     const r: any = await annotationApi.clear(selectedIds.value)
     const ok = r?.cleared || 0
     const skip = (r?.skipped || 0) + (r?.missing || 0)
-    const aiN = (r?.items || []).filter((x: any) => x.ai_cleared).length
     if (ok > 0) {
+      const aiN = (r?.items || []).filter((x: any) => x.ai_cleared).length
+      const bboxN = r?.bbox_cleared_count || 0
+      const maskN = r?.mask_cleared_count || 0
+      const detailParts: string[] = []
+      if (aiN > 0) detailParts.push(`AI 预标注 ${aiN} 张`)
+      if (bboxN > 0) detailParts.push(`检测框 ${bboxN} 个`)
+      if (maskN > 0) detailParts.push(`分割 mask ${maskN} 个`)
+      const detailSuffix = detailParts.length > 0 ? `, 清理 ${detailParts.join(', ')}` : ''
       ElMessage.success(
-        `已去除标注 ${ok} 张${aiN > 0 ? `, 含 AI 预标注 ${aiN} 张` : ''}${skip > 0 ? `, 跳过 ${skip} 张` : ''}`
+        `已去除标注 ${ok} 张${detailSuffix}${skip > 0 ? `, 跳过 ${skip} 张` : ''}`
       )
     } else {
       ElMessage.info('所选图片均无标注, 跳过')
@@ -519,6 +538,28 @@ function statusLabel(s: string): string {
     human_corrected: '已修正',
     trained: '已训练'
   }[s] || s
+}
+
+/**
+ * 判断图片是否"有任何标注" (用于「去标」按钮可见性)
+ * v2.5.17 修复: 之前只看 image.status + final_label_id, 漏掉
+ *   - detection 图: image.status 可能停留在 pending/ai_labeled, 但已有 BBoxAnnotation 行
+ *   - segmentation 图: 同上, SegmentationMask 已存在但 image.status 没更新
+ * 现在 OR 上后端新返回的 bbox_count (检测) / has_mask (分割), 即使老数据
+ *   status 未更新, 只要 DB 有真实标注就显示「去标」按钮
+ */
+function hasAnnotation(img: any): boolean {
+  if (!img) return false
+  // 分类: 有人工或 AI 标注
+  if (img.final_label_id) return true
+  if (['human_confirmed', 'human_corrected', 'trained', 'ai_labeled'].includes(img.status)) {
+    return true
+  }
+  // 检测: 后端返回 bbox_count
+  if ((img.bbox_count || 0) > 0) return true
+  // 分割: 后端返回 has_mask
+  if (img.has_mask) return true
+  return false
 }
 
 onMounted(load)
@@ -831,7 +872,7 @@ watch(() => route.params.id, () => load())
               @click.stop="openViewer(img.id)"
             />
             <el-button
-              v-if="img.final_label_id || ['human_confirmed','human_corrected','trained','ai_labeled'].includes(img.status)"
+              v-if="hasAnnotation(img)"
               class="clear-btn"
               type="warning"
               :icon="RefreshLeft"

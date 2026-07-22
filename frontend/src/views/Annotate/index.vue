@@ -22,7 +22,6 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi } from '@/api'
-import { getTaskTypeMeta } from '@/utils/taskType'
 import { useDetectionAnnotate } from '@/composables/useDetectionAnnotate'
 import { useSegmentationAnnotate } from '@/composables/useSegmentationAnnotate'
 import { useAutoAnnotate } from '@/composables/useAutoAnnotate'
@@ -47,6 +46,10 @@ const image = ref<any>(null)
 const candidates = ref<{ label: string; confidence: number }[]>([])
 const startTs = ref(0)
 const datasets = ref<any[]>([])
+// v2.5.20: 任务类型筛选, 默认 'classification' (图片分类)
+// - 排序固定: 'classification' / 'detection' / 'segmentation' (3 项, 不含"全部")
+// - 切换筛选时, 若当前 datasetId 不在新筛选范围内, 自动切到第一个匹配项
+const taskTypeFilter = ref<string>('classification')
 const datasetId = ref<number | null>(null)
 const categories = ref<any[]>([])
 const stats = ref<any>(null)
@@ -137,6 +140,10 @@ onMounted(async () => {
     } else if (datasets.value.length > 0) {
       datasetId.value = datasets.value[0].id
     }
+    // v2.5.19: 初始化 taskTypeFilter, 跟当前 datasetId 的 task_type 保持一致
+    // - 避免出现"选了 detection 数据集, 但筛选框停在 all"的割裂感
+    // - 用户后续可手动切换筛选
+    syncTaskTypeFilterFromDataset()
     // 加载 base models (timm) + 项目 fine-tune models
     const ms: any = await autoAnnotateApi.models()
     models.value = ms?.models || []
@@ -145,6 +152,37 @@ onMounted(async () => {
     ElMessage.error('初始化失败: ' + (e?.response?.data?.detail || e?.message))
   }
 })
+
+/**
+ * v2.5.20: 任务类型筛选切换
+ * - 记录新筛选值
+ * - 检查当前 datasetId 是否在新的筛选范围内, 若不在则切到第一个匹配的 dataset
+ *   (切到 null 视作"当前筛选下没有可用数据集", UI 会显示空态)
+ * - 手动切换 dataset 时, 也会反向同步筛选 (syncTaskTypeFilterFromDataset)
+ */
+const onTaskTypeFilterChange = (v: string) => {
+  taskTypeFilter.value = v
+  const list = filteredDatasets.value
+  const currentInList = list.find((d: any) => d.id === datasetId.value)
+  if (!currentInList) {
+    // 当前 dataset 不在新筛选范围, 切到第一个或清空
+    datasetId.value = list.length > 0 ? list[0].id : null
+  }
+  // 若 datasetId 实际改了, watch(datasetId) 会自动重新加载, 不需要手动 loadNext
+}
+
+/**
+ * v2.5.19: 反向同步 — 根据当前 datasetId 自动设置 taskTypeFilter
+ * - 在初始化、用户手动改 dataset、URL 跳转时调用
+ * - 保持"筛选框 ↔ 当前数据集"语义一致
+ */
+const syncTaskTypeFilterFromDataset = () => {
+  if (!datasetId.value) return
+  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
+  if (ds?.task_type) {
+    taskTypeFilter.value = ds.task_type
+  }
+}
 
 /**
  * 拉取"指定 dataset 已激活的 fine-tune 模型"
@@ -207,8 +245,25 @@ watch(datasetId, async (v) => {
 const pendingCount = computed(() => {
   return (stats.value?.status_counts || {}).pending || 0
 })
+// v2.5.19: 按 taskTypeFilter 过滤后的数据集列表 (供子组件用)
+// - 与 AnnotationToolbar 内部的 filteredDatasets 逻辑一致
+// - 这里也提供一份是为了在 onTaskTypeFilterChange 等地方能直接读取, 避免重复计算
+const filteredDatasets = computed(() => {
+  const f = taskTypeFilter.value
+  if (!f || f === 'all') return datasets.value
+  return datasets.value.filter((d: any) => (d.task_type || 'classification') === f)
+})
 const aiLabeledCount = computed(() => {
   return (stats.value?.status_counts || {}).ai_labeled || 0
+})
+// v2.5.15: 已确认 / 已修正人工标注数 (status_counts 字段)
+// - 用于顶部"已人工标注"统计卡, 与 DatasetDetail 口径保持一致
+// - 这两个值在 detection.py/segmentation.py/annotation.py 保存时由后端写入 image.status
+const humanConfirmedCount = computed(() => {
+  return (stats.value?.status_counts || {}).human_confirmed || 0
+})
+const humanCorrectedCount = computed(() => {
+  return (stats.value?.status_counts || {}).human_corrected || 0
 })
 // 类别下拉排序 (按 id 升序)
 const sortedCategories = computed(() => {
@@ -491,8 +546,8 @@ const autoLabelAll = () => {
     <AnnotationToolbar
       :datasets="datasets"
       :dataset-id="datasetId"
+      :task-type-filter="taskTypeFilter"
       :current-task-type-raw="currentTaskTypeRaw"
-      :current-task-meta="getTaskTypeMeta(currentTaskTypeRaw)"
       :model-name="modelName"
       :threshold="threshold"
       :iou-threshold="iouThreshold"
@@ -505,9 +560,12 @@ const autoLabelAll = () => {
       :stats="stats"
       :pending-count="pendingCount"
       :ai-labeled-count="aiLabeledCount"
+      :human-confirmed-count="humanConfirmedCount"
+      :human-corrected-count="humanCorrectedCount"
       :session-stats="sessionStats"
       :auto-labeling="autoLabeling"
       @dataset-change="(v: number) => datasetId = v"
+      @task-type-filter-change="onTaskTypeFilterChange"
       @threshold-change="(v: number) => threshold = v"
       @iou-threshold-change="(v: number) => iouThreshold = v"
       @detection-model-change="(v: string) => detectionModelName = v"

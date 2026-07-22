@@ -2,12 +2,19 @@
 Annotation API: Human Correction
 ================================
 核心创新点接口: 人工确认 / 修正 AI 预标注
+
+v2.5.16 重大修复 (DatasetDetail 去标):
+- /clear 接口原本只清 final_label_id (分类) + ai_prediction + image.status
+- 检测 (BBoxAnnotation 表) / 分割 (SegmentationMask 表) 数据完全没动
+- 后果: DatasetDetail 的"去标"按钮对检测/分割是 noop, 训练/导出仍带旧数据
+- 修复: 按 img.task_type 分派, 分类清 final_label, 检测删 bbox, 分割删 mask + 物理文件
 """
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, delete
 from pydantic import BaseModel
 
 from app.database import get_db
@@ -16,6 +23,10 @@ from app.models.dataset import Dataset
 from app.models.category import Category
 from app.models.annotation_log import AnnotationLog
 from app.models.user import User
+# v2.5.16: 引入检测 / 分割的 ORM 模型, 用于按 task_type 清理
+from app.models.bbox_annotation import BBoxAnnotation
+from app.models.segmentation_mask import SegmentationMask
+from app.services.storage_service import storage_service
 from app.core.deps import get_current_user
 
 router = APIRouter()
@@ -104,13 +115,16 @@ async def clear_annotations(
 ):
     """
     批量去除图片的人工标注 (final_label_id) 和 AI 预标注 (ai_prediction)
+    v2.5.16: 同时清理检测 (BBoxAnnotation) 和 分割 (SegmentationMask) 数据 + 物理文件
+
     - 支持单张 [id] 或多张 [id, id, ...]
-    - 对以下任一情况都会处理:
-        * status ∈ {human_confirmed, human_corrected, trained}: 清 final_label_id + 审计 + 扣 annotated_count
-        * status = "ai_labeled" 且有 ai_prediction: 清 ai_prediction, 状态回 pending
-        * final_label_id 存在但状态异常: 保守按人工处理, 清 final_label_id
-    - 写一条 annotation_log action="reject" 留痕
-    - 对应 Category.sample_count - 1
+    - 按 img.task_type 分派清理:
+        * classification: 清 final_label_id / ai_prediction / status -> pending
+        * detection:      删 BBoxAnnotation 行 (按 image_id)
+        * segmentation:   删 SegmentationMask 行 + 物理 mask 文件
+    - 任一标注存在就处理: final_label_id / status in human_*/trained / ai_prediction / BBoxAnnotation / SegmentationMask
+    - 写一条 annotation_log action="reject" 留痕 (分类场景)
+    - 对应 Category.sample_count - 1 (分类场景)
     - 不会真的删除图片
     """
     ids = [int(x) for x in (req.image_ids or []) if x is not None]
@@ -125,8 +139,32 @@ async def clear_annotations(
     if not images:
         return {"success": True, "cleared": 0, "skipped": len(ids), "items": []}
 
+    # v2.5.16: 预查询检测/分割数据, 用于"实际有数据"的判断
+    # - 检测: 统计每张图的 bbox 行数 {image_id: count}
+    # - 分割: 取出每张图的 mask 元信息 {image_id: SegmentationMask}
+    # 一次 SQL 拉全部, 避免循环内 N+1
+    bbox_count_by_img: dict = {}
+    mask_by_img: dict = {}
+    detection_ids = [img.id for img in images if img.task_type == "detection"]
+    segmentation_ids = [img.id for img in images if img.task_type == "segmentation"]
+    if detection_ids:
+        r = await db.execute(
+            select(BBoxAnnotation.image_id, func.count(BBoxAnnotation.id))
+            .where(BBoxAnnotation.image_id.in_(detection_ids))
+            .group_by(BBoxAnnotation.image_id)
+        )
+        bbox_count_by_img = {row[0]: int(row[1]) for row in r.all()}
+    if segmentation_ids:
+        r = await db.execute(
+            select(SegmentationMask).where(SegmentationMask.image_id.in_(segmentation_ids))
+        )
+        for m in r.scalars().all():
+            mask_by_img[m.image_id] = m
+
     cleared = 0
     skipped = 0
+    bbox_cleared_total = 0  # v2.5.16: 总共删的 bbox 行数
+    mask_cleared_total = 0  # v2.5.16: 总共删的 mask 行数
     details: List[dict] = []
     # 按 dataset / category 聚合, 减少 SQL 次数
     annotated_delta_by_ds: dict = {}
@@ -136,8 +174,13 @@ async def clear_annotations(
         had_label = img.final_label_id is not None
         had_human = img.status in ("human_confirmed", "human_corrected", "trained")
         had_ai = img.status == "ai_labeled" and img.ai_prediction is not None
+        # v2.5.16: 检测/分割的"实际有标注"判定
+        bbox_count = bbox_count_by_img.get(img.id, 0)
+        had_bbox = bbox_count > 0
+        mask_obj = mask_by_img.get(img.id)
+        had_mask = mask_obj is not None
 
-        if not had_label and not had_human and not had_ai:
+        if not (had_label or had_human or had_ai or had_bbox or had_mask):
             skipped += 1
             details.append({
                 "image_id": img.id, "filename": img.filename,
@@ -148,34 +191,56 @@ async def clear_annotations(
         old_label_id = img.final_label_id
         old_ai_top1 = (img.ai_prediction or {}).get("top1") if had_ai else None
 
-        # 清空人工标注
+        # ---- 按 task_type 分派清理 ----
+
+        # 1) 分类字段: 清 final_label_id + ai_prediction + status
         img.final_label_id = None
         img.annotated_by = None
         img.annotated_at = None
-
-        # 清空 AI 预标注
         if had_ai:
             img.ai_prediction = None
-            img.status = "pending"
-        elif had_human:
-            img.status = "pending"
-        else:
-            # 仅有 final_label_id 但状态异常 (例如数据库被手工改过), 保守回 pending
-            img.status = "pending"
+        img.status = "pending"
 
-        # 写审计
-        log = AnnotationLog(
-            image_id=img.id,
-            user_id=current_user.id,
-            action="reject",
-            from_label_id=old_label_id,
-            to_label_id=None,
-            time_spent_ms=0,
-        )
-        db.add(log)
+        # 2) 检测: 删 BBoxAnnotation 行
+        if had_bbox:
+            await db.execute(
+                delete(BBoxAnnotation).where(BBoxAnnotation.image_id == img.id)
+            )
+            bbox_cleared_total += bbox_count
 
-        # 聚合计数变化
-        if had_human:
+        # 3) 分割: 删 SegmentationMask 行 + 物理 PNG 文件
+        if had_mask:
+            # 先尝试删物理文件 (即使失败也不阻塞 SQL 清理, 只记录 warning)
+            try:
+                abs_path = Path(storage_service.base_dir) / mask_obj.mask_path
+                if abs_path.is_file():
+                    abs_path.unlink()
+            except Exception as e:
+                # 文件删除失败不阻塞主流程, 记录到 details 供排查
+                details.append({
+                    "image_id": img.id, "filename": img.filename,
+                    "result": "warning",
+                    "reason": f"物理 mask 文件删除失败: {e}"
+                })
+            await db.execute(
+                delete(SegmentationMask).where(SegmentationMask.image_id == img.id)
+            )
+            mask_cleared_total += 1
+
+        # 写审计 (仅分类场景, 检测/分割的审计由它们各自的 log 表承担, 此处保留向后兼容)
+        if had_label or had_human or had_ai:
+            log = AnnotationLog(
+                image_id=img.id,
+                user_id=current_user.id,
+                action="reject",
+                from_label_id=old_label_id,
+                to_label_id=None,
+                time_spent_ms=0,
+            )
+            db.add(log)
+
+        # 聚合计数变化 (分类维度)
+        if had_human or had_label:
             annotated_delta_by_ds[img.dataset_id] = (
                 annotated_delta_by_ds.get(img.dataset_id, 0) + 1
             )
@@ -188,14 +253,18 @@ async def clear_annotations(
         details.append({
             "image_id": img.id,
             "filename": img.filename,
+            "task_type": img.task_type,
             "result": "cleared",
             "old_label_id": old_label_id,
             "had_ai": had_ai,
             "ai_cleared": had_ai,
             "old_ai_top1": old_ai_top1,
+            # v2.5.16: 返回每张图实际清理量, 方便前端 / 审计
+            "bbox_cleared": bbox_count,
+            "mask_cleared": 1 if had_mask else 0,
         })
 
-    # 2) 扣减 category.sample_count (下限 0)
+    # 2) 扣减 category.sample_count (下限 0) - 分类维度
     for cat_id, delta in sample_delta_by_cat.items():
         from sqlalchemy import case as sa_case
         new_cnt = sa_case(
@@ -206,7 +275,8 @@ async def clear_annotations(
             update(Category).where(Category.id == cat_id).values(sample_count=new_cnt)
         )
 
-    # 3) 扣减 dataset.annotated_count (下限 0)
+    # 3) 扣减 dataset.annotated_count (下限 0) - 分类维度
+    # 检测/分割的 annotated_count 维护在 detection.py/segmentation.py 各自的逻辑里
     for ds_id, delta in annotated_delta_by_ds.items():
         from sqlalchemy import case as sa_case
         new_cnt = sa_case(
@@ -224,6 +294,9 @@ async def clear_annotations(
         "cleared": cleared,
         "skipped": skipped,
         "missing": len(ids) - len(images),
+        # v2.5.16: 新增按 task_type 维度的清理计数
+        "bbox_cleared_count": bbox_cleared_total,
+        "mask_cleared_count": mask_cleared_total,
         "items": details,
     }
 
