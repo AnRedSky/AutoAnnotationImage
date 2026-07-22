@@ -272,17 +272,69 @@ async def list_categories(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    列出数据集的所有类别, 同时返回每个类别的**实时**统计信息
+    (基于 Image 表聚合, 不依赖 Category.sample_count 缓存字段, 避免 AI 预标注后字段不更新)
+
+    每个 category 额外返回:
+      - human_labeled_count: 人工已标 (status ∈ human_confirmed/human_corrected/trained 且 final_label_id = cat.id)
+      - ai_labeled_count:    AI 已标 (status = ai_labeled 且 final_label_id = cat.id)
+      - ai_candidate_count:  AI 候选 (ai_prediction.top1 = cat.name 但 final_label_id 还未落)
+      - sample_count:        上述前两者之和 (与原字段语义保持一致, 实时值)
+    """
+    from app.models.image import Image
+
+    # 1) 取本数据集全部 category
     result = await db.execute(
         select(Category).where(Category.dataset_id == dataset_id).order_by(Category.sort_order)
     )
     cats = result.scalars().all()
+    if not cats:
+        return {"items": []}
+
+    name_to_id = {c.name: c.id for c in cats}
+
+    # 2) 一次性聚合: 拉出本数据集所有"有 ai_prediction 或已 final_label"的图片,
+    #    在 Python 端分桶聚合 (避免多表 JOIN + JSON 提取, 跨 SQLite/MySQL 兼容)
+    stmt = select(
+        Image.final_label_id,
+        Image.status,
+        Image.ai_prediction,
+    ).where(
+        Image.dataset_id == dataset_id,
+        # 只筛有 final_label 或有 ai_prediction 的图, 减少空扫
+        (Image.final_label_id.isnot(None)) | (Image.ai_prediction.isnot(None)),
+    )
+    rows = (await db.execute(stmt)).all()
+
+    # 初始化桶
+    stats: dict = {c.id: {"human": 0, "ai": 0, "candidate": 0} for c in cats}
+    for final_label_id, status, ai_pred in rows:
+        # 1) 已在某 category 上的 (按 final_label_id 分桶)
+        if final_label_id is not None and final_label_id in stats:
+            if status in ("human_confirmed", "human_corrected", "trained"):
+                stats[final_label_id]["human"] += 1
+            elif status == "ai_labeled":
+                stats[final_label_id]["ai"] += 1
+            # 其它状态不会带 final_label_id, 这里不需考虑
+
+        # 2) AI 候选: final_label_id 为空, 但 ai_prediction.top1 命中本数据集某个 category 名
+        if final_label_id is None and ai_pred:
+            top1 = (ai_pred or {}).get("top1") if isinstance(ai_pred, dict) else None
+            if top1 and top1 in name_to_id:
+                stats[name_to_id[top1]]["candidate"] += 1
+
     return {
         "items": [
             {
                 "id": c.id,
                 "name": c.name,
                 "color": c.color,
-                "sample_count": c.sample_count,
+                # 实时计算, 不再依赖 Category.sample_count 缓存字段
+                "sample_count": stats[c.id]["human"] + stats[c.id]["ai"],
+                "human_labeled_count": stats[c.id]["human"],
+                "ai_labeled_count": stats[c.id]["ai"],
+                "ai_candidate_count": stats[c.id]["candidate"],
             }
             for c in cats
         ]
