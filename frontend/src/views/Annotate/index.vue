@@ -88,7 +88,15 @@ const {
   onPopoverVisibleChange,
   onDetTargetCategoryChange,
   removeBboxByIndex,
-} = useDetectionAnnotate({ image, detAnnotRef, annotatorSaving })
+} = useDetectionAnnotate({
+  image,
+  detAnnotRef,
+  annotatorSaving,
+  // v2.5.15: 检测保存成功后立刻重拉 stats
+  // - 后端 save_bbox 会把 image.status 提升到 human_confirmed
+  // - 前端需主动刷新才能让"待标注"数字减少
+  onSaved: refreshStats,
+})
 
 // ============== 分割任务 composable ==============
 const {
@@ -104,7 +112,15 @@ const {
   onSegSave,
   onSegClear,
   onSegDirtyChange,
-} = useSegmentationAnnotate({ image, segAnnotRef, annotatorSaving })
+} = useSegmentationAnnotate({
+  image,
+  segAnnotRef,
+  annotatorSaving,
+  // v2.5.15: 分割保存成功后立刻重拉 stats
+  // - 后端 upload_mask 会把 image.status 提升到 human_confirmed
+  // - 前端需主动刷新才能让"待标注"数字减少
+  onSaved: refreshStats,
+})
 
 // ============== 浏览历史栈 (按访问顺序记录看过的 image id) ==============
 const historyIds = ref<number[]>([])

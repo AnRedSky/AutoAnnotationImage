@@ -131,6 +131,12 @@ async def save_bbox(
         annotated_by=current_user.id,
     )
     db.add(bb)
+    # v2.5.15: 单条 BBox 保存后, 把 image.status 提升到 human_confirmed
+    # - 之前只 insert bbox, image.status 一直停留在 pending/ai_labeled
+    # - 导致前端 stats 的"待标注"数字永远不减
+    # - 仅当原状态是 pending/ai_labeled 时才升级, 不降级 (保留 human_corrected 语义)
+    if img.status in ('pending', 'ai_labeled'):
+        img.status = 'human_confirmed'
     await db.commit()
     await db.refresh(bb)
     return bb
