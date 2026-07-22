@@ -15,6 +15,11 @@ dist/
 *.log
 .npm
 
+# Frontend 本地环境变量覆盖（仅 .example / .development / .production 提交到 git）
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+
 # IDE
 .vscode/
 .idea/

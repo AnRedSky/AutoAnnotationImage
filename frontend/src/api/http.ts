@@ -1,8 +1,11 @@
 import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 
+// API 基础路径：优先使用 .env.* 中配置的 VITE_API_BASE_URL，未配置时回退到 '/api'（依赖 Vite proxy 转发）
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || '/api'
+
 const http: AxiosInstance = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE_URL,
   // 默认 30s；上传/训练/AI 推理这类长操作可单独传 timeout 覆盖
   timeout: 30000
 })
