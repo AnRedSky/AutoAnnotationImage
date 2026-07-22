@@ -7,7 +7,7 @@
   - 数据集选择 + 任务类型徽章 (popover 详解)
   - 模型选择 (fine-tune / 基础模型)
   - 置信度阈值 + IoU 阈值 + AI 模型
-  - 启动 AI 预标注 / 自动 AI 预标注 按钮
+  - 启动 AI 预标注 按钮 (与其它控件同一行, 末尾 + 当前激活模型 tag)
 
   Props (页面私有子组件, 接收父组件状态):
     datasets, datasetId, currentTaskTypeRaw
@@ -23,7 +23,7 @@
     threshold-change, iou-threshold-change
     detection-model-change, selected-model-change
     model-name-change, use-finetune-change
-    auto-ai-start, ai-start
+    ai-start
 -->
 <template>
   <div>
@@ -193,21 +193,18 @@
             <el-option v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m" />
           </el-select>
         </el-form-item>
+        <!-- 启动 AI 预标注 (与上方控件同一行) + 当前激活模型徽章 -->
+        <el-form-item>
+          <el-button
+            type="primary" :icon="MagicStick"
+            :loading="autoLabeling"
+            @click="emit('ai-start')"
+          >启动 AI 预标注</el-button>
+          <el-tag v-if="activeModel" type="success" effect="plain" size="small" style="margin-left: 8px;">
+            当前激活: {{ activeModel.name }}
+          </el-tag>
+        </el-form-item>
       </el-form>
-      <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
-        <el-button
-          type="primary" :icon="MagicStick"
-          :loading="autoLabeling"
-          @click="emit('ai-start')"
-        >启动 AI 预标注</el-button>
-        <el-button
-          :icon="Lightning"
-          @click="emit('auto-ai-start')"
-        >自动 AI 预标注</el-button>
-        <el-tag v-if="activeModel" type="success" effect="plain" size="small">
-          当前激活: {{ activeModel.name }}
-        </el-tag>
-      </div>
     </el-card>
   </div>
 </template>
@@ -269,7 +266,6 @@ const emit = defineEmits<{
   (e: 'model-name-change', v: string): void
   (e: 'use-finetune-change', v: boolean): void
   (e: 'ai-start'): void
-  (e: 'auto-ai-start'): void
 }>()
 
 /**

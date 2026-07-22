@@ -496,14 +496,6 @@ const viewDataset = () => {
 }
 
 const findCategory = (label: string) => categories.value.find((c) => c.name === label)
-
-/**
- * 「自动 AI 预标注」按钮 (toolbar 触发, 全量队列)
- * v2.5.7: 暂未实现 (需后端支持), 提示去训练页
- */
-const autoLabelAll = () => {
-  ElMessage.info('自动 AI 预标注功能开发中, 请先在训练页触发')
-}
 </script>
 
 <template>
@@ -573,7 +565,6 @@ const autoLabelAll = () => {
       @model-name-change="(v: string) => modelName = v"
       @use-finetune-change="(v: boolean) => useFinetune = v"
       @ai-start="onStartAutoLabelClick(currentTaskTypeRaw)"
-      @auto-ai-start="autoLabelAll"
     />
 
     <!-- 主体: 左侧操作指导 + 中间画布 + 右侧任务面板 (v2.5.9: 由 2 栏扩为 3 栏)
