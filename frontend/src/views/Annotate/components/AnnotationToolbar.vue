@@ -114,9 +114,27 @@
             </template>
           </el-select>
         </el-form-item>
-        <!-- 分类任务: fine-tune 切换 + 模型选择 -->
-        <el-form-item v-if="currentTaskTypeRaw === 'classification'">
-          <div class="model-select-slot">
+        <el-form-item label="置信度阈值">
+          <el-slider
+            :model-value="threshold"
+            @update:model-value="(v: number) => emit('threshold-change', v)"
+            :min="0.1" :max="1.0" :step="0.05" style="width: 160px;"
+            :format-tooltip="(v: number) => `${(v * 100).toFixed(0)}%`"
+          />
+        </el-form-item>
+        <!-- 任务专属控件 (v2.5.22: 统一风格 — 都有 label / 控件宽度 160px / 位置对齐)
+             · 分类: fine-tune 开关 + 模型下拉 (合并到 1 个 form-item)
+             · 检测: IoU 阈值滑块 + AI 模型下拉 (2 个 form-item)
+             · 分割: 无任务专属参数 (保持空白)
+             · 之前问题: 分类的"模型选择"无 label, 且与"使用项目训练模型"开关隔着置信度阈值, 视觉跳 -->
+        <template v-if="currentTaskTypeRaw === 'classification'">
+          <el-form-item label="模型">
+            <el-switch
+              :model-value="useFinetune"
+              @update:model-value="(v: boolean) => emit('use-finetune-change', v)"
+              active-text="项目模型" inactive-text="基础模型"
+              inline-prompt style="--el-switch-on-color: #67c23a; margin-right: 8px;"
+            />
             <el-tooltip
               v-if="useFinetune"
               :content="activeModel ? '当前激活: ' + activeModel.name : '当前没有激活的模型'"
@@ -124,9 +142,8 @@
               <el-select
                 :model-value="selectedModelId"
                 @update:model-value="(v: number | null) => emit('selected-model-change', v)"
-                class="app-select"
-                :fit-input-width="false"
-                popper-class="app-select-dropdown"
+                class="app-select" style="width: 160px;"
+                :fit-input-width="false" popper-class="app-select-dropdown"
                 :disabled="finetuneModels.length === 0"
                 :placeholder="finetuneModels.length === 0 ? '选择 fine-tune 模型 (仅本数据集已激活)' : '选择 fine-tune 模型'"
               >
@@ -147,7 +164,8 @@
               <el-select
                 :model-value="modelName"
                 @update:model-value="(v: string) => emit('model-name-change', v)"
-                class="app-select" :fit-input-width="false" popper-class="app-select-dropdown"
+                class="app-select" style="width: 160px;"
+                :fit-input-width="false" popper-class="app-select-dropdown"
               >
                 <el-option v-for="m in models" :key="m.name" :label="`${m.name} (${m.params})`" :value="m.name">
                   <div style="display: flex; align-items: center; gap: 6px;">
@@ -158,41 +176,28 @@
                 </el-option>
               </el-select>
             </el-tooltip>
-          </div>
-        </el-form-item>
-        <el-form-item label="置信度阈值">
-          <el-slider
-            :model-value="threshold"
-            @update:model-value="(v: number) => emit('threshold-change', v)"
-            :min="0.1" :max="1.0" :step="0.05" style="width: 160px;"
-            :format-tooltip="(v: number) => `${(v * 100).toFixed(0)}%`"
-          />
-        </el-form-item>
-        <el-form-item v-if="currentTaskTypeRaw === 'classification'" label="是否使用项目训练模型">
-          <el-switch
-            :model-value="useFinetune"
-            @update:model-value="(v: boolean) => emit('use-finetune-change', v)"
-            active-text="是" inactive-text="否"
-            inline-prompt style="--el-switch-on-color: #67c23a;"
-          />
-        </el-form-item>
-        <el-form-item v-if="currentTaskTypeRaw === 'detection'" label="IoU 阈值 (NMS)">
-          <el-slider
-            :model-value="iouThreshold"
-            @update:model-value="(v: number) => emit('iou-threshold-change', v)"
-            :min="0.1" :max="0.95" :step="0.05" style="width: 160px;"
-            :format-tooltip="(v: number) => v.toFixed(2)"
-          />
-        </el-form-item>
-        <el-form-item v-if="currentTaskTypeRaw === 'detection'" label="AI 模型">
-          <el-select
-            :model-value="detectionModelName"
-            @update:model-value="(v: string) => emit('detection-model-change', v)"
-            placeholder="选择 YOLO 模型" size="small" style="width: 160px;"
-          >
-            <el-option v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m" />
-          </el-select>
-        </el-form-item>
+          </el-form-item>
+        </template>
+        <template v-else-if="currentTaskTypeRaw === 'detection'">
+          <el-form-item label="IoU 阈值 (NMS)">
+            <el-slider
+              :model-value="iouThreshold"
+              @update:model-value="(v: number) => emit('iou-threshold-change', v)"
+              :min="0.1" :max="0.95" :step="0.05" style="width: 160px;"
+              :format-tooltip="(v: number) => v.toFixed(2)"
+            />
+          </el-form-item>
+          <el-form-item label="AI 模型">
+            <el-select
+              :model-value="detectionModelName"
+              @update:model-value="(v: string) => emit('detection-model-change', v)"
+              placeholder="选择 YOLO 模型" class="app-select" style="width: 160px;"
+              :fit-input-width="false" popper-class="app-select-dropdown"
+            >
+              <el-option v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m" />
+            </el-select>
+          </el-form-item>
+        </template>
         <!-- 启动 AI 预标注 (与上方控件同一行) + 当前激活模型徽章
              v2.5.21: 分类任务隐藏"当前激活"tag
              · 分类任务已有"是否使用项目训练模型"开关 + fine-tune/基础模型下拉,
@@ -300,5 +305,4 @@ const filteredDatasets = computed(() => {
   margin: 0 4px;
   color: #c0c4cc;
 }
-.model-select-slot { display: flex; align-items: center; gap: 8px; }
 </style>
