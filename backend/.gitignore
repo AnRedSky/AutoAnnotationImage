@@ -26,12 +26,27 @@ uv.lock
 # 测试
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 .tox/
 
 # 日志
 *.log
 logs/
+# 临时文本日志 (兜底, *.log 已覆盖, 这里显式声明)
+backend_log.txt
+
+# Celery 调度文件
+celerybeat-schedule
+celerybeat-schedule.db
+
+# 异步任务进程管理
+worker.pid
+beat.pid
+
+# 覆盖率 / 测试报告
+coverage.xml
+junit*.xml
 
 # 数据库
 *.db

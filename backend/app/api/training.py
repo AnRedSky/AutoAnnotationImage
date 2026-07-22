@@ -61,7 +61,7 @@ async def get_user_optional_for_query(
 
 
 @router.post("/start", response_model=TrainStartResponse)
-def start_training(
+async def start_training(
     dataset_id: int,
     base_model: str = "efficientnet_b0",
     model_name: str = "",
@@ -82,6 +82,12 @@ def start_training(
     pretrained_model_path: 增量训练 (再训练) 时, 传入 .pth 文件路径作为模型起点
     - 空字符串 (默认): 从头微调 (timm ImageNet 预训练权重)
     - 已有路径: 加载该 .pth 的 state_dict (fine-tune 旧模型)
+
+    v2.5.15 P0-4 改造: def → async def
+    - 旧: FastAPI 用 threadpool 跑同步路由, 内部再用 _run_async 嵌套 event loop
+      在高并发下会触发 "RuntimeError: Event loop is closed" 等不稳定问题
+    - 新: async def 直接 await DB 操作, 与 start_existing_training_job 模式一致
+    - socket.create_connection 用 asyncio.to_thread 包一下, 避免阻塞 event loop
     """
     # model_name 兜底: 前端为空时, 自动生成
     if not model_name or not model_name.strip():
@@ -89,12 +95,12 @@ def start_training(
         model_name = f"{base_model}_v1_{ts}"
 
     # 预检: Redis broker 是否可用? 避免 .delay() 长时间阻塞
+    # v2.5.15: 用 asyncio.to_thread 包装同步 socket, 避免阻塞 event loop
     import socket
     broker_host = settings.REDIS_HOST
     broker_port = settings.REDIS_PORT
     try:
-        s = socket.create_connection((broker_host, broker_port), timeout=2.0)
-        s.close()
+        await asyncio.to_thread(_check_broker, broker_host, broker_port)
     except Exception as e:
         raise HTTPException(
             status_code=503,
@@ -117,46 +123,38 @@ def start_training(
     from sqlalchemy.dialects.mysql import insert as mysql_insert
     from app.database import AsyncSessionLocal
     from app.models.training_job import TrainingJob
-    from app.workers.tasks import _run_async
     import uuid
 
     # 预生成 task_id, 格式与 Celery 一致 (32 位 hex 字符串)
     celery_task_id = uuid.uuid4().hex
 
-    def _create_pending_job() -> int:
-        """预创建 PENDING 行 (mode='new')
-
-        start_training 是 def (同步函数, FastAPI 用 threadpool 跑),
-        所以这里用 def + _run_async 在独立 event loop 里跑 await.
-        (与 start_existing_training_job 是 async def 不同, 后者直接 await)
-        """
-        async def _do():
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    mysql_insert(TrainingJob).values(
-                        celery_task_id=celery_task_id,
-                        user_id=current_user.id,
-                        dataset_id=dataset_id,
-                        base_model=base_model,
-                        model_name=model_name,
-                        epochs=epochs,
-                        batch_size=batch_size,
-                        learning_rate=learning_rate,
-                        state="PENDING",
-                        progress=0.0,
-                        message="等待 worker 启动...",
-                        created_at=datetime.utcnow(),  # 入库时间, 区别于 started_at (worker 接手)
-                        started_at=None,                 # PENDING 阶段不预设, 等 worker 接手
-                        finished_at=None,
-                    )
+    async def _create_pending_job() -> int:
+        """v2.5.15 P0-4: async def, 直接 await, 不嵌套 _run_async"""
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                mysql_insert(TrainingJob).values(
+                    celery_task_id=celery_task_id,
+                    user_id=current_user.id,
+                    dataset_id=dataset_id,
+                    base_model=base_model,
+                    model_name=model_name,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    state="PENDING",
+                    progress=0.0,
+                    message="等待 worker 启动...",
+                    created_at=datetime.utcnow(),  # 入库时间, 区别于 started_at (worker 接手)
+                    started_at=None,                 # PENDING 阶段不预设, 等 worker 接手
+                    finished_at=None,
                 )
-                await db.commit()
-                # 直接用 inserted_primary_key 拿 id (并发安全)
-                pk = result.inserted_primary_key
-                return pk[0] if pk else None
-        return _run_async(_do())
+            )
+            await db.commit()
+            # 直接用 inserted_primary_key 拿 id (并发安全)
+            pk = result.inserted_primary_key
+            return pk[0] if pk else None
 
-    job_id = _create_pending_job()
+    job_id = await _create_pending_job()
 
     try:
         # 用 .apply_async(task_id=...) 强制 Celery 用我们预生成的 ID 入队
@@ -176,18 +174,16 @@ def start_training(
         )
     except Exception as e:
         # 入队失败, 回滚预创建的行, 避免脏数据
-        def _rollback_pending() -> None:
-            """start_training 是 def 同步函数, 用 _run_async 跑 await"""
-            async def _do():
-                async with AsyncSessionLocal() as db:
-                    from sqlalchemy import delete
-                    await db.execute(
-                        delete(TrainingJob).where(TrainingJob.id == job_id)
-                    )
-                    await db.commit()
-            return _run_async(_do())
+        async def _rollback_pending() -> None:
+            """v2.5.15 P0-4: async def + await"""
+            from sqlalchemy import delete
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    delete(TrainingJob).where(TrainingJob.id == job_id)
+                )
+                await db.commit()
         try:
-            _rollback_pending()
+            await _rollback_pending()
         except Exception:
             pass  # 兜底失败也无所谓, 留条脏数据后续清理
         err_msg = str(e)[:200]
@@ -208,6 +204,15 @@ def start_training(
         state="PENDING",
         message="Training task submitted",
     )
+
+
+def _check_broker(host: str, port: int) -> None:
+    """v2.5.15 P0-4: 同步的 broker TCP 探测, 由 asyncio.to_thread 调用
+    提到模块顶层, 方便测试单独覆盖
+    """
+    import socket
+    s = socket.create_connection((host, port), timeout=2.0)
+    s.close()
 
 
 @router.get("/progress/{task_id}", response_model=TrainStatusResponse)

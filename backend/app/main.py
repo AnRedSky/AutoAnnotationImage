@@ -52,11 +52,33 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# 跨域配置（从 CORS_ORIGINS 读取）
+# 跨域配置（v2.5.15 P1-3: 含生产校验 + 互斥自动降级）
+_cors_origins = settings.CORS_ORIGINS_LIST
+_cors_allow_credentials = settings.CORS_ALLOW_CREDENTIALS
+
+# 生产环境: '*' 是危险配置, 启动直接抛错
+if settings.APP_ENV == "production" and "*" in _cors_origins:
+    raise RuntimeError(
+        "[CORS] CORS_ORIGINS cannot be '*' in production. "
+        "Please set explicit origins via CORS_ORIGINS env var "
+        "(comma-separated, e.g. 'https://app.example.com,https://admin.example.com')."
+    )
+
+# 浏览器规范: '*' + credentials=True 互斥, 开发环境自动降级
+if "*" in _cors_origins and _cors_allow_credentials:
+    import warnings
+    warnings.warn(
+        "[CORS] '*' origin with credentials=True is invalid per CORS spec. "
+        "Auto-downgrading credentials to False. "
+        "Set explicit origins to use credentials.",
+        stacklevel=2,
+    )
+    _cors_allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS_LIST,
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

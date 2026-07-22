@@ -7,6 +7,7 @@ All configs from environment variables, with sensible defaults for dev.
 import os
 from pathlib import Path
 from typing import List, Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -90,6 +91,10 @@ class Settings(BaseSettings):
 
     # ===== CORS =====
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "*")  # 逗号分隔或 *
+    # v2.5.15 P1-3: 显式化 CORS credentials 配置
+    # 旧: main.py 写死 True, 与 CORS_ORIGINS="*" 互斥
+    # 新: 独立配置 + validator 检查
+    CORS_ALLOW_CREDENTIALS: bool = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
 
     # env_file 用绝对路径：避免 uv run 在项目根目录时 cwd != backend 找不到 .env
     # 文件固定位于 backend/.env（与本文件同级的上一级）
@@ -106,12 +111,51 @@ class Settings(BaseSettings):
 
     @property
     def EFFECTIVE_JWT_SECRET(self) -> str:
-        """JWT 签名密钥，兼容 SECRET_KEY / JWT_SECRET 两种命名"""
+        """JWT 签名密钥，兼容 SECRET_KEY / JWT_SECRET 两种命名
+        v2.5.15 P1-1: 硬编码兜底字符串保留作 attribute, 但生产环境
+        _validate_production_secrets 会先 fail 永远走不到. 开发环境
+        .env 配了 SECRET_KEY 也不会用到这里.
+        """
         return (
             self.SECRET_KEY
             or self.JWT_SECRET
             or "change-me-to-a-random-string-min-32-chars"
         )
+
+    # v2.5.15 P1-1 + P1-2: 生产环境 fail-fast 校验
+    @model_validator(mode="after")
+    def _validate_production_secrets(self) -> "Settings":
+        """生产环境强校验, 开发环境 WARN 不阻塞
+
+        - SECRET_KEY (or JWT_SECRET) 必须设置
+        - MYSQL_PASSWORD 不能用默认值 (root123/root/空)
+        - APP_ENV=production 任意一条违反则 ValueError, 启动失败
+        - APP_ENV=development 仅 WARN, 不影响开发体验
+        """
+        issues: list[str] = []
+        if not (self.SECRET_KEY or self.JWT_SECRET):
+            issues.append(
+                "SECRET_KEY (or JWT_SECRET) is not set. "
+                "JWT tokens can be forged."
+            )
+        # 拦截不安全的默认密码
+        _insecure = ("root123", "", "password", "root")
+        if self.MYSQL_PASSWORD in _insecure:
+            issues.append(
+                f"MYSQL_PASSWORD uses default/insecure value: {self.MYSQL_PASSWORD!r}"
+            )
+
+        if not issues:
+            return self
+
+        msg = "[CONFIG SECURITY] " + " | ".join(issues)
+        if self.APP_ENV == "production":
+            # 生产环境直接抛错, 阻止启动
+            raise ValueError(msg)
+        # 开发/测试环境: WARN 提示, 不阻塞
+        import warnings
+        warnings.warn(msg, stacklevel=2)
+        return self
 
     @property
     def EFFECTIVE_MYSQL_DB(self) -> str:
