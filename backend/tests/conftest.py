@@ -121,3 +121,39 @@ async def test_dataset_factory(client: AsyncClient, auth_headers: dict):
 
     yield _make
     # cleanup 不强制（测试用 sqlite 内存库）
+
+
+# v2.5.15 P1-10 / D-3: Celery eager 模式 fixture
+# 启用后 .apply_async() / .delay() 立即同步执行 task, 便于单测验证 worker
+# 内部逻辑 (DB 写入 / ModelVersion 落盘 等), 不需要启动 worker 进程.
+#
+# 同时确保 app.database.engine (供 AsyncSessionLocal 使用) 的表结构就绪,
+# 否则 worker 任务内的 SQL 操作会报 "no such table".
+@pytest_asyncio.fixture
+async def celery_eager(db_session):
+    """v2.5.15 D-3: Celery eager 模式 + app 引擎建表
+
+    .apply_async() 立即同步执行, 异常向上抛
+
+    注: 复用 db_session 已经在 test engine 上 create_all 的所有表;
+       我们需要保证 app.database.engine 也能看到这些表. 由于 conftest 中
+       DATABASE_URL 设为 ":memory:" + StaticPool, app 引擎共享同一连接,
+       所以这里只需对 app 引擎也跑一次 create_all (幂等).
+    """
+    from app.workers.celery_app import celery_app
+    from app.database import Base, engine
+    import app.models  # noqa: F401  触发 metadata 注册
+
+    # 在 app 引擎上 create_all (幂等)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    orig_eager = celery_app.conf.task_always_eager
+    orig_propagates = celery_app.conf.task_eager_propagates
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+    try:
+        yield celery_app
+    finally:
+        celery_app.conf.task_always_eager = orig_eager
+        celery_app.conf.task_eager_propagates = orig_propagates
