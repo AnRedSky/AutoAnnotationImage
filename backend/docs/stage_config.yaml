@@ -1,0 +1,412 @@
+# =============================================================================
+# 阶段配置 (Stage Configuration)
+# =============================================================================
+# 用途: 阶段编排器 (stage_runner.py) 读取此文件, 控制迭代流程
+# 维护: 每次阶段完成后由 stage_runner.py 自动更新 current_stage
+# 注意: 任务 ID 必须与 docs/21-后端功能审查记录.md 中的 BE-xxx 对应
+# =============================================================================
+
+project: thesis-image-annotation
+version_target: v1.0.0
+start_date: "2026-07-22"
+current_stage: S1                       # 编排器自动更新
+current_stage_status: IN_PROGRESS       # PENDING / IN_PROGRESS / COMPLETED / PAUSED / BLOCKED
+
+# =============================================================================
+# 阶段定义
+# =============================================================================
+stages:
+
+  # ---------------------------------------------------------------------------
+  # S1: P0 缺陷修复 (4 任务) - 阻塞性, 最先完成
+  # ---------------------------------------------------------------------------
+  S1:
+    name: P0 缺陷修复
+    goal: 修复 4 个运行时缺陷, 使后端基础功能稳定
+    priority: P0
+    depends_on: []                      # 无前置
+    tasks:
+      - id: S1-T1
+        title: BE-001 修复 BBoxAnnotation.model_name
+        description: workers/detection_tasks.py:610 删除 model_name= 赋值
+        files: [backend/app/workers/detection_tasks.py]
+        ai_assisted: true
+        estimated_hours: 0.5
+      - id: S1-T2
+        title: BE-002 修复 AnnotationLog.action 枚举
+        description: workers/detection_tasks.py:616 改 action="ai_predict"
+        files: [backend/app/workers/detection_tasks.py]
+        ai_assisted: true
+        estimated_hours: 0.5
+      - id: S1-T3
+        title: BE-003 celery_app include 加 segmentation_tasks
+        description: workers/celery_app.py:12 include 列表添加
+        files: [backend/app/workers/celery_app.py]
+        ai_assisted: true
+        estimated_hours: 0.5
+      - id: S1-T4
+        title: BE-004 start_training 改 async def
+        description: api/training.py:64 函数签名重构 + 内部 await
+        files: [backend/app/api/training.py]
+        ai_assisted: false                # 复杂重构需人工
+        estimated_hours: 2.0
+
+    exit_threshold: 100                  # 100% 才转阶段
+    exit_checks:
+      - description: 4 文件已修改
+        command: git diff --name-only HEAD~1..HEAD | grep -E "(workers/detection_tasks|workers/celery_app|api/training)"
+      - description: 既有测试通过
+        command: cd backend && pytest tests/ -x -q --no-header 2>&1 | tail -5
+
+    deliverables:
+      - 4 处代码改动 (1 个 commit)
+      - S1_REPORT.md 自动生成
+      - 回归测试 (S2 阶段补全)
+
+  # ---------------------------------------------------------------------------
+  # S2: ML 核心测试补全 (4 模块) - 质量门禁
+  # ---------------------------------------------------------------------------
+  S2:
+    name: ML 核心测试补全
+    goal: ML 4 个核心模块单元测试覆盖 ≥ 80%
+    priority: P0
+    depends_on: [S1]
+    tasks:
+      - id: S2-T1
+        title: yolo_predict 单元测试
+        description: tests/test_yolo_predict.py, mock ultralytics
+        files: [backend/tests/test_yolo_predict.py]
+        ai_assisted: true
+        estimated_hours: 3.0
+      - id: S2-T2
+        title: yolo_train 单元测试
+        description: tests/test_yolo_train.py, mock 数据集
+        files: [backend/tests/test_yolo_train.py]
+        ai_assisted: true
+        estimated_hours: 3.0
+      - id: S2-T3
+        title: seg_predict 单元测试
+        description: tests/test_seg_predict.py, mock torch
+        files: [backend/tests/test_seg_predict.py]
+        ai_assisted: true
+        estimated_hours: 3.0
+      - id: S2-T4
+        title: seg_train 单元测试
+        description: tests/test_seg_train.py, mock dataset
+        files: [backend/tests/test_seg_train.py]
+        ai_assisted: true
+        estimated_hours: 3.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: ML 覆盖率 ≥ 80%
+        command: cd backend && pytest --cov=app.ml --cov-fail-under=80 -q
+      - description: 既有测试不破坏
+        command: cd backend && pytest -q --no-header 2>&1 | tail -3
+
+    deliverables:
+      - 4 个新测试文件
+      - pyproject.toml pytest 配置
+      - S2_REPORT.md
+
+  # ---------------------------------------------------------------------------
+  # S3: P1 安全加固 (8 任务) - 生产前必做
+  # ---------------------------------------------------------------------------
+  S3:
+    name: P1 安全加固
+    goal: 修复 8 个安全/配置风险
+    priority: P1
+    depends_on: [S1, S2]
+    tasks:
+      - id: S3-T1
+        title: BE-005 JWT 密钥生产强制校验
+        files: [backend/app/config.py]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S3-T2
+        title: BE-006 MYSQL_PASSWORD 改 None
+        files: [backend/app/config.py]
+        ai_assisted: true
+        estimated_hours: 0.5
+      - id: S3-T3
+        title: BE-007 CORS 生产白名单
+        files: [backend/app/main.py, backend/app/config.py]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S3-T4
+        title: BE-008 MinIO 配置注释
+        files: [backend/app/config.py]
+        ai_assisted: true
+        estimated_hours: 0.5
+      - id: S3-T5
+        title: 全局异常处理器
+        files: [backend/app/main.py]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S3-T6
+        title: 限流 (slowapi)
+        files: [backend/app/main.py, backend/requirements.txt]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S3-T7
+        title: 删图事务保护
+        files: [backend/app/api/image.py]
+        ai_assisted: false
+        estimated_hours: 1.5
+      - id: S3-T8
+        title: 输入校验增强
+        files: [backend/app/api/*.py]
+        ai_assisted: true
+        estimated_hours: 2.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: bandit 高危 0
+        command: cd backend && bandit -r app/ -ll
+      - description: 既有测试通过
+        command: cd backend && pytest -q --no-header 2>&1 | tail -3
+
+    deliverables:
+      - 8 处安全加固
+      - 安全扫描报告
+      - S3_REPORT.md
+
+  # ---------------------------------------------------------------------------
+  # S4: 文档同步 (5 任务) - 论文引用准确性
+  # ---------------------------------------------------------------------------
+  S4:
+    name: 文档同步
+    goal: 文档与代码 100% 对齐
+    priority: P1
+    depends_on: [S1]
+    tasks:
+      - id: S4-T1
+        title: DOC-001 更新后端实现记录 (数量对齐)
+        files: [docs/2-后端实现记录.md]
+        ai_assisted: true
+        estimated_hours: 2.0
+      - id: S4-T2
+        title: DOC-002 docs/README.md 文档清单
+        files: [docs/README.md]
+        ai_assisted: true
+        estimated_hours: 0.5
+      - id: S4-T3
+        title: 补充 v2.0.0 (检测/分割) 章节
+        files: [docs/2-后端实现记录.md]
+        ai_assisted: true
+        estimated_hours: 3.0
+      - id: S4-T4
+        title: API 端点完整清单附录
+        files: [docs/2-后端实现记录.md]
+        ai_assisted: true
+        estimated_hours: 2.0
+      - id: S4-T5
+        title: 当前实现规划升级到 v2.5.14
+        files: [docs/1-当前实现规划.md]
+        ai_assisted: true
+        estimated_hours: 1.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: 5 处文档已更新
+        command: git diff --name-only HEAD~1..HEAD | grep -E "docs/.*\.md"
+
+    deliverables:
+      - 5 份文档更新
+      - S4_REPORT.md
+
+  # ---------------------------------------------------------------------------
+  # S5: 性能优化 (4 任务) - 论文性能指标
+  # ---------------------------------------------------------------------------
+  S5:
+    name: 性能优化 (P0)
+    goal: 推理 6-20x 加速, API 5-16x 加速
+    priority: P0
+    depends_on: [S3]
+    tasks:
+      - id: S5-T1
+        title: OPT-P0-1 推理批处理
+        files: [backend/app/services/ai_service.py, backend/app/ml/segmentation/seg_predict.py]
+        ai_assisted: true
+        estimated_hours: 6.0
+      - id: S5-T2
+        title: OPT-P0-2 模型池化 (LRU)
+        files: [backend/app/services/ai_service.py]
+        ai_assisted: true
+        estimated_hours: 4.0
+      - id: S5-T3
+        title: OPT-P0-4 Redis 缓存层
+        files: [backend/app/core/cache.py (新建), backend/app/api/*.py]
+        ai_assisted: true
+        estimated_hours: 6.0
+      - id: S5-T4
+        title: OPT-P0-3 训练数据预加载
+        files: [backend/app/ml/segmentation/seg_train.py, backend/app/ml/detection/yolo_train.py]
+        ai_assisted: true
+        estimated_hours: 2.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: Benchmark 脚本验证 6x 加速
+        command: cd backend && python scripts/benchmark_inference.py
+      - description: 既有测试通过
+        command: cd backend && pytest -q --no-header 2>&1 | tail -3
+
+    deliverables:
+      - 4 项优化实现
+      - 性能 benchmark 报告
+      - S5_REPORT.md
+
+  # ---------------------------------------------------------------------------
+  # S6: 可观测性建设 (4 任务) - 生产稳定性
+  # ---------------------------------------------------------------------------
+  S6:
+    name: 可观测性建设
+    goal: 部署 4 项监控, 故障定位 -80%
+    priority: P1
+    depends_on: [S3]
+    tasks:
+      - id: S6-T1
+        title: 结构化日志 (loguru)
+        files: [backend/app/core/logging.py (新建)]
+        ai_assisted: true
+        estimated_hours: 1.5
+      - id: S6-T2
+        title: 健康检查增强
+        files: [backend/app/api/system.py]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S6-T3
+        title: Prometheus 指标
+        files: [backend/app/core/metrics.py (新建), backend/app/main.py]
+        ai_assisted: true
+        estimated_hours: 3.0
+      - id: S6-T4
+        title: Sentry 错误追踪
+        files: [backend/app/main.py]
+        ai_assisted: true
+        estimated_hours: 1.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: /metrics 端点可访问
+        command: curl -s http://localhost:8000/api/metrics | head -20
+      - description: 既有测试通过
+        command: cd backend && pytest -q --no-header 2>&1 | tail -3
+
+    deliverables:
+      - 4 项监控全部部署
+      - Grafana 仪表盘 JSON
+      - S6_REPORT.md
+
+  # ---------------------------------------------------------------------------
+  # S7: 压测与验收 (3 任务) - 代码冻结前必经
+  # ---------------------------------------------------------------------------
+  S7:
+    name: 压测与验收
+    goal: 性能压测 + 全量验收
+    priority: P0
+    depends_on: [S5, S6]
+    tasks:
+      - id: S7-T1
+        title: locust 压测 (3 场景)
+        files: [backend/tests/load/*.py (新建)]
+        ai_assisted: true
+        estimated_hours: 4.0
+      - id: S7-T2
+        title: 性能基准 (Benchmark)
+        files: [backend/scripts/benchmark_*.py]
+        ai_assisted: true
+        estimated_hours: 3.0
+      - id: S7-T3
+        title: 验收清单 (60+ 项)
+        files: [backend/docs/ACCEPTANCE_CHECKLIST.md (新建)]
+        ai_assisted: true
+        estimated_hours: 4.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: 压测报告生成
+        command: ls backend/docs/load_test_report.html
+      - description: 验收清单 100%
+        command: cd backend && python scripts/check_acceptance.py
+
+    deliverables:
+      - 3 份压测报告
+      - 验收清单完成
+      - S7_REPORT.md
+
+  # ---------------------------------------------------------------------------
+  # S8: 发布准备 (5 任务) - v1.0.0 tag
+  # ---------------------------------------------------------------------------
+  S8:
+    name: 发布准备
+    goal: 产出 v1.0.0 发布版本
+    priority: P0
+    depends_on: [S7]
+    tasks:
+      - id: S8-T1
+        title: 完善 CHANGELOG.md
+        files: [CHANGELOG.md (新建)]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S8-T2
+        title: 部署文档 (Docker)
+        files: [docs/DEPLOY.md (新建)]
+        ai_assisted: true
+        estimated_hours: 2.0
+      - id: S8-T3
+        title: README 更新
+        files: [README.md]
+        ai_assisted: true
+        estimated_hours: 1.0
+      - id: S8-T4
+        title: v1.0.0 tag
+        files: []
+        ai_assisted: false
+        estimated_hours: 0.5
+      - id: S8-T5
+        title: 总结报告
+        files: [backend/docs/05-发布总结.md (新建)]
+        ai_assisted: true
+        estimated_hours: 2.0
+
+    exit_threshold: 100
+    exit_checks:
+      - description: v1.0.0 tag 已打
+        command: git tag -l "v1.0.0"
+      - description: 5 份发布文档齐全
+        command: ls CHANGELOG.md docs/DEPLOY.md backend/docs/05-发布总结.md
+
+    deliverables:
+      - 5 项发布准备
+      - v1.0.0 tag
+      - S8_REPORT.md (最终)
+
+# =============================================================================
+# 编排器配置
+# =============================================================================
+orchestrator:
+  config_file: backend/docs/stage_config.yaml
+  task_done_dir: backend/docs/.task_done
+  logs_dir: backend/docs/stage_logs
+  reports_dir: backend/docs
+  progress_file: backend/docs/PROGRESS.md
+  report_template: backend/docs/templates/stage_report.md
+  
+  # AI 协助配置
+  ai:
+    enabled: true
+    timeout_seconds: 300          # 单任务 AI 超时
+    max_retries: 2
+  
+  # 自动提交配置
+  auto_commit:
+    enabled: true
+    commit_prefix: "docs(stage):"
+  
+  # 告警配置
+  alerts:
+    stage_stall_hours: 24        # 阶段停滞告警
+    stage_overrun_ratio: 1.5     # 超计划 1.5x 告警
+    milestone_notify: true       # 里程碑通知
