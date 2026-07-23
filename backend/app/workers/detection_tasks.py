@@ -425,7 +425,9 @@ def auto_annotate_detection_task(
         for img_id, fp in items:
             p = Path(fp)
             if not p.is_absolute():
-                p = (Path(storage_service.base_path).resolve() / fp).resolve()
+                # v2.5.31 修复: StorageService 的属性是 base_dir, 不是 base_path
+                # 之前 storage_service.base_path 会抛 AttributeError
+                p = (Path(storage_service.base_dir).resolve() / fp).resolve()
             if p.exists():
                 abs_paths.append(str(p))
                 valid_ids.append(img_id)
@@ -583,7 +585,8 @@ def auto_annotate_pretrained_task(
         for img_id, fp in items:
             p = Path(fp)
             if not p.is_absolute():
-                p = (Path(storage_service.base_path).resolve() / fp).resolve()
+                # v2.5.31 修复: 同上, base_dir (与 auto_annotate_detection_task 同步)
+                p = (Path(storage_service.base_dir).resolve() / fp).resolve()
             if p.exists():
                 abs_paths.append(str(p))
                 valid_ids.append(img_id)
