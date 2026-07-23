@@ -397,7 +397,10 @@ const resetFilters = () => {
            - 固定排序: 图片分类 / 目标检测 / 图片分割
            - 复用 utils/taskType.ts 的 TASK_TYPE_OPTIONS
            - 留空 = 全部 (本页面是客户端过滤, 不发后端请求)
-           - v2.5.28: 改用 onTaskTypeChange, 联动重置数据集下拉 -->
+           - v2.5.28: 改用 onTaskTypeChange, 联动重置数据集下拉
+           - v2.5.29: 移除「全部任务类型」显式 el-option
+             用户用 el-select 自带的 clearable × 按钮复位为空 = 默认全部
+             (与 Training 页 select 实现保持一致, 简化交互) -->
       <el-select
         v-model="filterTaskType"
         clearable
@@ -405,7 +408,6 @@ const resetFilters = () => {
         class="app-select filter-task-type"
         @change="onTaskTypeChange"
       >
-        <el-option label="全部任务类型" value="" />
         <el-option
           v-for="opt in TASK_TYPE_OPTIONS" :key="opt.value"
           :label="opt.label"
@@ -413,18 +415,19 @@ const resetFilters = () => {
         />
       </el-select>
       <!-- v2.5.28: 数据集下拉联动任务类型, 只显示同任务类型的数据集
-           (与 Training 页 filterableDatasetsForFilter 语义一致) -->
+           (与 Training 页 filterableDatasetsForFilter 语义一致)
+           v2.5.29: 移除「全部数据集」显式 el-option
+             - 默认 (v-model = '') 视为全部
+             - clearable × 按钮可主动清空
+             - 加 filterable 支持快速搜索, 与 Training 页一致 -->
       <el-select
         v-model="filterDatasetId"
         clearable
+        filterable
         placeholder="按数据集筛选"
         class="app-select"
         @change="onFilterChange"
       >
-        <el-option
-          :label="filterTaskType ? `全部${getTaskTypeMeta(filterTaskType).label}数据集` : '全部数据集'"
-          value=""
-        />
         <el-option
           v-for="ds in filterableDatasetsForFilter" :key="ds.id"
           :label="ds.name"
@@ -933,14 +936,17 @@ const resetFilters = () => {
   font-size: 14px;
 }
 
-/* ============== 表格 (v2.5.28 行高稳定性改造) ==============
+/* ============== 表格 (v2.5.28 行高稳定性改造 + v2.5.29 二级兜底) ==============
    之前: .data-table 直接 flex:1 在容器里, 没有 min-height 兜底, 筛选后
    行数从 10 变 3 时, 表格整体高度塌缩, el-table 重新计算每行高度, 视觉
    上行会"跳"一下 (行高晃动). 改造方案与 Training/index.vue 一致:
    - .table-wrapper 包裹 + min-height: 420px 撑底 (即使 0 行也有稳定高度)
    - el-table 加 height="100%" 属性, 强制固定表头+内部滚动模式
    - 显式 cell padding 8px 0, 行高固定 ~38px
-   - 边框移到 wrapper, 避免 el-table border 与外层 border 叠加 */
+   - 边框移到 wrapper, 避免 el-table border 与外层 border 叠加
+   v2.5.29 二次加固: .data-table 自身也加 min-height: 420px
+   - 避免仅靠 .table-wrapper 兜底时, el-table body 容器在过渡帧塌缩
+     再被 wrapper 撑开导致的微小跳变, 双重锚定更稳定 */
 .table-wrapper {
   flex: 1 1 0;
   min-height: 420px;
@@ -951,6 +957,7 @@ const resetFilters = () => {
 }
 .table-wrapper .data-table {
   height: 100% !important;
+  min-height: 420px;  /* v2.5.29: 高度兜底锚点, 10 行→3 行切换时不塌缩 */
   width: 100% !important;
   font-size: 13px;
 }
