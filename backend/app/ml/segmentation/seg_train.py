@@ -31,20 +31,25 @@ def _build_model(backbone: str, num_classes: int) -> nn.Module:
     构造 torchvision 分割模型
     - deeplabv3_resnet50 / deeplabv3_resnet101
     - 其它: 兜底 fcn_resnet50
+
+    注:
+      - 使用 weights_backbone="DEFAULT" 仅加载骨干网络 (ResNet) 的 ImageNet 预训练权重,
+        不加载预训练分类器头 (Pascal VOC 21 类), 避免 num_classes 不匹配报错.
+      - 分类器头按 num_classes 随机初始化, 适配自定义数据集.
     """
     import torchvision
     if backbone == "deeplabv3_resnet101":
-        weights = "DEFAULT"
+        # 仅加载骨干预训练权重, 分类器按 num_classes 重建
         return torchvision.models.segmentation.deeplabv3_resnet101(
-            weights=weights, num_classes=num_classes,
+            weights=None, weights_backbone="DEFAULT", num_classes=num_classes,
         )
     if backbone == "fcn_resnet50":
         return torchvision.models.segmentation.fcn_resnet50(
-            weights="DEFAULT", num_classes=num_classes,
+            weights=None, weights_backbone="DEFAULT", num_classes=num_classes,
         )
     # default: deeplabv3_resnet50
     return torchvision.models.segmentation.deeplabv3_resnet50(
-        weights="DEFAULT", num_classes=num_classes,
+        weights=None, weights_backbone="DEFAULT", num_classes=num_classes,
     )
 
 
@@ -103,6 +108,7 @@ def train_segmentation(
     started = datetime.utcnow()
     ds = SegmentationPairDataset(
         images=images, masks=masks, crop_size=crop_size,
+        num_classes=num_classes,
     )
     if len(ds) == 0:
         raise ValueError("数据集为空, 无可训练样本")
@@ -156,10 +162,28 @@ def train_segmentation(
             best_state = buf.getvalue()
 
         if progress_cb:
-            progress_cb(
-                "train.epoch", epoch, epochs,
-                f"loss={avg_loss:.4f} mIoU={miou:.4f} pixAcc={pix_acc:.4f}",
-            )
+            # v2.5.27: 第 5 参数 metrics 是结构化指标 dict, 用于 SSE 透传 + history 累积
+            # 旧 4-arg 签名仍兼容 (调用方若不接受 metrics, 走 except 路径)
+            metrics = {
+                "epoch": epoch,
+                "train_loss": avg_loss,
+                "val_loss": avg_loss,  # 当前未做 train/val 切分, 复用 train loss
+                "miou": miou,
+                "pixel_acc": pix_acc,
+                "dice": (2.0 * miou / (1.0 + miou)) if miou > 0 else 0.0,
+            }
+            try:
+                progress_cb(
+                    "train.epoch", epoch, epochs,
+                    f"loss={avg_loss:.4f} mIoU={miou:.4f} pixAcc={pix_acc:.4f}",
+                    metrics,
+                )
+            except TypeError:
+                # 兼容旧 4-arg 签名
+                progress_cb(
+                    "train.epoch", epoch, epochs,
+                    f"loss={avg_loss:.4f} mIoU={miou:.4f} pixAcc={pix_acc:.4f}",
+                )
 
     if progress_cb:
         progress_cb(

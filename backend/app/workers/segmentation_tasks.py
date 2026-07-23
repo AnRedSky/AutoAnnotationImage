@@ -114,21 +114,81 @@ def train_segmentation_task(
         })
         return {"status": "FAILURE", "reason": "empty_dataset"}
 
+    # ---- v2.5.27 修复: 数据集统计 sticky_meta (与 detection_tasks / tasks.py 一致) ----
+    # 之前: 分割 _train_cb 只推 info, 不推 data_total/data_train/data_val/num_classes/
+    #       class_names, SSE 详情页「总样本数/训练集/验证集/类别数」四联全显 0
+    # 现在: 训练启动那一刻一次性推送 + 调 _persist_dataset_stats 写库,
+    #       后续任意时刻查 /jobs/{id} 都能恢复完整统计
+    async def _load_categories():
+        async with AsyncSessionLocal() as db:
+            from app.models.category import Category
+            rows = (await db.execute(
+                select(Category).where(Category.dataset_id == dataset_id)
+            )).scalars().all()
+            return [c.name for c in rows]
+    category_names = _run_async(_load_categories())
+    n_total = len(masks)
+    # 与 detection / classification 保持一致: 80/20 划分 (仅用于展示, 训练仍用全集)
+    n_train = int(n_total * 0.8)
+    n_val = n_total - n_train
+    sticky_meta: dict = {
+        "data_total": n_total,
+        "data_train": n_train,
+        "data_val": n_val,
+        "num_classes": None,  # 训练开始后才能确定 (n_cat + 1, 至少 2)
+        "class_names": sorted(category_names),
+    }
+
     # 3) 调进度回调
-    def _train_cb(stage, current, total, info):
-        progress = (current / total) if total else 0.0
-        _set_task_state(self, "PROGRESS", {
-            "stage": stage, "progress": progress,
-            "current": current, "total": total, "info": info,
-        })
+    # v2.5.27 修复: 累积 history_buffer 用于前端曲线 (写 Redis + DB)
+    history_buffer: list = []
+
+    def _train_cb(stage, current, total, info, metrics=None):
+        # v2.5.27 修复: 进度 0-100 跟 detection/classification 一致 (前端 detailProgress 期望 0-100)
+        progress_pct = (current / total * 100.0) if total else 0.0
+        meta = {
+            "stage": stage,
+            "progress": round(progress_pct, 2),
+            "current": current,
+            "total": total,
+            # v2.5.27 修复: SSE 端点训练详情读 current_epoch/total_epochs (不是 current/total)
+            "current_epoch": current,
+            "total_epochs": total,
+            "msg": f"{stage} {current}/{total} {info}".strip(),
+            "info": info,  # 兼容老 SSE 端点 / 旧前端
+        }
+        # v2.5.27 修复: 把结构化指标 (loss/mIoU/pixel_acc/dice) 推到 SSE meta
+        # 前端虽然主要从 /training/history/{id} 拿曲线, 但这些字段也方便调试
+        if metrics and isinstance(metrics, dict):
+            for _k in ("train_loss", "val_loss", "miou", "pixel_acc", "dice"):
+                if _k in metrics and isinstance(metrics[_k], (int, float)):
+                    meta[_k] = metrics[_k]
+            history_buffer.append(metrics)
+        if sticky_meta:
+            meta.update(sticky_meta)
+        _set_task_state(self, "PROGRESS", meta)
+
+        # v2.5.27 修复: 写 Redis history (供前端 5s 轮询实时拿曲线)
+        if history_buffer:
+            try:
+                from app.workers.tasks import _update_training_history
+                _update_training_history(self.request.id, list(history_buffer))
+            except Exception as e:
+                # Redis 不可达不阻塞训练, 走 DB 兜底
+                print(f"[warn] seg history -> redis failed: {type(e).__name__}: {e}")
+
         async def _update_job():
             async with AsyncSessionLocal() as db:
                 j = await db.get(TrainingJob, job_id)
                 if not j:
                     return
-                j.progress = progress
+                # 进度也用 0-100
+                j.progress = progress_pct
                 j.message = f"{stage} {current}/{total} {info}"
                 j.current_epoch = current
+                # 同步 history 写库 (Redis 失效时的兜底, /history 端点会优先 Redis)
+                if history_buffer:
+                    j.history = list(history_buffer)
                 await db.commit()
         _run_async(_update_job())
 
@@ -144,6 +204,24 @@ def train_segmentation_task(
                 return len(rows)
         n_cat = _run_async(_count_classes())
         num_classes = max(2, n_cat + 1)  # 至少 bg + 1
+
+        # ---- v2.5.27 修复: num_classes 确定后立即补全 sticky_meta + 推送 + 写库 ----
+        # 之前: sticky_meta["num_classes"] = None, SSE 详情页始终 0
+        # 现在: 训练真正开始前一次性推完整版 sticky_meta, 写库持久化
+        sticky_meta["num_classes"] = num_classes
+        _set_task_state(self, "PROGRESS", {
+            "progress": 0.0,
+            "msg": f"数据集就绪: train={n_train} val={n_val} num_classes={num_classes}",
+            "total_epochs": epochs,
+            **sticky_meta,
+        })
+        # 写库 (与 tasks.py 同一辅助函数, 复用)
+        try:
+            from app.workers.tasks import _persist_dataset_stats
+            _persist_dataset_stats(self.request.id, sticky_meta)
+        except Exception as e:
+            # 写库失败不影响训练
+            print(f"[warn] seg _persist_dataset_stats failed: {type(e).__name__}: {e}")
 
         result = train_segmentation(
             images=images, masks=masks,
@@ -180,10 +258,13 @@ def train_segmentation_task(
             await db.refresh(mv)
             j = await db.get(TrainingJob, job_id)
             j.state = "SUCCESS"
-            j.progress = 1.0
+            j.progress = 100.0  # v2.5.27: 跟训练中保持 0-100 一致
             j.message = f"mIoU={result['best_miou']:.4f}"
             j.model_version_id = mv.id
             j.duration_seconds = int(result["duration_seconds"])
+            # v2.5.27: 终态持久化 history (Redis 失效兜底)
+            if history_buffer:
+                j.history = list(history_buffer)
             await db.commit()
             return mv.id
 

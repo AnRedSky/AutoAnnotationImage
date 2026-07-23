@@ -499,7 +499,10 @@ async def stream_training_progress(
                     if db_msg:
                         message = db_msg
                     else:
-                        message = info.get("msg", "") or ""
+                        # v2.5.27 修复: 兼容分割 _train_cb 推的 info 字段 (而非 msg)
+                        # 原: message = info.get("msg", "") -> 分割场景永远空
+                        # 现: msg 优先, info 兜底
+                        message = info.get("msg") or info.get("info") or ""
                     if db_total_epochs is not None:
                         total_epochs = db_total_epochs
                     else:
@@ -514,13 +517,15 @@ async def stream_training_progress(
                     progress = float(info.get("progress", 0))
                     current_epoch = info.get("current_epoch") or info.get("epoch")
                     total_epochs = info.get("total_epochs")
-                    message = info.get("msg", "") or ""
+                    # v2.5.27 修复: 同上, 兼容分割 info 字段
+                    message = info.get("msg") or info.get("info") or ""
             else:
                 # DB 没记录 (任务完全没存在过), 用 Celery 状态
                 progress = float(info.get("progress", 0))
                 current_epoch = info.get("current_epoch") or info.get("epoch")
                 total_epochs = info.get("total_epochs")
-                message = info.get("msg", "") or ""
+                # v2.5.27 修复: 同上
+                message = info.get("msg") or info.get("info") or ""
 
             payload = {
                 "task_id": task_id,

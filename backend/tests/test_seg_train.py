@@ -7,8 +7,10 @@ v2.5.15 P1-7 / D-1 测试: 图像分割训练模块
  2. test_compute_miou_wrong             _compute_mIoU 全错 -> 0.0
  3. test_train_segmentation_empty_dataset  空数据 -> ValueError
  4. test_train_segmentation_mock_model  mock _build_model, 验证返回字段
+ 5. test_dataset_oob_pixels             mask 含越界像素 (e.g. 49) -> 标记 -1
 """
 import io
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +25,7 @@ from app.ml.segmentation.seg_train import (
     _build_model,
     train_segmentation,
 )
+from app.ml.segmentation.seg_dataset import SegmentationPairDataset
 
 
 # ============== 工具 ==============
@@ -143,8 +146,9 @@ def test_train_segmentation_mock_model(tmp_path):
 
     progress_calls: list = []
 
-    def _cb(stage, current, total, info):
-        progress_calls.append((stage, current, total, info))
+    def _cb(stage, current, total, info, metrics=None):
+        # v2.5.27: seg_train 现在传可选 5th 参数 metrics dict
+        progress_calls.append((stage, current, total, info, metrics))
 
     with patch("app.ml.segmentation.seg_train._build_model") as mock_build:
         mock_build.return_value = _TinyModel(num_classes=3, h=32, w=32)
@@ -168,3 +172,92 @@ def test_train_segmentation_mock_model(tmp_path):
     assert len(progress_calls) == 4
     assert progress_calls[0][0] == "train.start"
     assert progress_calls[-1][0] == "train.done"
+
+    # v2.5.27: 验证 train.epoch 回调现在带 metrics dict (loss/mIoU/pixel_acc/dice)
+    epoch_calls = [c for c in progress_calls if c[0] == "train.epoch"]
+    assert len(epoch_calls) == 2
+    for stage, current, total, info, metrics in epoch_calls:
+        assert isinstance(metrics, dict), \
+            f"seg train.epoch 回调必须传 metrics dict, 实际: {type(metrics).__name__}"
+        # 必含字段 (前端 detailChart / SSE 都需要)
+        for k in ("epoch", "train_loss", "val_loss", "miou", "pixel_acc", "dice"):
+            assert k in metrics, f"metrics 缺字段: {k}"
+            assert isinstance(metrics[k], (int, float)), \
+                f"metrics[{k}] 应为数值, 实际: {type(metrics[k]).__name__}"
+        # dice 与 miou 关系: dice = 2*miou / (1+miou)
+        if metrics["miou"] > 0:
+            expected_dice = 2.0 * metrics["miou"] / (1.0 + metrics["miou"])
+            assert abs(metrics["dice"] - expected_dice) < 1e-6, \
+                f"dice 计算错误: 期望 {expected_dice}, 实际 {metrics['dice']}"
+
+
+# ============== 5. mask 越界像素 (v2.5.16 回归测试) ==============
+
+class _MockImageObj2:
+    def __init__(self, storage_path: str):
+        self.storage_path = storage_path
+
+
+class _MockMaskObj2:
+    def __init__(self, mask_path: str):
+        self.mask_path = mask_path
+
+
+def test_dataset_oob_pixels(tmp_path):
+    """
+    mask 像素值超出 [0, num_classes-1] (例如 49, 复现 v2.5.15 训练报错)
+    期望:
+      - 不崩溃
+      - 越界像素被标 -1
+      - 合法像素保留
+      - 触发 RuntimeWarning
+    """
+    img_path, _ = _make_pair(tmp_path, 32, 32, 0)
+    # 构造 mask: 主区域 0, 1 个越界像素 49, 1 个合法像素 2
+    mask = PILImage.new("L", (32, 32), color=0)
+    mask.putpixel((0, 0), 49)   # OOB: >= num_classes=4
+    mask.putpixel((1, 1), 2)    # in-range
+    mask_path = tmp_path / "mask_oob.png"
+    mask.save(mask_path)
+
+    images = [_MockImageObj2(img_path)]
+    masks = [_MockMaskObj2(str(mask_path))]
+    ds = SegmentationPairDataset(
+        images=images, masks=masks, crop_size=32, num_classes=4,
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        _, mask_t = ds[0]
+
+    # 越界像素标 -1
+    assert mask_t[0, 0].item() == -1
+    # 合法像素保留
+    assert mask_t[1, 1].item() == 2
+    # 其余仍为 0
+    assert (mask_t[2:, 2:] == 0).all()
+    # 触发警告
+    oob_warnings = [w for w in captured
+                    if "越界像素" in str(w.message) and issubclass(w.category, RuntimeWarning)]
+    assert len(oob_warnings) == 1, f"expected 1 OOB warning, got {len(oob_warnings)}"
+
+
+def test_dataset_oob_no_param_safe(tmp_path):
+    """
+    不传 num_classes 时, 不做 OOB 检查, 行为与旧版完全一致
+    (向后兼容, 防止影响旧调用方)
+    """
+    img_path, _ = _make_pair(tmp_path, 32, 32, 0)
+    mask = PILImage.new("L", (32, 32), color=0)
+    mask.putpixel((0, 0), 49)
+    mask_path = tmp_path / "mask_oob2.png"
+    mask.save(mask_path)
+
+    images = [_MockImageObj2(img_path)]
+    masks = [_MockMaskObj2(str(mask_path))]
+    ds = SegmentationPairDataset(
+        images=images, masks=masks, crop_size=32,  # num_classes 缺省
+    )
+    _, mask_t = ds[0]
+    # 缺省 num_classes: 不干预, 保留 49 (向后兼容)
+    assert mask_t[0, 0].item() == 49

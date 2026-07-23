@@ -6,9 +6,11 @@ Segmentation Dataset (v2.0.0 图像分割)
 - 从 ORM 读 Image + SegmentationMask
 - 返回 (image_tensor, mask_tensor) pair, mask 像素值 = 类别索引
 - 不强制下载预训练权重, transform 保持简单 (ToTensor + Resize)
+- v2.5.16 健壮性: 越界 mask 像素标记为 -1, 复用 CrossEntropyLoss(ignore_index=-1)
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Sequence, Tuple, List, Optional
 
@@ -57,6 +59,8 @@ class SegmentationPairDataset(Dataset):
         images: Sequence[ImageModel]
         masks: Sequence[SegmentationMask]  (与 images 顺序一一对应, 长度相同)
         crop_size: 输出空间大小
+        num_classes: 总类别数 (含背景 0). 传入后, 越界像素会被标 -1, 由
+                     CrossEntropyLoss(ignore_index=-1) 在 loss 中跳过.
 
     输出:
         __getitem__(i) -> (img_tensor (3, H, W) float32, mask_tensor (1, H, W) int64)
@@ -67,11 +71,13 @@ class SegmentationPairDataset(Dataset):
         images: Sequence[ImageModel],
         masks: Sequence[SegmentationMask],
         crop_size: int = 256,
+        num_classes: Optional[int] = None,
     ):
         assert len(images) == len(masks), "images 与 masks 长度必须一致"
         self.images = list(images)
         self.masks = list(masks)
         self.crop_size = crop_size
+        self.num_classes = num_classes
         self.img_tf, self.mask_tf = _build_transforms(crop_size)
 
     def __len__(self) -> int:
@@ -89,6 +95,27 @@ class SegmentationPairDataset(Dataset):
             pil_mask = pil_mask.convert("L")
         img_t = self.img_tf(pil_img)
         mask_t = self.mask_tf(pil_mask).squeeze(0).long()
+
+        # 健壮性: mask 像素值若超出 [0, num_classes-1] (例如 RGB 图被误转 L,
+        # 调色板索引超过 num_classes, 上游标注工具不匹配等),
+        # 标记为 -1, 由 CrossEntropyLoss(ignore_index=-1) 跳过,
+        # 既不崩溃也不污染合法标签.
+        if self.num_classes is not None and mask_t.numel() > 0:
+            oob = (mask_t < 0) | (mask_t >= self.num_classes)
+            if oob.any():
+                n_oob = int(oob.sum().item())
+                warnings.warn(
+                    f"[seg_dataset] mask {m.mask_path} 含 {n_oob}/{mask_t.numel()} "
+                    f"越界像素 (合法范围 [0, {self.num_classes - 1}]), "
+                    f"已标记为 ignore_index=-1",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                mask_t = torch.where(
+                    oob,
+                    torch.full_like(mask_t, -1),
+                    mask_t,
+                )
         return img_t, mask_t
 
 
