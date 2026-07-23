@@ -1353,6 +1353,10 @@ const syncListStreams = () => {
           try { h.cancel() } catch {}
           listStreams.delete(j.id)
         }
+        // v2.5.27 修复: SSE 出错时立即拉一次 DB, 防止"训练已失败但 SSE 断开后
+        // 列表一直显示训练中". 这是非常关键的兜底, 不能只依赖静默轮询,
+        // 否则用户要等 30s/60s 才能看到真实状态.
+        loadJobs()
       },
       onComplete: () => {
         // 服务端主动 end 事件: 同上, 拉一次整页
@@ -1390,22 +1394,21 @@ const updateJobProgressInPlace = (jobId: number, data: any) => {
 watch(jobs, () => { syncListStreams() }, { deep: false })
 
 // ============== 静默兜底刷新 ==============
-// 之前的实现是 15s 整页拉一次. 改为:
-// - 当列表里有活跃任务时, 不做静默刷新 (由 SSE 驱动行内更新)
-// - 当列表里没有活跃任务 (全终态) 时, 60s 拉一次兜底 (应对其他用户操作/系统状态变化)
+// 之前的实现: 列表里有活跃任务时不做静默刷新, 完全依赖 SSE.
+// 问题: SSE 断连 (极快终态 / 后台节流 / 反代超时) 后, 列表状态卡在 PROGRESS,
+//       用户看不到真实的 FAILURE/SUCCESS (典型 3s 内失败的训练).
+// v2.5.27 修复:
+//   - 任何状态下 30s 拉一次 DB 兜底. SSE 仍负责高频行内更新,
+//     拉整页只在 SSE 断 / 终态 / 跨用户时触发, 频率很低, 开销可接受.
+//   - 一次额外 GET /jobs 的开销 (返回当前页 10 条记录) 远低于用户
+//     "盯着看却看不到失败"的体验损失.
 let silentRefreshTimer: any = null
 const startSilentRefresh = () => {
   if (silentRefreshTimer) clearInterval(silentRefreshTimer)
   silentRefreshTimer = setInterval(() => {
     if (detailVisible.value) return  // 详情 dialog 打开时, 由详情 SSE 驱动
-    const hasActive = jobs.value.some(
-      (j: any) => j.state === 'PROGRESS' || j.state === 'PENDING'
-    )
-    if (!hasActive) {
-      loadJobs()
-    }
-    // 活跃任务存在时: SSE 已经在逐行更新, 无需整页拉
-  }, 60000)
+    loadJobs()
+  }, 30000)
 }
 const stopSilentRefresh = () => {
   if (silentRefreshTimer) { clearInterval(silentRefreshTimer); silentRefreshTimer = null }
@@ -1863,6 +1866,18 @@ const stopSilentRefresh = () => {
         <el-descriptions class="detail-descs" :column="3" border size="small">
           <el-descriptions-item label="任务 ID">{{ detailJob.id }}</el-descriptions-item>
           <el-descriptions-item label="数据集">{{ datasetNameOf(detailJob.dataset_id) }}</el-descriptions-item>
+          <!-- v2.5.27 新增: 任务类型 (classification / detection / segmentation) -->
+          <el-descriptions-item label="任务类型">
+            <el-tag
+              v-if="detailJob.task_type"
+              :type="(getTaskTypeMeta(detailJob.task_type)?.type) || 'info'"
+              size="small"
+              effect="light"
+            >
+              {{ getTaskTypeMeta(detailJob.task_type)?.label || detailJob.task_type }}
+            </el-tag>
+            <span v-else style="color: #c0c4cc;">未记录</span>
+          </el-descriptions-item>
           <el-descriptions-item label="基础模型">{{ detailJob.base_model }}</el-descriptions-item>
           <el-descriptions-item label="模型版本">{{ detailJob.model_name }}</el-descriptions-item>
           <el-descriptions-item label="训练设备">
