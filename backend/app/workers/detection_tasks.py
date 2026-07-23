@@ -399,7 +399,9 @@ def auto_annotate_detection_task(
                     )
                     .order_by(ImageModel.id.asc())
                 )).scalars().all()
-                return [(r.id, r.file_path) for r in rows]
+                # v2.5.30 修复: Image ORM 的字段是 storage_path, 不是 file_path
+                # 之前 r.file_path 会抛 AttributeError: 'Image' object has no attribute 'file_path'
+                return [(r.id, r.storage_path) for r in rows]
         items = _run_async(_load_images())
         if not items:
             return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
@@ -556,7 +558,8 @@ def auto_annotate_pretrained_task(
                     )
                     .order_by(ImageModel.id.asc())
                 )).scalars().all()
-                return [(r.id, r.file_path) for r in rows]
+                # v2.5.30 修复: Image ORM 字段是 storage_path (与 auto_annotate_detection_task 同源)
+                return [(r.id, r.storage_path) for r in rows]
         items = _run_async(_load_images())
         if not items:
             return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
