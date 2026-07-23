@@ -2408,9 +2408,9 @@ const stopSilentRefresh = () => {
   background: var(--bg-soft) !important;
 }
 
-/* 状态 tag 颜色: 与统计卡色调保持一致 */
-:deep(.el-tag.el-tag--success) { background: var(--gradient-success) !important; border-color: transparent !important; }
-:deep(.el-tag.el-tag--danger)  { background: linear-gradient(135deg, #ff4d4f 0%, #cf1322 100%) !important; border-color: transparent !important; }
-:deep(.el-tag.el-tag--warning) { background: var(--gradient-warn) !important; border-color: transparent !important; color: #fff !important; }
-:deep(.el-tag.el-tag--primary) { background: var(--gradient-brand) !important; border-color: transparent !important; }
+/* v2.5.26 修复: 删除 v2.5.15 (a8cff15) 的 4 条 :deep() 渐变色规则
+   原意是给状态列做"与统计卡色调一致"的渐变效果
+   问题: :deep() 选择器太宽, 把任务类型列 (warning/success/primary) 也一并染上渐变
+   修复: 全部状态/类型 tag 统一使用 el-tag plain 默认样式 (白底 + 细边 + 类型色字),
+   避免跨列污染, 与 v2.5.25 简化版 StateBadge 设计保持一致 */
 </style>
