@@ -35,6 +35,10 @@ class TrainStatusResponse(_Base):
     total_epochs: Optional[int] = None
     message: Optional[str] = None
     history: Optional[List[Dict[str, Any]]] = None
+    # v2.5.28: 透传时间字段, 前端 REST 轮询也能拿到 started_at / finished_at
+    # 与 SSE payload 保持一致, 避免两套接口行为分歧
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
 
 
 class ModelVersionOut(_Base):

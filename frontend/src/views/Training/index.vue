@@ -989,6 +989,24 @@ const startDetailStream = (taskId: string) => {
       detailCurrentEpoch.value = data.current_epoch ?? null
       detailTotalEpochs.value = data.total_epochs ?? detailTotalEpochs.value
       detailMessage.value = data.message || detailMessage.value
+      // ---- v2.5.28: 实时同步 started_at / finished_at (SSE 推过来) ----
+      // 之前: 只在 openDetail 时从 DB 拉一次, worker 接手后再也没更新过,
+      //       详情页「开始时间」一直显示 "-" 直到终态 onComplete 才被 /jobs/{id} 刷新.
+      // 现在: SSE 每次去重签名变化时都会带 started_at/finished_at, 拿到就直接同步.
+      // - 后端 datetime → JSON ISO 字符串 → 这里用 new Date() 还原
+      // - 仅在 SSE 给值时才覆盖, 避免把已有的真实值覆盖成 null
+      if (data.started_at && detailJob.value) {
+        const _sa = String(data.started_at)
+        if (_sa && _sa !== detailJob.value.started_at) {
+          detailJob.value.started_at = _sa
+        }
+      }
+      if (data.finished_at && detailJob.value) {
+        const _fa = String(data.finished_at)
+        if (_fa && _fa !== detailJob.value.finished_at) {
+          detailJob.value.finished_at = _fa
+        }
+      }
       // 数据集统计 (从 train.py 的 progress_callback extra 推过来, 一次到位)
       if (typeof data.data_total === 'number') detailDataTotal.value = data.data_total
       if (typeof data.data_train === 'number') detailDataTrain.value = data.data_train
@@ -1031,9 +1049,17 @@ const startDetailStream = (taskId: string) => {
     onComplete: () => {
       detailCancelStream = null
       if (detailHistoryTimer) { clearInterval(detailHistoryTimer); detailHistoryTimer = null }
-      // 终态: 刷一次 history + 主列表
+      // 终态: 刷一次 history + 主列表 + 详情 (确保 finished_at / duration / device_info 最终值)
+      // v2.5.28: SSE onComplete 是流关闭瞬间, 此刻 worker 已写库, /jobs/{id} 拿到的就是终态
       refreshDetailHistory(taskId)
       loadJobs()
+      if (detailJob.value?.id) {
+        trainingApi.job(detailJob.value.id).then((d: any) => {
+          detailJob.value = d
+        }).catch(() => {
+          // 拉取失败不影响其他字段, 保留 SSE 已推的 state
+        })
+      }
     },
     onError: (e) => {
       detailCancelStream = null

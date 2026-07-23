@@ -47,6 +47,41 @@ def _set_task_state(self, state: str, meta: dict):
 
 # ============== 训练 ==============
 
+def _finish_failed_job(self, job_id: int, error_msg: str, started_at: datetime):
+    """
+    v2.5.28 新增: 训练失败统一清理 (与 detection_tasks._finish_failed_job 风格一致)
+    - 写 DB FAILURE + finished_at + duration_seconds + error
+    - 推 Celery FAILURE state
+
+    用于以下失败路径:
+      a) 数据集空 (没 image+mask 配对)
+      b) train_segmentation 抛异常 (OOB / 显存不足 / 模型加载失败等)
+    """
+    from app.database import AsyncSessionLocal
+    from app.models.training_job import TrainingJob
+    try:
+        async def _fail():
+            async with AsyncSessionLocal() as db:
+                j = await db.get(TrainingJob, job_id)
+                if j:
+                    finished_at = datetime.utcnow()
+                    j.state = "FAILURE"
+                    j.finished_at = finished_at
+                    j.duration_seconds = (finished_at - started_at).total_seconds()
+                    j.error = error_msg[:500]
+                    await db.commit()
+        _run_async(_fail())
+    except Exception:
+        # 写库失败也不阻塞 Celery 状态推送
+        pass
+    _set_task_state(self, "FAILURE", {
+        "exc_type": "SegmentationTrainError",
+        "exc_message": error_msg[:200],
+        "error": error_msg[:500],
+        "job_id": job_id,
+    })
+
+
 @celery_app.task(bind=True)
 def train_segmentation_task(
     self,
@@ -75,6 +110,12 @@ def train_segmentation_task(
     from app.ml.segmentation.seg_dataset import collect_segmentation_pairs
     from app.ml.segmentation.seg_train import train_segmentation
 
+    # v2.5.28 修复: 之前分割任务完全没写 started_at / finished_at / duration_seconds,
+    # 导致详情页"开始时间/结束时间/耗时"全显示 '-'. 现在按 tasks.py / detection_tasks.py
+    # 的约定, 在 worker 接手时记 started_at, 终态时记 finished_at + duration_seconds
+    task_id = self.request.id
+    started_at = datetime.utcnow()
+
     # 1) 建 TrainingJob
     async def _create_job():
         async with AsyncSessionLocal() as db:
@@ -86,6 +127,12 @@ def train_segmentation_task(
             if existing:
                 existing.state = "PROGRESS"
                 existing.task_type = "segmentation"
+                existing.progress = 0.0
+                existing.error = None
+                # v2.5.28: 重投递 / API 预创建 都重置时间字段
+                existing.started_at = started_at
+                existing.finished_at = None
+                existing.duration_seconds = None
                 await db.commit()
                 return existing.id
             job = TrainingJob(
@@ -95,6 +142,8 @@ def train_segmentation_task(
                 task_type="segmentation",
                 epochs=epochs, batch_size=batch_size,
                 state="PROGRESS",
+                progress=0.0,
+                started_at=started_at,  # v2.5.28: worker 接手时立即记
             )
             db.add(job)
             await db.commit()
@@ -109,9 +158,9 @@ def train_segmentation_task(
             return await collect_segmentation_pairs(db, dataset_id)
     images, masks = _run_async(_load_pairs())
     if not images:
-        _set_task_state(self, "FAILURE", {
-            "error": "数据集无 image+mask 配对, 请先上传 mask",
-        })
+        # v2.5.28 修复: 失败也写 DB (finished_at + duration_seconds + error),
+        # 否则详情页"结束时间/耗时"永远是空
+        _finish_failed_job(self, job_id, "数据集无 image+mask 配对, 请先上传 mask", started_at)
         return {"status": "FAILURE", "reason": "empty_dataset"}
 
     # ---- v2.5.27 修复: 数据集统计 sticky_meta (与 detection_tasks / tasks.py 一致) ----
@@ -231,9 +280,8 @@ def train_segmentation_task(
             device=device, progress_cb=_train_cb,
         )
     except Exception as e:
-        _set_task_state(self, "FAILURE", {
-            "error": f"训练失败: {e}", "exc_type": type(e).__name__,
-        })
+        # v2.5.28 修复: 失败也写 DB (finished_at + duration_seconds + error)
+        _finish_failed_job(self, job_id, f"训练失败: {e}", started_at)
         return {"status": "FAILURE", "error": str(e)}
 
     # 5) 落盘 ModelVersion
@@ -261,7 +309,11 @@ def train_segmentation_task(
             j.progress = 100.0  # v2.5.27: 跟训练中保持 0-100 一致
             j.message = f"mIoU={result['best_miou']:.4f}"
             j.model_version_id = mv.id
-            j.duration_seconds = int(result["duration_seconds"])
+            # v2.5.28: 写 finished_at + duration_seconds (用 server-now 不用 train 内部 duration,
+            # 因为后者不含 worker 启动 + 模型落盘开销)
+            finished_at = datetime.utcnow()
+            j.finished_at = finished_at
+            j.duration_seconds = (finished_at - started_at).total_seconds()
             # v2.5.27: 终态持久化 history (Redis 失效兜底)
             if history_buffer:
                 j.history = list(history_buffer)

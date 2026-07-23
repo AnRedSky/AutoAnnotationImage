@@ -358,6 +358,9 @@ async def get_progress(
     db_msg = None
     db_total_epochs = None
     db_current_epoch = None
+    # v2.5.28: 拉 started_at / finished_at (DB 权威), 返回给 REST 客户端
+    db_started_at = None
+    db_finished_at = None
     if state in ("SUCCESS", "FAILURE", "REVOKED") and "progress" not in info:
         try:
             row = (await db.execute(
@@ -371,6 +374,20 @@ async def get_progress(
                 db_total_epochs = row.epochs
                 if isinstance(row.history, list) and row.history:
                     db_current_epoch = row.history[-1].get("epoch")
+                db_started_at = row.started_at
+                db_finished_at = row.finished_at
+        except Exception:
+            pass
+    # v2.5.28: 非终态也读一下 started_at (PENDING 阶段为 None, worker 接手后写入)
+    if db_started_at is None and state != "PENDING":
+        try:
+            row2 = (await db.execute(
+                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+            )).scalar_one_or_none()
+            if row2 is not None:
+                db_started_at = row2.started_at
+                if state in ("SUCCESS", "FAILURE", "REVOKED"):
+                    db_finished_at = row2.finished_at
         except Exception:
             pass
 
@@ -382,6 +399,8 @@ async def get_progress(
         total_epochs=info.get("total_epochs") or db_total_epochs,
         message=(db_msg if db_msg is not None else info.get("msg", "")) or "",
         history=None,
+        started_at=db_started_at,
+        finished_at=db_finished_at,
     )
 
 
@@ -467,6 +486,11 @@ async def stream_training_progress(
             db_msg = None
             db_total_epochs = None
             db_current_epoch = None
+            # v2.5.28: 拉 started_at / finished_at 一起回推, 详情页 SSE 实时刷新
+            # - started_at: PENDING 为 None, worker 接手时写入, 之后 PROGRESS/SUCCESS 不变
+            # - finished_at: 仅终态有值 (SUCCESS/FAILURE/REVOKED)
+            db_started_at = None
+            db_finished_at = None
             try:
                 async with AsyncSessionLocal() as db:
                     row = (await db.execute(
@@ -481,6 +505,9 @@ async def stream_training_progress(
                     db_total_epochs = row.epochs
                     if isinstance(row.history, list) and row.history:
                         db_current_epoch = row.history[-1].get("epoch")
+                    # v2.5.28: 时间字段序列化 (ORM 直接给 datetime, JSON 序列化 OK)
+                    db_started_at = row.started_at
+                    db_finished_at = row.finished_at
             except Exception:
                 pass
 
@@ -535,6 +562,14 @@ async def stream_training_progress(
                 "total_epochs": total_epochs,
                 "message": message,
             }
+            # v2.5.28: 透传 started_at / finished_at (DB 权威), 详情页 SSE 实时刷新
+            # - openDetail 时拉过 DB, 但 worker 接手后 (started_at 写入) SSE 没推, 详情会卡在 None
+            # - 终态下 finished_at 一旦有值 (FAILURE/SUCCESS 写库后) 立即推, 不必等下次 onComplete
+            # - datetime 直接 JSON 序列化 (FastAPI 会 ISO 化)
+            if db_started_at is not None:
+                payload["started_at"] = db_started_at.isoformat() if hasattr(db_started_at, "isoformat") else db_started_at
+            if db_finished_at is not None:
+                payload["finished_at"] = db_finished_at.isoformat() if hasattr(db_finished_at, "isoformat") else db_finished_at
             # ---- 透传 progress_callback 的 extra (数据集统计 + 增量训练状态) ----
             # 训练启动那一刻, train.py 会把 data_total/data_train/data_val/
             # num_classes/class_names 通过 extra 一次性推过来; 增量训练时
@@ -547,12 +582,16 @@ async def stream_training_progress(
                            "pretrained_error", "model_name"):
                     payload[_ek] = _ev
 
-            # ---- 签名去重: 状态/进度/消息/当前 epoch 任一变化才推 ----
+            # ---- 签名去重: 状态/进度/消息/当前 epoch/时间字段 任一变化才推 ----
+            # v2.5.28: 加入 started_at / finished_at, 让"worker 接手"和"任务结束"
+            # 这两个时间点的变化也能触发推送 (否则首帧没值就一直空着)
             signature = (
                 state,
                 round(progress, 1),
                 message,
                 current_epoch,
+                str(db_started_at) if db_started_at is not None else None,
+                str(db_finished_at) if db_finished_at is not None else None,
             )
             if signature != last_signature:
                 # SSE 字段: data= 一行 JSON, 后跟一个空行表示一帧结束
