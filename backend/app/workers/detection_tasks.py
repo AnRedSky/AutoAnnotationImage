@@ -14,7 +14,6 @@ Celery Tasks: 目标检测训练 + 自动标注 (v2.0.0 S3.2)
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from datetime import datetime
@@ -23,36 +22,12 @@ from typing import Optional
 
 from app.workers.celery_app import celery_app
 from app.core.redis_client import redis_client
+from app.core.celery_utils import run_async_in_worker as _run_async
 
 
 # 早期: 与 tasks.py 同样的 HF symlink 兜底
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
-
-
-# ============== 工具 (复制自 tasks.py, 保持低耦合) ==============
-
-def _run_async(coro):
-    """在 fresh event loop 中跑 coroutine, dispose engine 避免 SQLAlchemy 异步
-    连接池绑到已关闭 loop. 与 tasks.py._run_async 同源, 保持一致行为."""
-    from app.database import engine
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        return loop.run_until_complete(coro)
-    finally:
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        try:
-            loop.close()
-        except Exception:
-            pass
 
 
 def _set_task_state(self, state: str, meta: dict):

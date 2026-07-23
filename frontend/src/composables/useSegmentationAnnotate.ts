@@ -55,10 +55,9 @@ export function useSegmentationAnnotate(options: {
       }
       initialMaskMeta.value = { id: r.id, width: r.width, height: r.height }
       // 2) 拉 PNG 二进制 (responseType=blob)
+      // http 响应拦截器已 unwrap 为 response.data，故 resp 即为 Blob
       const resp: any = await segmentationApi.getMask(imageId, true)
-      const blob: Blob | null = resp instanceof Blob
-        ? resp
-        : (resp?.data instanceof Blob ? resp.data : null)
+      const blob: Blob | null = resp instanceof Blob ? resp : null
       if (blob) {
         if (initialMaskUrl.value) URL.revokeObjectURL(initialMaskUrl.value)
         initialMaskUrl.value = URL.createObjectURL(blob)

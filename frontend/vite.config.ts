@@ -23,6 +23,24 @@ export default defineConfig(({ mode }) => {
         '@': fileURLToPath(new URL('./src', import.meta.url))
       }
     },
+    // 生产构建：esbuild 丢弃 console/debugger，减小产物体积并避免调试日志泄漏
+    esbuild: {
+      drop: mode === 'production' ? ['console', 'debugger'] : [],
+    },
+    build: {
+      // echarts (~1MB) / element-plus (~600KB) 单独成 chunk，避免首屏单 bundle 过大
+      chunkSizeWarningLimit: 1500,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-vue': ['vue', 'vue-router', 'pinia'],
+            'vendor-element': ['element-plus', '@element-plus/icons-vue'],
+            'vendor-echarts': ['echarts', 'vue-echarts'],
+            'vendor-dayjs': ['dayjs'],
+          },
+        },
+      },
+    },
     server: {
       port: APP_PORT,
       host: '0.0.0.0',

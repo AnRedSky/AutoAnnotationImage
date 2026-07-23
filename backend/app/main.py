@@ -3,8 +3,9 @@ FastAPI Application Entry
 =========================
 基于深度学习的图像分类自动标注与人工修正系统
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.api import (
     auth, user, dataset, image, annotation,
@@ -14,7 +15,8 @@ from app.api import (
     segmentation,  # v2.0.0 图像分割
 )
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, engine
+from app.core.exceptions import AppException, to_response_payload
 
 # ---- 在最早期强制禁用 HF symlink (Windows [WinError 14007] 根因) ----
 # config.py 已经把 env 写入了 os.environ, 但 huggingface_hub 内部有时会缓存
@@ -38,10 +40,24 @@ except Exception:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动/关闭时执行"""
+    import logging  # noqa: PLC0415
+    logger = logging.getLogger("app.main")
     # 启动
     await init_db()
+    logger.info("Application started")
     yield
-    # 关闭（可清理资源）
+    # 关闭: 优雅释放数据库连接池与 Redis 连接，避免热重启丢数据/泄漏连接
+    logger.info("Shutting down, disposing resources...")
+    try:
+        await engine.dispose()
+    except Exception:  # noqa: BLE001
+        logger.exception("engine.dispose() failed")
+    try:
+        from app.core.redis_client import redis_client  # noqa: PLC0415
+        redis_client.close()
+    except Exception:  # noqa: BLE001
+        logger.exception("redis_client.close() failed")
+    logger.info("Cleanup complete")
 
 
 app = FastAPI(
@@ -114,6 +130,33 @@ async def root():
 
 
 # 注：详细健康检查见 /api/health（含数据库/Redis/MinIO 状态）
+
+
+# ============================================================
+#  全局异常处理 (统一响应格式 + 防止内部堆栈泄漏)
+# ============================================================
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException):
+    """业务异常: 转换为统一 {code, message} 响应"""
+    import logging  # noqa: PLC0415
+    logging.getLogger("app.main").warning(
+        "AppException %s on %s %s: %s",
+        exc.code, request.method, request.url.path, exc.message,
+    )
+    return JSONResponse(status_code=exc.status_code, content=to_response_payload(exc))
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """未捕获异常: 记录完整堆栈, 对前端仅返回脱敏的 500"""
+    import logging  # noqa: PLC0415
+    logging.getLogger("app.main").exception(
+        "Unhandled exception on %s %s", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"code": "INTERNAL_ERROR", "message": "内部错误，请联系管理员"},
+    )
 
 
 # ============================================================

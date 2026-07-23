@@ -29,10 +29,15 @@ const router = createRouter({
 
 router.beforeEach((to, _from, next) => {
   const store = useUserStore()
+  // 动态设置浏览器标题（来自路由 meta.title）
+  if (to.meta.title) {
+    document.title = `${to.meta.title} · 图像标注平台`
+  }
   if (to.path === '/login') {
     next()
-  } else if (!store.token && !localStorage.getItem('token')) {
-    next('/login')
+  } else if (!store.token) {
+    // token 过期/未登录：携带 redirect，登录后回跳原页面
+    next({ path: '/login', query: { redirect: to.fullPath } })
   } else {
     next()
   }

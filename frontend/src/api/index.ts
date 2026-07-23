@@ -2,6 +2,7 @@
  * API 客户端统一入口（与后端 FastAPI 路由 1:1 对齐）
  */
 import http from './http'
+import { createSSEStream } from '@/utils/sse'
 
 // <img> 标签无法附加 Authorization header，但后端 /api/files 已支持可选鉴权。
 // 仍然拼 token query 主要是为了：
@@ -189,11 +190,18 @@ export const trainingApi = {
     batch_size?: number
     learning_rate?: number
   }) =>
-    http.post(
-      `/training/start?dataset_id=${data.dataset_id}&base_model=${data.base_model}` +
-        `&model_name=${data.model_name}&epochs=${data.epochs || 20}` +
-        `&batch_size=${data.batch_size || 32}&learning_rate=${data.learning_rate || 0.0001}`
-    ),
+    // 后端 /training/start 用 Query(...) 接收参数，走 params 让 axios 自动 URL 编码，
+    // 避免 model_name 含特殊字符（& = # 空格 中文）时 URL 损坏。
+    http.post('/training/start', null, {
+      params: {
+        dataset_id: data.dataset_id,
+        base_model: data.base_model,
+        model_name: data.model_name,
+        epochs: data.epochs || 20,
+        batch_size: data.batch_size || 32,
+        learning_rate: data.learning_rate || 0.0001,
+      },
+    }),
   // 旧 REST 轮询 (保留兼容, 推荐改用 streamProgress)
   progress: (taskId: string) => http.get(`/training/progress/${taskId}`),
   // 训练历史曲线 (从 Redis 拉, 每个 epoch 结束 worker 会写)
@@ -266,10 +274,8 @@ export const trainingApi = {
    * @param callbacks.onError - 连接/解析异常回调
    * @returns cancel() 函数, 调用后立即关闭 fetch + abort
    *
-   * 为什么不用 EventSource:
-   *   EventSource 不支持自定义 header, 鉴权只能走 query. 但本接口后端
-   *   已经是可选鉴权, 仍保留 query token 兼容; 这里选 fetch + ReadableStream
-   *   是为了拿到 AbortController 的精确控制 (切页/刷新能立刻断开, 不留僵尸连接).
+   * 实现统一收敛到 @/utils/sse 的 createSSEStream（fetch + ReadableStream +
+   * AbortController，切页/刷新能立刻断开，不留僵尸连接）。
    */
   streamProgress: (
     taskId: string,
@@ -283,105 +289,7 @@ export const trainingApi = {
     const token = localStorage.getItem('token') || ''
     const qs = token ? `?token=${encodeURIComponent(token)}` : ''
     const url = `${baseURL}/training/progress/stream/${taskId}${qs}`
-
-    const controller = new AbortController()
-    let finished = false
-
-    const finish = (code: 'complete' | 'error', err?: Error) => {
-      if (finished) return
-      finished = true
-      if (code === 'complete') callbacks.onComplete?.()
-      else if (err) callbacks.onError?.(err)
-      try { controller.abort() } catch {}
-    }
-
-    ;(async () => {
-      let res: Response
-      try {
-        res = await fetch(url, {
-          method: 'GET',
-          signal: controller.signal,
-          headers: {
-            Accept: 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-        })
-      } catch (e: any) {
-        if (e?.name !== 'AbortError') finish('error', e instanceof Error ? e : new Error(String(e)))
-        return
-      }
-
-      if (!res.ok || !res.body) {
-        finish('error', new Error(`SSE 连接失败: HTTP ${res.status}`))
-        return
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder('utf-8')
-      let buffer = ''
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-
-          // SSE 帧以 \n\n 结束, 用换行切分后保留最后一段 (可能不完整)
-          let idx: number
-          // eslint-disable-next-line no-cond-assign
-          while ((idx = buffer.indexOf('\n\n')) !== -1) {
-            const rawFrame = buffer.slice(0, idx)
-            buffer = buffer.slice(idx + 2)
-            if (!rawFrame) continue
-
-            // 注释帧 (`: keepalive ...`) 直接跳过
-            if (rawFrame.startsWith(':')) continue
-
-            // 解析 event: / data: 多行字段
-            let eventName = 'message'
-            const dataLines: string[] = []
-            for (const line of rawFrame.split('\n')) {
-              if (line.startsWith(':')) continue
-              if (line.startsWith('event:')) {
-                eventName = line.slice(6).trim()
-              } else if (line.startsWith('data:')) {
-                dataLines.push(line.slice(5).trimStart())
-              }
-            }
-            if (!dataLines.length) continue
-            const dataStr = dataLines.join('\n')
-            let payload: any
-            try { payload = JSON.parse(dataStr) } catch { continue }
-
-            callbacks.onMessage(payload)
-
-            // 终端态由事件或 payload.state 双重判定
-            if (
-              eventName === 'end' ||
-              payload?.state === 'SUCCESS' ||
-              payload?.state === 'FAILURE' ||
-              payload?.state === 'REVOKED'
-            ) {
-              finish('complete')
-              return
-            }
-          }
-        }
-        // 服务端正常关闭流 → 视为完成
-        finish('complete')
-      } catch (e: any) {
-        if (e?.name !== 'AbortError') {
-          finish('error', e instanceof Error ? e : new Error(String(e)))
-        }
-      }
-    })()
-
-    return () => {
-      if (!finished) {
-        finished = true
-        try { controller.abort() } catch {}
-      }
-    }
+    return createSSEStream(url, callbacks)
   },
 }
 
@@ -494,7 +402,7 @@ export const detectionApi = {
   listModels: (params?: { dataset_id?: number; task_type?: string }) =>
     http.get('/detection/models/', { params: params || {} }),
   activateModel: (id: number) => http.post(`/detection/models/${id}/activate`),
-  // ---- SSE 实时进度 (复用 trainingApi.streamProgress 同源设计) ----
+  // ---- SSE 实时进度 (复用 @/utils/sse 的 createSSEStream, 与 trainingApi 同源) ----
   streamProgress: (
     taskId: string,
     callbacks: {
@@ -507,66 +415,7 @@ export const detectionApi = {
     const token = localStorage.getItem('token') || ''
     const qs = token ? `?token=${encodeURIComponent(token)}` : ''
     const url = `${baseURL}/detection/progress/stream/${taskId}${qs}`
-
-    const controller = new AbortController()
-    let finished = false
-    const finish = (code: 'complete' | 'error', err?: Error) => {
-      if (finished) return
-      finished = true
-      if (code === 'complete') callbacks.onComplete?.()
-      else if (err) callbacks.onError?.(err)
-      try { controller.abort() } catch {}
-    }
-    ;(async () => {
-      let res: Response
-      try {
-        res = await fetch(url, {
-          method: 'GET', signal: controller.signal,
-          headers: { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' },
-        })
-      } catch (e: any) {
-        if (e?.name !== 'AbortError') finish('error', e instanceof Error ? e : new Error(String(e)))
-        return
-      }
-      if (!res.ok || !res.body) {
-        finish('error', new Error(`SSE 连接失败: HTTP ${res.status}`))
-        return
-      }
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder('utf-8')
-      let buffer = ''
-      try {
-        while (true) {
-          const { value, done } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          let idx: number
-          while ((idx = buffer.indexOf('\n\n')) !== -1) {
-            const rawFrame = buffer.slice(0, idx)
-            buffer = buffer.slice(idx + 2)
-            if (!rawFrame || rawFrame.startsWith(':')) continue
-            let eventName = 'message'
-            const dataLines: string[] = []
-            for (const line of rawFrame.split('\n')) {
-              if (line.startsWith(':')) continue
-              if (line.startsWith('event:')) eventName = line.slice(6).trim()
-              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
-            }
-            if (!dataLines.length) continue
-            let payload: any
-            try { payload = JSON.parse(dataLines.join('\n')) } catch { continue }
-            callbacks.onMessage(payload)
-            if (eventName === 'end' || ['SUCCESS', 'FAILURE', 'REVOKED'].includes(payload?.state)) {
-              finish('complete'); return
-            }
-          }
-        }
-        finish('complete')
-      } catch (e: any) {
-        if (e?.name !== 'AbortError') finish('error', e instanceof Error ? e : new Error(String(e)))
-      }
-    })()
-    return () => { if (!finished) { finished = true; try { controller.abort() } catch {} } }
+    return createSSEStream(url, callbacks)
   },
 }
 

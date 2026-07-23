@@ -18,7 +18,7 @@
  *   · useSegmentationAnnotate (initialMaskUrl, 模式, 保存)
  *   · useAutoAnnotate (runAutoAnnotate, runDetectionAutoAnnotate)
  */
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi } from '@/api'
@@ -130,6 +130,14 @@ const historyIds = ref<number[]>([])
 const historyCursor = ref(-1)
 // 是否已到末尾 (栈顶时后端 list 返回空, 没有更多待标注图)
 const noMore = ref(false)
+// autoSaveBeforeSwitch 分割分支的兜底超时句柄，卸载时需清理避免回调在卸载后执行
+let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+// 组件卸载清理: 回收分割 mask blob URL + 清除自动保存兜底定时器，避免内存泄漏
+onBeforeUnmount(() => {
+  revokeMaskUrl()
+  if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null }
+})
 
 onMounted(async () => {
   try {
@@ -225,18 +233,17 @@ watch(datasetId, async (v) => {
   image.value = null
   candidates.value = []
   revokeMaskUrl()
-  try {
-    const cats: any = await datasetApi.categories(v)
-    categories.value = cats?.items || cats || []
-    const s: any = await annotationApi.stats(v)
-    stats.value = s
-  } catch {}
-  try {
-    const r: any = await modelApi.getActive(v)
-    activeModel.value = r?.items?.[0] || r?.model || null
-  } catch {
-    activeModel.value = null
-  }
+  // 三类互不依赖的请求并行拉取，避免串行 RTT 累加（原 200-800ms → 单次 RTT）
+  const [cats, s, actResp] = await Promise.all([
+    datasetApi.categories(v).catch(() => null),
+    annotationApi.stats(v).catch(() => null),
+    modelApi.getActive(v).catch(() => null),
+  ])
+  const c: any = cats
+  categories.value = c?.items || c || []
+  stats.value = s
+  const r: any = actResp
+  activeModel.value = r?.items?.[0] || r?.model || null
   await refreshFinetuneModels()
   loadNext()
 })
@@ -354,7 +361,7 @@ const autoSaveBeforeSwitch = async (): Promise<boolean> => {
         },
         { flush: 'sync' }
       )
-      setTimeout(() => { stop(); resolve(true) }, 5000)
+      autoSaveTimer = setTimeout(() => { stop(); resolve(true) }, 5000)
       segAnnotRef.value?.save?.()
     })
   }

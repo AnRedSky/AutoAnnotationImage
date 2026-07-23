@@ -28,6 +28,7 @@ from sqlalchemy import select, delete
 
 from app.database import get_db
 from app.core.deps import get_current_user
+from app.core.celery_utils import check_celery_available as _check_celery_available
 from app.models.user import User
 from app.models.image import Image
 from app.models.dataset import Dataset
@@ -42,7 +43,6 @@ from app.schemas.detection import (
 )
 from app.schemas.enums import TaskType, AnnotationSource
 from app.services.bbox_service import validate_normalized_bbox
-from app.core.redis_client import redis_client
 
 router = APIRouter()
 
@@ -301,17 +301,7 @@ async def batch_save_bboxes(
 
 
 # ============== S3.2 训练 / 自动标注 / 进度 ==============
-
-# Redis 健康检查: 训练和自动标注都需要 Celery worker, 没有 Redis 就立刻 503
-def _check_celery_available() -> None:
-    """检测 Redis 是否可达. 不可达则 503, 避免任务在 .delay() 处长时间阻塞."""
-    try:
-        redis_client.ping()
-    except Exception as e:
-        raise HTTPException(
-            503,
-            f"Redis 不可用, 任务无法入队: {e}",
-        )
+# Redis 健康检查统一使用 app.core.celery_utils.check_celery_available
 
 
 @router.post("/train", response_model=DetectionTrainResponse)

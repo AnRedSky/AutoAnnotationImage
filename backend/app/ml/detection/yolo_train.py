@@ -16,11 +16,14 @@ YOLO Training Adapter (v2.0.0 目标检测)
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 ProgressCallback = Optional[Callable[[str, int, int, Dict[str, Any]], None]]
@@ -128,9 +131,9 @@ def train_yolo(
 
     try:
         model.add_callback("on_train_epoch_end", _on_epoch_end)
-    except Exception:
-        # 新版 ultralytics 移除 add_callback, 静默忽略 (进度降级)
-        pass
+    except Exception as e:
+        # 新版 ultralytics 移除 add_callback, 进度降级为无 epoch 回调
+        logger.warning("add_callback 不可用, 训练进度回调降级: %s", e)
 
     # 启动训练 (verbose=False 避免把 log 写满 celery worker stdout)
     try:
@@ -169,8 +172,8 @@ def train_yolo(
             final_metrics["map_50_95"] = float(getattr(box, "map", 0.0) or 0.0)
             final_metrics["precision"] = float(getattr(box, "mp", 0.0) or 0.0)
             final_metrics["recall"] = float(getattr(box, "mr", 0.0) or 0.0)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("训练指标抽取失败, 返回空 metrics: %s", e)
 
     duration = (datetime.utcnow() - started).total_seconds()
     if progress_cb:
@@ -206,6 +209,6 @@ def cleanup_old_runs(keep_last: int = 3) -> int:
         try:
             shutil.rmtree(old)
             removed += 1
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("清理旧 run 目录失败 %s: %s", old, e)
     return removed

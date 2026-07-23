@@ -34,8 +34,8 @@ const onLogout = async () => {
     await ElMessageBox.confirm('确认退出登录？', '提示', { type: 'warning' })
   } catch { return }
   try { await authApi.logout() } catch {}
+  // token 统一由 store 管理（clear 同步移除 localStorage['token']）
   userStore.clear()
-  localStorage.removeItem('token')
   ElMessage.success('已退出登录')
   router.push('/login')
 }

@@ -3,7 +3,6 @@ Celery Tasks: Model Training & Auto Annotate
 ===========================================
 真正的训练逻辑 / 异步预标注, 在 Celery worker 中执行
 """
-import asyncio
 import json
 import os
 from datetime import datetime
@@ -12,6 +11,7 @@ from typing import Optional
 
 from app.workers.celery_app import celery_app
 from app.core.redis_client import redis_client
+from app.core.celery_utils import run_async_in_worker as _run_async
 from app.models.training_job import TrainingJob  # _persist_dataset_stats 需要
 
 # ---- 在最早期禁用 HF symlink (Windows [WinError 14007] 根因) ----
@@ -33,39 +33,6 @@ try:
         os.environ.setdefault("HUGGINGFACE_HUB_ENDPOINT", _settings.HUGGINGFACE_HUB_ENDPOINT)
 except Exception:
     pass
-
-
-def _run_async(coro):
-    """
-    在 fresh event loop 中跑 coroutine, 并 dispose engine 防止
-    SQLAlchemy async 连接池绑到已关闭的 loop 上。
-
-    背景: Celery 任务是 sync 函数, 内部用 asyncio.run() 调 async DB 代码。
-    多次 asyncio.run() 会反复创建/关闭 event loop, 但 SQLAlchemy async engine
-    的连接池会缓存 loop 引用, 第二次调用就会出现 "Event loop is closed" /
-    "NoneType has no attribute send" 错误 (greenlet bridge 失败)。
-    每次 dispose engine 可以强制清空 pool, 重建时绑到新 loop 上。
-    """
-    from app.database import engine
-
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        # 清理旧 loop 残留的连接
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        return loop.run_until_complete(coro)
-    finally:
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        try:
-            loop.close()
-        except Exception:
-            pass
 
 
 def _update_training_history(task_id: str, history: list):

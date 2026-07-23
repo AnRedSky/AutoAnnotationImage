@@ -1,5 +1,12 @@
 /**
- * Pinia 用户状态管理（含 localStorage 持久化）
+ * Pinia 用户状态管理
+ * ==================================================
+ * token 单一真值源: localStorage['token']
+ *   - Login 写入、http 拦截器读取、SSE/authQuery 拼接 均以此 key 为准
+ *   - store.token 仅作为响应式镜像, setAuth/clear 同步写 localStorage
+ *   - 移除了旧版手写 persist()/STORAGE_KEY (与 main.ts 的 Pinia 持久化插件双写,
+ *     且 key 不一致导致状态不可预测). 现在用户信息 (id/username/role) 由插件
+ *     持久化到 pinia-user, token 走 localStorage['token'], 不再交叉.
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
@@ -10,38 +17,23 @@ export interface UserInfo {
   role: string
 }
 
-const STORAGE_KEY = 'image-annotation-user'
+/** token 在 localStorage 中的唯一 key */
+export const TOKEN_KEY = 'token'
 
 export const useUserStore = defineStore('user', () => {
-  const initial = (() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      return raw ? JSON.parse(raw) : { token: null, user: null }
-    } catch {
-      return { token: null, user: null }
-    }
-  })()
-
-  const token = ref<string | null>(initial.token)
-  const user = ref<UserInfo | null>(initial.user)
-
-  const persist = () => {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ token: token.value, user: user.value })
-    )
-  }
+  const token = ref<string | null>(localStorage.getItem(TOKEN_KEY))
+  const user = ref<UserInfo | null>(null)
 
   const setAuth = (t: string, u: UserInfo) => {
     token.value = t
     user.value = u
-    persist()
+    localStorage.setItem(TOKEN_KEY, t)
   }
 
   const clear = () => {
     token.value = null
     user.value = null
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(TOKEN_KEY)
   }
 
   return { token, user, setAuth, clear }

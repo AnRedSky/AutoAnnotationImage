@@ -564,7 +564,8 @@ function hasAnnotation(img: any): boolean {
 
 onMounted(load)
 watch(statusFilter, resetPage)
-watch(() => route.params.id, () => load())
+// 切换数据集时重置分页与选中状态，避免停留在旧数据集的高页码导致空列表
+watch(() => route.params.id, resetPage)
 </script>
 
 <template>
@@ -842,7 +843,7 @@ watch(() => route.params.id, () => load())
           shadow="hover"
           class="image-card"
           :class="{ selected: selectedIds.includes(img.id) }"
-          @click.native="toggleSelect(img.id)"
+          @click="toggleSelect(img.id)"
         >
           <div class="image-thumb">
             <img
