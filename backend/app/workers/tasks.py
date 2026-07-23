@@ -14,10 +14,17 @@ from app.core.redis_client import redis_client
 from app.core.celery_utils import run_async_in_worker as _run_async
 from app.models.training_job import TrainingJob  # _persist_dataset_stats 需要
 
-# ---- 在最早期禁用 HF symlink (Windows [WinError 14007] 根因) ----
+# ---- 在最早期禁用 HF symlink + 设置缓存目录 (Windows [WinError 14007] 根因) ----
 # Celery worker 进程不经过 FastAPI startup, 所以必须在 worker import 阶段
 # 就把这两个开关写进 os.environ + huggingface_hub.constants, 否则后面
 # import timm 仍会触发 symlink 失败。
+# 同时在 import huggingface_hub 前设置预训练权重缓存目录 (与 config.py 一致),
+# 确保 timm/torchvision/ultralytics 的预训练权重统一落到 MODEL_DIR/cache。
+_model_dir_env = os.getenv("MODEL_DIR", "./models")
+_cache_dir_env = os.getenv("PRETRAINED_CACHE_DIR", str(Path(_model_dir_env) / "cache"))
+os.environ.setdefault("HF_HOME", str(Path(_cache_dir_env) / "huggingface"))
+os.environ.setdefault("TORCH_HOME", str(Path(_cache_dir_env) / "torch"))
+os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytics"))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 try:
@@ -33,6 +40,8 @@ try:
         os.environ.setdefault("HUGGINGFACE_HUB_ENDPOINT", _settings.HUGGINGFACE_HUB_ENDPOINT)
 except Exception:
     pass
+
+from app.config import settings
 
 
 def _update_training_history(task_id: str, history: list):
@@ -324,7 +333,7 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
                     await db.commit()
                 except Exception:
                     pass
-                pth_path = Path(__file__).parent.parent / "models" / f"{model_name}_best.pth"
+                pth_path = settings.MODEL_DIR / f"{model_name}_best.pth"
                 if pth_path.exists():
                     try: pth_path.unlink()
                     except OSError: pass
@@ -380,7 +389,7 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
                     pass
 
                 # 3.2 删磁盘上半成品 .pth
-                pth_path = Path(__file__).parent.parent / "models" / f"{model_name}_best.pth"
+                pth_path = settings.MODEL_DIR / f"{model_name}_best.pth"
                 if pth_path.exists():
                     try:
                         pth_path.unlink()

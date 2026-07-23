@@ -23,6 +23,7 @@ from app.models.dataset import Dataset
 from app.models.training_job import TrainingJob
 from app.models.user import User
 from app.core.deps import get_current_user
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -65,9 +66,7 @@ async def _delete_one_model(db: AsyncSession, m: ModelVersion) -> dict:
     if file_path:
         try:
             abs_path = os.path.abspath(file_path)
-            models_dir = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "models")
-            )
+            models_dir = str(settings.MODEL_DIR)
             if abs_path.startswith(models_dir + os.sep) and os.path.isfile(abs_path):
                 still_ref = await db.execute(
                     select(ModelVersion.id).where(
