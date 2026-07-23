@@ -236,7 +236,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { MagicStick, Lightning } from '@element-plus/icons-vue'
+import { MagicStick } from '@element-plus/icons-vue'
 
 const DETECTION_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
 

@@ -25,7 +25,7 @@ const onLogin = async () => {
     const res: any = await authApi.login(loginForm.username, loginForm.password)
     const tk = res.access_token
     if (!tk) throw new Error('未获取到 token')
-    localStorage.setItem('token', tk)
+    // token 统一由 store 管理（setAuth 同步写入 localStorage['token']）
     try {
       const me: any = await authApi.me()
       userStore.setAuth(tk, { id: me.id, username: me.username, role: me.role })
@@ -37,7 +37,9 @@ const onLogin = async () => {
       })
     }
     ElMessage.success('登录成功')
-    router.push('/')
+    // 登录后优先回跳原页面（由路由守卫在 query.redirect 中携带）
+    const redirect = (router.currentRoute.value.query.redirect as string) || '/'
+    router.push(redirect)
   } catch (e: any) {
     ElMessage.error('登录失败: ' + (e?.response?.data?.detail || e?.message || '用户名或密码错误'))
   } finally {

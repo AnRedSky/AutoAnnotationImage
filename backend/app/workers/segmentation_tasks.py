@@ -12,7 +12,6 @@ Celery Tasks: 图像分割训练 + 自动标注 (v2.0.0 S5.2)
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import io
 from datetime import datetime
@@ -21,34 +20,12 @@ from typing import Optional
 from sqlalchemy import select
 
 from app.workers.celery_app import celery_app
+from app.core.celery_utils import run_async_in_worker as _run_async
 
 
 # 早期: 与 detection_tasks 一致的 HF symlink 兜底
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
-
-
-# ============== 工具 ==============
-
-def _run_async(coro):
-    from app.database import engine
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        return loop.run_until_complete(coro)
-    finally:
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        try:
-            loop.close()
-        except Exception:
-            pass
 
 
 def _set_task_state(self, state: str, meta: dict):

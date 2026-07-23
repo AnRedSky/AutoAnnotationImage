@@ -158,10 +158,9 @@ const onAutoAnnotate = async (ds: any) => {
   }
 }
 
-const onUpload = (result: any) => {
+const onUpload = (_result: any) => {
   // UploadQueue 已 emit uploaded 事件, 这里可以刷新计数
   // 由于 UploadQueue 在弹窗内, 用户关闭时再 load
-  console.log('[UploadQueue] done:', result)
 }
 
 const onAddCategory = async () => {

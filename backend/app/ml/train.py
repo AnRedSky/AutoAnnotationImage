@@ -3,7 +3,6 @@ Model Training Pipeline
 ========================
 基于已确认标注, 训练 Fine-tune 模型
 """
-import asyncio
 import os
 import platform
 from pathlib import Path
@@ -16,6 +15,7 @@ from torchvision import transforms
 from PIL import Image
 
 from app.config import settings
+from app.core.celery_utils import run_async_in_worker as _run_async
 
 
 def collect_device_info() -> Dict[str, Any]:
@@ -98,31 +98,6 @@ def select_device(device_info: Dict[str, Any]) -> torch.device:
     except Exception as e:
         device_info["fallback_reason"] = f"{preferred} device construction failed: {e!r}"
     return torch.device("cpu")
-
-
-def _run_async(coro):
-    """
-    与 app.workers.tasks._run_async 同语义: 在 fresh event loop 中跑 coroutine,
-    并 dispose SQLAlchemy async engine, 防止连接池绑到已关闭 loop 上。
-    """
-    from app.database import engine
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        return loop.run_until_complete(coro)
-    finally:
-        try:
-            loop.run_until_complete(engine.dispose())
-        except Exception:
-            pass
-        try:
-            loop.close()
-        except Exception:
-            pass
 
 
 class ImageClassificationDataset(Dataset):

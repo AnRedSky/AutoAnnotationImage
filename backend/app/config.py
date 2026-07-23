@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     MYSQL_DB: Optional[str] = None  # 兼容旧名
     MYSQL_ROOT_PASSWORD: str = os.getenv("MYSQL_ROOT_PASSWORD", "root")
 
+    # ===== 数据库连接池 (MySQL) =====
+    # 原 database.py 硬编码 pool_size=10 / max_overflow=20, 现外置为配置
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "10"))
+    DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+    # 连接主动回收周期(秒). MySQL 默认 wait_timeout=8h, 长连接静默断开后首次
+    # 请求会报错, 设 3600s 主动回收 + pool_pre_ping 双保险
+    DB_POOL_RECYCLE: int = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+
     # ===== Redis =====
     REDIS_HOST: str = os.getenv("REDIS_HOST", "127.0.0.1")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))

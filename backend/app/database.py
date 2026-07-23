@@ -23,8 +23,13 @@ def _build_engine_kwargs() -> dict:
             "poolclass": StaticPool,
         }
     return {
-        "pool_size": 10,
-        "max_overflow": 20,
+        "pool_size": settings.DB_POOL_SIZE,
+        "max_overflow": settings.DB_MAX_OVERFLOW,
+        # 使用前先 ping: MySQL 长连接被服务端静默断开后, 首次请求才报错,
+        # pool_pre_ping 让 SQLAlchemy 在借出连接前做一次轻量检测, 失败则重建
+        "pool_pre_ping": True,
+        # 主动回收: 避免 MySQL wait_timeout(默认 8h) 静默断连
+        "pool_recycle": settings.DB_POOL_RECYCLE,
     }
 
 

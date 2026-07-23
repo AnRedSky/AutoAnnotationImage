@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.core.deps import get_current_user
+from app.core.celery_utils import check_celery_available as _check_celery_available
 from app.models.user import User
 from app.models.image import Image
 from app.models.category import Category
@@ -320,14 +321,7 @@ async def replace_mask(
 
 
 # ============== S5.2 训练 / 自动标注 / 进度 ==============
-
-def _check_celery_available() -> None:
-    """Redis ping 不可达 -> 503, 避免任务在 .delay() 处长时间阻塞"""
-    from app.core.redis_client import redis_client
-    try:
-        redis_client.ping()
-    except Exception as e:
-        raise HTTPException(503, f"Redis 不可用, 任务无法入队: {e}")
+# Redis 健康检查统一使用 app.core.celery_utils.check_celery_available
 
 
 @router.post("/train")

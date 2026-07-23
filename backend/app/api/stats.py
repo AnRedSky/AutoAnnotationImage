@@ -20,6 +20,7 @@ from app.models.dataset import Dataset
 from app.models.category import Category
 from app.models.annotation_log import AnnotationLog
 from app.models.model_version import ModelVersion
+from app.models.training_job import TrainingJob
 from app.models.user import User
 from app.core.deps import get_current_user
 
@@ -50,9 +51,11 @@ async def stats_overview(
     )).scalar() or 0
     # 模型版本数
     mv_count = (await db.execute(select(func.count(ModelVersion.id)))).scalar() or 0
-    # 训练任务数
+    # 训练任务数 (统计 TrainingJob 表全部任务, 含失败/进行中)
+    # 旧实现误用 ModelVersion.is_active.isnot(None), 实际统计的是"模型版本数",
+    # 且 is_active 布尔字段 IS NOT NULL 几乎匹配所有行, 与训练任务数无关
     train_count = (await db.execute(
-        select(func.count(ModelVersion.id)).where(ModelVersion.is_active.isnot(None))
+        select(func.count(TrainingJob.id))
     )).scalar() or 0
 
     return {

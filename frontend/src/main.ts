@@ -19,7 +19,15 @@ const pinia = createPinia()
 pinia.use(({ store }) => {
   const key = `pinia-${store.$id}`
   const saved = localStorage.getItem(key)
-  if (saved) store.$patch(JSON.parse(saved))
+  if (saved) {
+    // 防御非法 JSON 脏数据导致整个 app 启动崩溃
+    try {
+      store.$patch(JSON.parse(saved))
+    } catch (e) {
+      console.warn(`[pinia-persist] 解析 ${key} 失败，清除脏数据`, e)
+      localStorage.removeItem(key)
+    }
+  }
   store.$subscribe((_mutation, state) => {
     localStorage.setItem(key, JSON.stringify(state))
   }, { detached: true })

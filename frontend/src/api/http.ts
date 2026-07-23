@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 
 // API 基础路径：优先使用 .env.* 中配置的 VITE_API_BASE_URL，未配置时回退到 '/api'（依赖 Vite proxy 转发）
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || '/api'
@@ -18,24 +19,31 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config
 })
 
+// 并发 401 去重：多个请求同时失败时只弹一次提示 + 只跳一次登录页
+let isRedirectingToLogin = false
+
 http.interceptors.response.use(
   (response) => response.data,
   (error) => {
     const status = error?.response?.status
     if (status === 401) {
-      ElMessage.error('登录已失效，请重新登录')
-      localStorage.removeItem('token')
-      window.location.href = '/login'
+      // 登录已失效：清理鉴权态并跳登录页（保留 SPA 状态，避免全页刷新丢失未保存标注）
+      if (!isRedirectingToLogin) {
+        isRedirectingToLogin = true
+        ElMessage.error('登录已失效，请重新登录')
+        try { useUserStore().clear() } catch { localStorage.removeItem('token') }
+        // 懒加载 router 规避 http ↔ router ↔ api 循环引用
+        import('@/router').then((r) => {
+          r.default.push({ path: '/login', query: { redirect: window.location.pathname + window.location.search } })
+        }).finally(() => { isRedirectingToLogin = false })
+      }
     } else if (status === 403) {
       ElMessage.error('无权限访问')
-    } else if (status === 404) {
-      // 让业务代码处理 404 即可, 全局不刷
     } else if (status >= 500) {
       const detail = error?.response?.data?.detail || error?.message || '服务器内部错误'
       ElMessage.error('服务器错误: ' + detail)
-    } else {
-      // 4xx 业务错误, 抛出由调用方 catch + 显示
     }
+    // 404 / 4xx 业务错误交给调用方 catch 处理，全局不刷消息
     return Promise.reject(error)
   }
 )
