@@ -111,16 +111,13 @@ def train_yolo(
     # 训练回调: ultralytics 提供 add_callback('on_train_epoch_end', fn)
     def _on_epoch_end(trainer):
         epoch = trainer.epoch + 1  # 0-based → 1-based
-        # trainer.tloss 是 list (各 loss 平均), 这里取最后一次 batch 的 loss
+        # trainer.tloss 在新版 ultralytics 中是 tensor (非 list), 不能直接用于布尔判断
+        tloss = getattr(trainer, "tloss", None)
+        tloss_len = len(tloss) if tloss is not None else 0
         metrics = {
-            "box_loss": float(getattr(trainer, "tloss", [0.0])[0])
-                if hasattr(trainer, "tloss") and trainer.tloss else 0.0,
-            "cls_loss": float(getattr(trainer, "tloss", [0.0, 0.0])[1])
-                if hasattr(trainer, "tloss") and len(getattr(trainer, "tloss", [])) > 1
-                else 0.0,
-            "dfl_loss": float(getattr(trainer, "tloss", [0.0, 0.0, 0.0])[2])
-                if hasattr(trainer, "tloss") and len(getattr(trainer, "tloss", [])) > 2
-                else 0.0,
+            "box_loss": float(tloss[0]) if tloss_len > 0 else 0.0,
+            "cls_loss": float(tloss[1]) if tloss_len > 1 else 0.0,
+            "dfl_loss": float(tloss[2]) if tloss_len > 2 else 0.0,
         }
         # trainer.metrics 里有验证集结果 (mAP / P / R)
         for k in ("metrics/mAP50(B)", "metrics/mAP50-95(B)",
