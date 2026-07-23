@@ -187,12 +187,87 @@ export function useAutoAnnotate(options: {
         })
       }
       const matched = resp.matched_coco_classes || []
-      ElMessage.info(
-        `[预训练 ${detectionModelName.value}] 任务已入队, 等待 Celery worker 启动...` +
-        (matched.length
-          ? ` 匹配 COCO 类: ${matched.join(', ')}`
-          : ' 未匹配任何 COCO 类, 将无结果')
-      )
+      const unmatched = resp.unmatched_categories || []
+      const datasetCats = resp.dataset_categories || []
+      // v2.5.32: 0 匹配时, 弹详细诊断, 告诉用户具体哪些类目没命中 COCO,
+      // 并建议改用 fine-tune 模型 (而不是用「未匹配任何 COCO 类」一句话敷衍)
+      if (matched.length === 0 && datasetCats.length > 0) {
+        const catList = datasetCats.join('、')
+        const unmatchedList = unmatched.length > 0
+          ? unmatched.join('、')
+          : '(全部未匹配)'
+        await ElMessageBox.alert(
+          [
+            `任务已入队 (task_id: ${resp.task_id || '?'}), 但预训练 ${detectionModelName.value}`,
+            `只能识别 COCO 80 类, 与本数据集的 ${datasetCats.length} 个类目均无交集:`,
+            '',
+            `【本数据集类目】${catList}`,
+            '',
+            '【未匹配的类目】' + unmatchedList,
+            '',
+            '【后果】Celery worker 会跑完整个数据集, 但 0 张图会被写入 BBoxAnnotation (空跑)。',
+            '',
+            '【建议】改用本项目的 fine-tune 模型:',
+            '  ① 切回「标注工作台」页',
+            '  ② 打开「使用项目训练模型」开关',
+            '  ③ 选一个已激活的 fine-tune 模型',
+            '  ④ 重新点「启动 AI 预标注」',
+            '',
+            '(COCO 80 类常见: person, car, cat, dog, bicycle, bird, bottle, chair...)',
+          ].join('\n'),
+          '预训练模型与项目类目无交集',
+          {
+            type: 'warning',
+            confirmButtonText: '我知道了, 任务继续后台跑',
+            dangerouslyUseHTMLString: false,
+          }
+        )
+        // info 提示简短回执
+        ElMessage.info(
+          `[预训练 ${detectionModelName.value}] 任务已入队 (task_id: ${resp.task_id || '?'}), ` +
+          `但与本数据集 ${datasetCats.length} 个类目均无 COCO 交集, 不会产生标注。`
+        )
+      } else if (datasetCats.length === 0) {
+        // v2.5.33: 数据集无类目 — 这是 0 匹配的真凶, 之前会被笼统地归为「未匹配任何 COCO 类」
+        // 实际是: 数据集根本没类目, 谈不上匹配 COCO. 弹窗引导用户先去「数据集管理」添加类目
+        await ElMessageBox.alert(
+          [
+            '当前数据集「id=' + (datasetId.value ?? '?') + '」还没有任何类目, 无法进行有效预标注。',
+            '',
+            '【请按以下步骤添加类目】',
+            '  ① 前往「数据集管理」页面',
+            '  ② 点击该数据集的「详情」按钮',
+            '  ③ 在「类目管理」Tab 中至少添加 1 个类目',
+            '  ④ 再回到「标注工作台」启动 AI 预标注',
+            '',
+            '【原因】预训练 yolov8n 只能识别 COCO 80 类, 推理结果需要映射到项目类目才能写入 BBoxAnnotation. 没有项目类目, 推理结果无处安放, 即使入队也是空跑。',
+            '',
+            '【建议】如果想测试预标注流程, 可以先在「类目管理」中添加 1-2 个常见 COCO 类目 (如 person, car, cat, dog 等) 再试。',
+            '',
+            '【任务状态】已入队 (task_id: ' + (resp.task_id || '?') + '), 但因数据集无类目, worker 不会写入任何 BBoxAnnotation。',
+          ].join('\n'),
+          '数据集无类目',
+          {
+            type: 'warning',
+            confirmButtonText: '我知道了, 任务继续后台跑',
+            dangerouslyUseHTMLString: false,
+          }
+        )
+        // info 简短回执
+        ElMessage.info(
+          `[预训练 ${detectionModelName.value}] 任务已入队, 但数据集无类目, worker 不会写入任何标注。`
+        )
+      } else {
+        // v2.5.33: matched.length > 0 (部分匹配) — 显示匹配 + 未匹配统计
+        // 之前只会显示匹配列表, 用户不知道剩下的类目为什么没匹配
+        const unmatchedHint = unmatched.length > 0
+          ? `, ${unmatched.length} 个未匹配 (${unmatched.slice(0, 5).join('、')}${unmatched.length > 5 ? '...' : ''})`
+          : ''
+        ElMessage.info(
+          `[预训练 ${detectionModelName.value}] 任务已入队, 等待 Celery worker 启动... ` +
+          `匹配 COCO 类 ${matched.length}/${datasetCats.length}: ${matched.join(', ')}${unmatchedHint}`
+        )
+      }
     } catch (e: any) {
       ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
     } finally {
