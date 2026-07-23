@@ -450,6 +450,20 @@ const filteredDatasets = computed(() => {
 })
 
 /**
+ * 列表筛选行的"数据集"下拉: 按 taskTypeFilter 联动
+ * - 留空: 全部展示
+ * - 设了 task_type: 仅展示同 task_type 的数据集
+ * 用途: 用户先选了任务类型 (如 检测), 数据集下拉就只能选检测类数据集,
+ *       避免筛出 0 命中组合 (如 task_type=detection + dataset=分类数据集)
+ */
+const filterableDatasetsForFilter = computed(() => {
+  if (!taskTypeFilter.value) return DATASET_OPTIONS.value
+  return DATASET_OPTIONS.value.filter(
+    (d: any) => (d.task_type || 'classification') === taskTypeFilter.value
+  )
+})
+
+/**
  * 训练任务入队的统一占位逻辑 (新建/再训练 共用)
  *
  * 后端已预创建 TrainingJob 行 (PENDING), API 返回 task_id + job_id. 这里
@@ -1473,7 +1487,8 @@ const stopSilentRefresh = () => {
           :label="o.label" :value="o.value"
         />
       </el-select>
-      <!-- 数据集筛选: 独立下拉, 从 DATASET_OPTIONS 取数 -->
+      <!-- 数据集筛选: 独立下拉, 从 DATASET_OPTIONS 取数
+           v2.5.24: 与 taskTypeFilter 联动, 仅展示同 task_type 的数据集 -->
       <el-select
         v-model="datasetIdFilter"
         placeholder="数据集"
@@ -1483,7 +1498,7 @@ const stopSilentRefresh = () => {
         @change="onDatasetFilterChange"
       >
         <el-option
-          v-for="d in DATASET_OPTIONS" :key="d.id"
+          v-for="d in filterableDatasetsForFilter" :key="d.id"
           :label="d.name" :value="d.id"
         />
       </el-select>
