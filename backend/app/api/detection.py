@@ -454,6 +454,9 @@ async def start_auto_annotate_pretrained(
         return [c.name for c in rows]
     cat_names = await _load_cats()
     matched = [n for n in cat_names if n.lower() in coco_class_names]
+    # v2.5.32: 同时返回未匹配的项目类目, 让前端能提示用户具体哪些
+    # 类目名不与 COCO 80 类重合 (避免「未匹配任何 COCO 类」这种宽泛提示)
+    unmatched = [n for n in cat_names if n.lower() not in coco_class_names]
     if not matched and cat_names:
         # 不阻塞, 仅 warning
         pass
@@ -478,6 +481,9 @@ async def start_auto_annotate_pretrained(
         "state": "PENDING",
         "model_name": model_name,
         "matched_coco_classes": matched,
+        # v2.5.32: 前端提示用, 让用户知道自己的类目为什么没匹配
+        "dataset_categories": cat_names,
+        "unmatched_categories": unmatched,
         "message": (
             f"预训练 {model_name} 自动标注已入队, 等待 worker..."
             f" 与 COCO 80 类匹配 {len(matched)}/{len(cat_names)} 个项目类目"
