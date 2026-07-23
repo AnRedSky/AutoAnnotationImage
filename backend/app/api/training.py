@@ -18,6 +18,7 @@ from app.core.deps import get_current_user
 from app.core.redis_client import redis_client
 from app.database import get_db
 from app.models.user import User
+from app.models.dataset import Dataset
 from app.models.training_job import TrainingJob
 from app.schemas.training import TrainStartResponse, TrainStatusResponse, TrainingJobOut, TrainingJobList, TrainingJobActionResult, TrainingJobUpdate, TrainingJobLogAppend, TrainingJobLogOut
 from app.config import settings
@@ -60,6 +61,90 @@ async def get_user_optional_for_query(
     return user
 
 
+# ============== task_type 分发 ==============
+# 三种任务 (classification/detection/segmentation) 共用 TrainingJob 表,
+# worker 端 _create_job() 都用 self.request.id (== 预生成的 celery_task_id) 查找
+# 预创建行, 命中则 UPDATE state=PROGRESS. 因此预创建 + apply_async(task_id=...)
+# 对三种任务都安全, 前端统一走 /training/start 即可, 无需感知 task_type.
+#
+# 之前 start_training / start_existing_training_job 只投递 train_model_task
+# (纯分类), detection/segmentation 数据集提交后会被分类管线读取 final_label_id
+# (检测图该字段为 NULL) → 样本被全部跳过 → "已标注图片不足". 本分发修复此问题.
+
+
+def _build_task_kwargs(
+    task_type: str,
+    *,
+    dataset_id: int,
+    user_id: int,
+    base_model: str,
+    model_name: str,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    pretrained_model_path: Optional[str] = None,
+) -> dict:
+    """按 task_type 构建对应 Celery 任务的 kwargs.
+
+    - classification: timm 微调 (base_model=..., model_name=别名, 支持增量权重)
+    - detection:     ultralytics YOLO (model_name=权重名 yolov8n/..., model_alias=落盘名)
+    - segmentation:   torchvision DeepLabV3+ (backbone=..., model_alias=落盘名)
+
+    detection/segmentation 的 task 签名不接受 pretrained_model_path
+    (YOLO 用 ultralytics 自带预训练权重, DeepLab 用 torchvision 预训练), 故忽略.
+    """
+    if task_type == "detection":
+        return dict(
+            dataset_id=dataset_id,
+            user_id=user_id,
+            model_name=base_model,    # yolov8n/s/m/l/x
+            model_alias=model_name,  # 落盘 ModelVersion.name
+            epochs=epochs,
+            batch=batch_size,
+        )
+    if task_type == "segmentation":
+        return dict(
+            dataset_id=dataset_id,
+            user_id=user_id,
+            backbone=base_model,     # deeplabv3_resnet50/101
+            model_alias=model_name,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+        )
+    # classification (默认)
+    return dict(
+        dataset_id=dataset_id,
+        base_model=base_model,
+        model_name=model_name,
+        user_id=user_id,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+    )
+
+
+def _apply_training_task(task_type: str, kwargs: dict, *, task_id: Optional[str] = None):
+    """按 task_type 选择 Celery 任务并投递.
+
+    - task_id 非空: apply_async(task_id=...) 强制使用预生成 ID (预创建行场景)
+    - task_id 为空: delay() 让 Celery 自动生成 ID (resume 复用旧 job 场景,
+      随后由调用方把 job.celery_task_id 更新为 task.id)
+    """
+    if task_type == "detection":
+        from app.workers.detection_tasks import train_detection_task
+        task = train_detection_task
+    elif task_type == "segmentation":
+        from app.workers.segmentation_tasks import train_segmentation_task
+        task = train_segmentation_task
+    else:
+        task = train_model_task
+    if task_id:
+        return task.apply_async(kwargs=kwargs, task_id=task_id)
+    return task.delay(**kwargs)
+
+
 @router.post("/start", response_model=TrainStartResponse)
 async def start_training(
     dataset_id: int,
@@ -70,6 +155,7 @@ async def start_training(
     learning_rate: float = 1e-4,
     pretrained_model_path: str = "",
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     启动异步训练任务
@@ -88,7 +174,16 @@ async def start_training(
       在高并发下会触发 "RuntimeError: Event loop is closed" 等不稳定问题
     - 新: async def 直接 await DB 操作, 与 start_existing_training_job 模式一致
     - socket.create_connection 用 asyncio.to_thread 包一下, 避免阻塞 event loop
+
+    v2.5.16: 按 dataset.task_type 分发到对应 Celery 任务
+    (classification/detection/segmentation), 修复检测/分割数据集无法训练的问题.
     """
+    # ---- 校验数据集并取 task_type ----
+    ds = await db.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(404, f"Dataset id={dataset_id} not found")
+    task_type = (ds.task_type or "classification").lower()
+
     # model_name 兜底: 前端为空时, 自动生成
     if not model_name or not model_name.strip():
         ts = int(datetime.utcnow().timestamp()) % 10000000000
@@ -138,6 +233,7 @@ async def start_training(
                     dataset_id=dataset_id,
                     base_model=base_model,
                     model_name=model_name,
+                    task_type=task_type,  # 写入任务类型, 前端列表/详情据此渲染曲线
                     epochs=epochs,
                     batch_size=batch_size,
                     learning_rate=learning_rate,
@@ -159,16 +255,19 @@ async def start_training(
     try:
         # 用 .apply_async(task_id=...) 强制 Celery 用我们预生成的 ID 入队
         # 这样 worker 端的 task_id 一定等于预创建行里的 celery_task_id
-        task = train_model_task.apply_async(
-            kwargs=dict(
+        # 按 task_type 分发到对应任务 (classification/detection/segmentation)
+        task = _apply_training_task(
+            task_type,
+            _build_task_kwargs(
+                task_type,
                 dataset_id=dataset_id,
+                user_id=current_user.id,
                 base_model=base_model,
                 model_name=model_name,
-                user_id=current_user.id,
                 epochs=epochs,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
-                pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+                pretrained_model_path=pretrained_model_path,
             ),
             task_id=celery_task_id,  # 强制使用预生成的 ID
         )
@@ -488,16 +587,23 @@ async def stream_training_progress(
 
 
 @router.get("/history/{task_id}")
-def get_training_history(
+async def get_training_history(
     task_id: str,
     request: Request,
     token: str | None = Query(default=None),
     current_user: User | None = Depends(get_user_optional_for_query),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     返回训练历史曲线数据（用于前端绘制 loss/acc 折线图）- 鉴权可选
-    数据从 Redis 中按 task_id 拉取，由 Celery worker 在每个 epoch 结束时写入
-    Redis 不可达时返回空历史（前端展示 "暂无历史曲线"），避免 500
+
+    数据来源 (双源):
+    1. Redis train:history:{task_id} — classification worker 每个 epoch 写入
+    2. TrainingJob.history 字段 — detection/segmentation worker 写入 (YOLO/DeepLab
+       不走 classification 的 Redis 写入路径)
+
+    Redis 命中则用 Redis; 否则回退查 DB.history, 保证三种任务曲线都能展示.
+    Redis 不可达时返回空历史（前端展示 "暂无历史曲线"），避免 500.
     """
     history_key = f"train:history:{task_id}"
     history = []
@@ -509,12 +615,23 @@ def get_training_history(
             except (ValueError, TypeError):
                 history = []
     except Exception as e:
-        # Redis 不可达 / 超时 / 权限问题 → 返回空历史而不是 500
+        # Redis 不可达 / 超时 / 权限问题 → 记日志, 继续走 DB 回退
         import logging
         logging.getLogger(__name__).warning(
-            "redis_client.get(%s) failed: %s; return empty history", history_key, e
+            "redis_client.get(%s) failed: %s; fallback to DB history", history_key, e
         )
-        history = []
+
+    # ---- DB 回退: Redis 无数据时, 查 TrainingJob.history (detection/segmentation) ----
+    if not history:
+        try:
+            row = (await db.execute(
+                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+            )).scalar_one_or_none()
+            if row is not None and isinstance(row.history, list):
+                history = row.history
+        except Exception:
+            # DB 也查不到, 返回空历史
+            history = []
     return {"task_id": task_id, "history": history}
 
 
@@ -841,6 +958,7 @@ async def start_existing_training_job(
         final_batch_size = job.batch_size
         final_learning_rate = job.learning_rate
         new_model_name = job.model_name
+        final_task_type = (job.task_type or "classification").lower()
     else:
         # restart: 应用 payload 覆盖 (不修改 job 记录)
         final_dataset_id = overrides.get("dataset_id", job.dataset_id)
@@ -848,6 +966,7 @@ async def start_existing_training_job(
         final_epochs = overrides.get("epochs", job.epochs)
         final_batch_size = overrides.get("batch_size", job.batch_size)
         final_learning_rate = overrides.get("learning_rate", job.learning_rate)
+        final_task_type = (job.task_type or "classification").lower()
         # model_name: 强制加后缀 (即使 payload 改了 model_name, 也再加一层时间戳)
         # 原因: 防止再训练任务与历史任务 .pth 冲突; 同时也保证是「新」任务的标识
         suffix = f"_r{int(datetime.utcnow().timestamp())}"
@@ -918,6 +1037,7 @@ async def start_existing_training_job(
                             dataset_id=final_dataset_id,
                             base_model=final_base_model,
                             model_name=new_model_name,
+                            task_type=final_task_type,  # 继承原任务类型
                             epochs=final_epochs,
                             batch_size=final_batch_size,
                             learning_rate=final_learning_rate,
@@ -948,11 +1068,13 @@ async def start_existing_training_job(
             raise HTTPException(500, "预创建训练任务行失败 (inserted_primary_key 为空), 请重试")
 
     try:
-        apply_kwargs = dict(
+        # 按 final_task_type 分发到对应 Celery 任务 (classification/detection/segmentation)
+        apply_kwargs = _build_task_kwargs(
+            final_task_type,
             dataset_id=final_dataset_id,
+            user_id=current_user.id,
             base_model=final_base_model,
             model_name=new_model_name,
-            user_id=current_user.id,
             epochs=final_epochs,
             batch_size=final_batch_size,
             learning_rate=final_learning_rate,
@@ -960,9 +1082,10 @@ async def start_existing_training_job(
         )
         if mode == "restart":
             # 强制使用预生成的 ID, 与预创建行的 celery_task_id 一致
-            task = train_model_task.apply_async(kwargs=apply_kwargs, task_id=celery_task_id_to_use)
+            task = _apply_training_task(final_task_type, apply_kwargs, task_id=celery_task_id_to_use)
         else:
-            task = train_model_task.delay(**apply_kwargs)
+            # resume: 不指定 task_id, Celery 自动生成; 随后更新 job.celery_task_id = task.id
+            task = _apply_training_task(final_task_type, apply_kwargs)
     except Exception as e:
         # 入队失败, 回滚预创建的行
         if new_job_id is not None:
