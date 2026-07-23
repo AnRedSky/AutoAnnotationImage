@@ -1,5 +1,0 @@
-path: backend/models/yolo_data/yolov8n_v1_1784774825_179b31d83ede487ba8ddefaa28859ac5
-train: images/train
-val: images/val
-nc: 3
-names: ['沙发', '桌子', '床']
