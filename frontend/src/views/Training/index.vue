@@ -169,6 +169,8 @@ const loadJobs = async () => {
     if (modelKeywordFilter.value && modelKeywordFilter.value.trim()) {
       params.q = modelKeywordFilter.value.trim()
     }
+    // v2.5.24: 任务类型筛选, 留空 = 全部, 后端 WHERE 跳过该条件
+    if (taskTypeFilter.value) params.task_type = taskTypeFilter.value
     const r: any = await trainingApi.jobs(params)
     const items: any[] = r?.items || []
     total.value = r?.total ?? 0

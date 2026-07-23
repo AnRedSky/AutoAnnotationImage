@@ -640,6 +640,13 @@ async def get_training_history(
 async def list_training_jobs(
     dataset_id: Optional[int] = None,
     state: Optional[str] = Query(default=None, description="可选按状态过滤, e.g. PROGRESS/SUCCESS/FAILURE/PAUSED/REVOKED"),
+    task_type: Optional[str] = Query(
+        default=None,
+        description=(
+            "可选按任务类型过滤, e.g. classification/detection/segmentation. "
+            "v2.5.24: 支持逗号分隔的多值, e.g. 'classification,detection'."
+        ),
+    ),
     q: Optional[str] = Query(
         default=None,
         description=(

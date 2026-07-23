@@ -207,10 +207,11 @@ export const trainingApi = {
   // 训练历史曲线 (从 Redis 拉, 每个 epoch 结束 worker 会写)
   history: (taskId: string) => http.get(`/training/history/${taskId}`),
 
-  // 列表分页: params = { page, page_size, dataset_id?, state?, q? }
+  // 列表分页: params = { page, page_size, dataset_id?, state?, task_type?, q? }
   // q: 关键词模糊搜索, 同时匹配 model_name 与 base_model (大小写不敏感)
+  // task_type: 任务类型过滤, 支持单值或逗号分隔多值 (e.g. 'classification,detection')
   // 后端返回 { total, items, page, page_size }
-  jobs: (params: { page?: number; page_size?: number; dataset_id?: number; state?: string; q?: string } = {}) =>
+  jobs: (params: { page?: number; page_size?: number; dataset_id?: number; state?: string; task_type?: string; q?: string } = {}) =>
     http.get('/training/jobs/', { params }),
   // 单条详情
   job: (jobId: number) => http.get(`/training/jobs/${jobId}`),
