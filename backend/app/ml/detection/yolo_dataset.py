@@ -180,7 +180,7 @@ async def export_yolo_dataset(
         FileNotFoundError: 源图片找不到
         ValueError: dataset 不存在 / 无图片
     """
-    workdir = Path(workdir)
+    workdir = Path(workdir).resolve()
     if workdir.exists():
         shutil.rmtree(workdir)
     (workdir / "images" / "train").mkdir(parents=True)
