@@ -23,9 +23,17 @@ from app.workers.celery_app import celery_app
 from app.core.celery_utils import run_async_in_worker as _run_async
 
 
-# 早期: 与 detection_tasks 一致的 HF symlink 兜底
+# 早期: 与 detection_tasks 一致的 HF symlink + 缓存目录兜底
+# 在 import huggingface_hub / torchvision 前设置预训练权重缓存目录
+_model_dir_env = os.getenv("MODEL_DIR", "./models")
+_cache_dir_env = os.getenv("PRETRAINED_CACHE_DIR", str(Path(_model_dir_env) / "cache"))
+os.environ.setdefault("HF_HOME", str(Path(_cache_dir_env) / "huggingface"))
+os.environ.setdefault("TORCH_HOME", str(Path(_cache_dir_env) / "torch"))
+os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytics"))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+
+from app.config import settings
 
 
 def _set_task_state(self, state: str, meta: dict):
@@ -151,7 +159,7 @@ def train_segmentation_task(
         return {"status": "FAILURE", "error": str(e)}
 
     # 5) 落盘 ModelVersion
-    weights_dir = Path("backend/models/seg_runs")
+    weights_dir = settings.MODEL_DIR / "seg_runs"
     weights_dir.mkdir(parents=True, exist_ok=True)
     weights_path = weights_dir / f"{model_alias}_{self.request.id}.pt"
     if result.get("state_dict_bytes"):

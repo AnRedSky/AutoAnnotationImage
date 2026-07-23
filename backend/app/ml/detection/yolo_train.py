@@ -43,7 +43,7 @@ def train_yolo(
     imgsz: int = 320,
     batch: int = 8,
     device: str = "cpu",
-    project: str = "backend/models/runs",
+    project: Optional[str] = None,
     name: str = "detect_train",
     progress_cb: ProgressCallback = None,
 ) -> Dict[str, Any]:
@@ -86,6 +86,10 @@ def train_yolo(
         raise YoloTrainError(f"data.yaml 不存在: {data_yaml}")
     if epochs < 1:
         raise YoloTrainError(f"epochs 必须 >= 1, 实际 {epochs}")
+
+    if project is None:
+        from app.config import settings
+        project = str(settings.MODEL_DIR / "runs")
 
     started = datetime.utcnow()
     run_dir = Path(project) / name
@@ -196,7 +200,8 @@ def cleanup_old_runs(keep_last: int = 3) -> int:
     保留最近 N 次训练 run, 清理更早的 (节省磁盘)
     返回被清理的 run 数量
     """
-    base = Path("backend/models/runs")
+    from app.config import settings
+    base = settings.MODEL_DIR / "runs"
     if not base.exists():
         return 0
     runs = sorted(

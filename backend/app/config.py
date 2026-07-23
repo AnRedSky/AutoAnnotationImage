@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     # ===== File Storage =====
     UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
     MODEL_DIR: Path = Path(os.getenv("MODEL_DIR", "./models")).resolve()
+    # 临时训练数据根目录 (YOLO 数据集导出等), 默认 MODEL_DIR/data
+    DATA_DIR: Path = Path(
+        os.getenv("DATA_DIR", str(Path(os.getenv("MODEL_DIR", "./models")) / "data"))
+    ).resolve()
+    # 预训练权重统一缓存根目录 (timm/torchvision/ultralytics), 默认 MODEL_DIR/cache
+    PRETRAINED_CACHE_DIR: Path = Path(
+        os.getenv("PRETRAINED_CACHE_DIR", str(Path(os.getenv("MODEL_DIR", "./models")) / "cache"))
+    ).resolve()
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 
     # ===== ML =====
@@ -210,6 +218,8 @@ class Settings(BaseSettings):
 settings = Settings()
 settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 settings.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+settings.PRETRAINED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---- 在最早时机同步关键环境变量到 os.environ ----
 # config.py 是 app 启动时第一个被 import 的模块，pydantic-settings 自动从 .env
@@ -235,10 +245,22 @@ for _k in _ENV_SYNC_KEYS:
 if settings.HF_ENDPOINT:
     _os.environ["HF_ENDPOINT"] = settings.HF_ENDPOINT
     _os.environ["HUGGINGFACE_HUB_ENDPOINT"] = settings.HUGGINGFACE_HUB_ENDPOINT
-if settings.HF_HOME:
-    _os.environ["HF_HOME"] = str(settings.HF_HOME)
-    # 立刻创建目录
-    Path(settings.HF_HOME).mkdir(parents=True, exist_ok=True)
+
+# ---- 统一预训练权重缓存到 PRETRAINED_CACHE_DIR ----
+# timm (HF_HOME) / torchvision (TORCH_HOME) / ultralytics (ULTRALYTICS_HOME)
+# 三套缓存统一收纳到 MODEL_DIR/cache 子目录, 便于备份/迁移/清理.
+# HF_HOME: 用户显式设置则用用户的, 否则默认 PRETRAINED_CACHE_DIR/huggingface
+_hf_home = settings.HF_HOME or str(settings.PRETRAINED_CACHE_DIR / "huggingface")
+_os.environ["HF_HOME"] = _hf_home
+Path(_hf_home).mkdir(parents=True, exist_ok=True)
+# torchvision 权重缓存 (默认 ~/.cache/torch)
+_torch_home = str(settings.PRETRAINED_CACHE_DIR / "torch")
+_os.environ["TORCH_HOME"] = _torch_home
+Path(_torch_home).mkdir(parents=True, exist_ok=True)
+# ultralytics 权重缓存 (默认 ~/.cache/ultralytics)
+_ultralytics_home = str(settings.PRETRAINED_CACHE_DIR / "ultralytics")
+_os.environ["ULTRALYTICS_HOME"] = _ultralytics_home
+Path(_ultralytics_home).mkdir(parents=True, exist_ok=True)
 _os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(settings.HF_HUB_DOWNLOAD_TIMEOUT))
 # ---- 在最早时机禁用 HF symlink (Windows 上 [WinError 14007] 根因) ----
 # 必须比 huggingface_hub.constants 被读取更早, 所以这里只写 os.environ,

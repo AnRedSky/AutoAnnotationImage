@@ -25,9 +25,17 @@ from app.core.redis_client import redis_client
 from app.core.celery_utils import run_async_in_worker as _run_async
 
 
-# 早期: 与 tasks.py 同样的 HF symlink 兜底
+# 早期: 与 tasks.py 同样的 HF symlink + 缓存目录兜底
+# 在 import huggingface_hub / ultralytics 前设置预训练权重缓存目录
+_model_dir_env = os.getenv("MODEL_DIR", "./models")
+_cache_dir_env = os.getenv("PRETRAINED_CACHE_DIR", str(Path(_model_dir_env) / "cache"))
+os.environ.setdefault("HF_HOME", str(Path(_cache_dir_env) / "huggingface"))
+os.environ.setdefault("TORCH_HOME", str(Path(_cache_dir_env) / "torch"))
+os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytics"))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+
+from app.config import settings
 
 
 def _set_task_state(self, state: str, meta: dict):
@@ -152,9 +160,9 @@ def train_detection_task(
             meta.update(sticky_meta)
         _set_task_state(self, "PROGRESS", meta)
 
+    workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
     try:
         # 2) 导 YOLO 数据集
-        workdir = Path(f"backend/models/yolo_data/{model_alias}_{task_id}")
         _set_task_state(self, "PROGRESS", {
             "progress": 1.0,
             "msg": "正在导出 YOLO 数据集...",
@@ -192,7 +200,7 @@ def train_detection_task(
             imgsz=imgsz,
             batch=batch,
             device=device,
-            project="backend/models/runs",
+            project=str(settings.MODEL_DIR / "runs"),
             name=model_alias,
             progress_cb=train_cb,
         )
@@ -250,6 +258,10 @@ def train_detection_task(
     except Exception as e:
         _finish_failed_job(self, job_id, e, started_at)
         return {"status": "FAILURE", "job_id": job_id, "error": str(e)[:500]}
+    finally:
+        # 训练后清理临时数据集导出目录 (images/labels/data.yaml)
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _finish_failed_job(self, job_id: int, exc: Exception, started_at: datetime):
