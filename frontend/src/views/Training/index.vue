@@ -6,7 +6,7 @@ import {
   List as ListIcon, DataLine, Search, InfoFilled
 } from '@element-plus/icons-vue'
 import { trainingApi, datasetApi, autoAnnotateApi } from '@/api'
-import { getDefaultBaseModel, getTaskTypeMeta } from '@/utils/taskType'
+import { getDefaultBaseModel, TASK_TYPE_OPTIONS } from '@/utils/taskType'
 import * as echarts from 'echarts'
 // v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
 import TrainingParamsForm, { type TrainingParams } from './components/TrainingParamsForm.vue'
@@ -138,6 +138,10 @@ const loading = ref(false)
 const datasetIdFilter = ref<number | null>(null)
 // 模型关键词筛选: 同时模糊匹配 model_name 和 base_model (后端 ILIKE)
 const modelKeywordFilter = ref<string>('')
+// v2.5.24: 任务类型筛选 ('' = 全部, 与后端 task_type 字段对齐)
+// - 固定排序: 图片分类 / 目标检测 / 图片分割 (复用 utils/taskType.ts 的 TASK_TYPE_OPTIONS)
+// - 留空时不过滤, 由后端 WHERE 跳过该条件
+const taskTypeFilter = ref<string>('')
 // 防抖: 关键词输入用 setTimeout 静默刷新, 避免每按一个字母就发一次请求
 let keywordDebounceTimer: any = null
 
@@ -226,6 +230,8 @@ const onPageChange = (p: number) => { page.value = p; loadJobs() }
 const onSizeChange = (s: number) => { pageSize.value = s; page.value = 1; loadJobs() }
 const onStateFilterChange = () => { page.value = 1; loadJobs() }
 const onDatasetFilterChange = () => { page.value = 1; loadJobs() }
+/** v2.5.24: 任务类型筛选变更 — 翻到第 1 页并刷新 */
+const onTaskTypeFilterChange = () => { page.value = 1; loadJobs() }
 /**
  * 关键词筛选: 300ms 防抖, 避免每个字符都发请求
  * 清空关键词也立即触发一次 (用户主动 clear 时希望看到完整列表)
@@ -249,6 +255,7 @@ const resetFilters = () => {
   stateFilter.value = ''
   datasetIdFilter.value = null
   modelKeywordFilter.value = ''
+  taskTypeFilter.value = ''
   page.value = 1
   loadJobs()
 }
@@ -260,6 +267,11 @@ const onStateFilterClear = () => {
 }
 const onDatasetFilterClear = () => {
   datasetIdFilter.value = null
+  page.value = 1
+  loadJobs()
+}
+const onTaskTypeFilterClear = () => {
+  taskTypeFilter.value = ''
   page.value = 1
   loadJobs()
 }
@@ -1430,6 +1442,22 @@ const stopSilentRefresh = () => {
 
     <!-- ============== 筛选 + 操作 同一行 ============== -->
     <div class="filter-row">
+      <!-- v2.5.24: 任务类型筛选, 固定排序: 图片分类 / 目标检测 / 图片分割
+           - 留空 = 全部, 与后端 task_type=NULL 跳过对应
+           - 复用 utils/taskType.ts 的 TASK_TYPE_OPTIONS
+           - 与 Annotate 工作台 / 模型版本管理 保持一致 -->
+      <el-select
+        v-model="taskTypeFilter"
+        placeholder="任务类型"
+        class="app-select app-select--narrow"
+        clearable
+        @change="onTaskTypeFilterChange"
+      >
+        <el-option
+          v-for="opt in TASK_TYPE_OPTIONS" :key="opt.value"
+          :label="opt.label" :value="opt.value"
+        />
+      </el-select>
       <!-- 状态筛选 -->
       <el-select
         v-model="stateFilter"
@@ -1468,7 +1496,7 @@ const stopSilentRefresh = () => {
       />
       <!-- 重置按钮: 仅在有任一筛选时显示 -->
       <el-button
-        v-if="stateFilter || datasetIdFilter != null || modelKeywordFilter"
+        v-if="stateFilter || datasetIdFilter != null || modelKeywordFilter || taskTypeFilter"
         text
         :icon="Refresh"
         @click="resetFilters"
@@ -1482,8 +1510,11 @@ const stopSilentRefresh = () => {
     </div>
 
     <!-- 筛选状态条: 当有任一筛选生效时, 显示当前命中条件 (便于用户确认筛了啥) -->
-    <div v-if="stateFilter || datasetIdFilter != null || modelKeywordFilter" class="filter-chips">
+    <div v-if="stateFilter || datasetIdFilter != null || modelKeywordFilter || taskTypeFilter" class="filter-chips">
       <span class="chips-label">当前筛选:</span>
+      <el-tag v-if="taskTypeFilter" type="info" effect="plain" closable @close="onTaskTypeFilterClear">
+        任务类型: {{ TASK_TYPE_OPTIONS.find((o) => o.value === taskTypeFilter)?.label || taskTypeFilter }}
+      </el-tag>
       <el-tag v-if="stateFilter" type="info" effect="plain" closable @close="onStateFilterClear">
         状态: {{ STATE_OPTIONS.find((o) => o.value === stateFilter)?.label || stateFilter }}
       </el-tag>

@@ -669,6 +669,15 @@ async def list_training_jobs(
     if state:
         base = base.where(TrainingJob.state == state)
         count_base = count_base.where(TrainingJob.state == state)
+    if task_type and task_type.strip():
+        # v2.5.24: 支持逗号分隔的多值 (前端可能同时选 classification + detection)
+        types = [t.strip() for t in task_type.split(",") if t.strip()]
+        if len(types) == 1:
+            base = base.where(TrainingJob.task_type == types[0])
+            count_base = count_base.where(TrainingJob.task_type == types[0])
+        elif len(types) > 1:
+            base = base.where(TrainingJob.task_type.in_(types))
+            count_base = count_base.where(TrainingJob.task_type.in_(types))
     if q and q.strip():
         like_pat = f"%{q.strip()}%"
         # 关键词同时作用于 model_name 与 base_model, 用 OR 连接

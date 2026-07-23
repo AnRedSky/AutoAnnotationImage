@@ -359,6 +359,24 @@ const resetFilters = () => {
 
     <!-- ============== 筛选 + 批量操作 (同一行) ============== -->
     <div class="filter-row">
+      <!-- v2.5.24: 任务类型筛选挪到最前方 (与 Annotate 工作台 / 训练任务页 顺序一致)
+           - 固定排序: 图片分类 / 目标检测 / 图片分割
+           - 复用 utils/taskType.ts 的 TASK_TYPE_OPTIONS
+           - 留空 = 全部 (本页面是客户端过滤, 不发后端请求) -->
+      <el-select
+        v-model="filterTaskType"
+        clearable
+        placeholder="任务类型"
+        class="app-select filter-task-type"
+        @change="onFilterChange"
+      >
+        <el-option label="全部任务类型" value="" />
+        <el-option
+          v-for="opt in TASK_TYPE_OPTIONS" :key="opt.value"
+          :label="opt.label"
+          :value="opt.value"
+        />
+      </el-select>
       <el-select
         v-model="filterDatasetId"
         clearable
@@ -371,21 +389,6 @@ const resetFilters = () => {
           v-for="ds in datasetOptions" :key="ds.id"
           :label="ds.name"
           :value="ds.id"
-        />
-      </el-select>
-      <!-- S7 新增: 任务类型筛选 (默认全部) -->
-      <el-select
-        v-model="filterTaskType"
-        clearable
-        placeholder="按任务类型筛选"
-        class="app-select filter-task-type"
-        @change="onFilterChange"
-      >
-        <el-option label="全部任务类型" value="" />
-        <el-option
-          v-for="opt in TASK_TYPE_OPTIONS" :key="opt.value"
-          :label="opt.label"
-          :value="opt.value"
         />
       </el-select>
       <el-input
