@@ -410,7 +410,13 @@ async def start_auto_annotate(
     return {
         "task_id": async_result.id,
         "state": "PENDING",
-        "message": "自动标注任务已入队, 等待 worker 启动...",
+        "model_name": mv.name,
+        "model_version_id": mv.id,
+        "base_model": mv.base_model,
+        "message": (
+            f"Fine-tune 自动标注已入队, 等待 worker 启动... "
+            f"(model: {mv.name} · base: {mv.base_model})"
+        ),
     }
 
 

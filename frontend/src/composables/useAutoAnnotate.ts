@@ -189,6 +189,18 @@ export function useAutoAnnotate(options: {
       const matched = resp.matched_coco_classes || []
       const unmatched = resp.unmatched_categories || []
       const datasetCats = resp.dataset_categories || []
+      // v2.5.34: 关键修复 — datasetCats/matched/unmatched 三个诊断字段是「预训练 yolov8n」
+      // 端点特有的 (detection.py:483-486), fine-tune 端点 (detection.py:410-414) 不返回这些字段.
+      // 之前不管 useFinetune 走哪条路径, 都会无脑读这三个字段, 当 fine-tune 返回 undefined 时
+      // datasetCats 会 fall back 到 [], 错误地走"数据集无类目"分支, 误导用户.
+      // 修复: 三支诊断只在预训练分支生效; fine-tune 分支直接用后端 message.
+      if (useFinetune.value) {
+        // v2.5.34: fine-tune 模式 — 简单回执后端 message, 不做 COCO 诊断
+        ElMessage.info(
+          `[Fine-tune ${selectedModelId.value || '?'}] ${resp.message || '任务已入队, 等待 worker 启动...'}`
+        )
+        return
+      }
       // v2.5.32: 0 匹配时, 弹详细诊断, 告诉用户具体哪些类目没命中 COCO,
       // 并建议改用 fine-tune 模型 (而不是用「未匹配任何 COCO 类」一句话敷衍)
       if (matched.length === 0 && datasetCats.length > 0) {
