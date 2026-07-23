@@ -41,7 +41,7 @@ uploads/
 /backend/models/*.safetensors
 /backend/models/hf_cache/
 /backend/models/runs/
-/backend/models/yolo_data/
+/backend/models
 
 # 兜底: 任何位置的模型文件
 *.pt
