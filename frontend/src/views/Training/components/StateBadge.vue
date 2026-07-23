@@ -1,15 +1,14 @@
 <script setup lang="ts">
 /**
- * StateBadge - 训练任务状态徽标 (v2.5.24 重构)
- * 设计目标: 与 Models 页 is_active 状态徽标视觉对齐
- * - SUCCESS: el-tag + type="success" + effect="dark" + CircleCheck
- *   (对齐 Models 页"已激活"的最强样式)
- * - PROGRESS: el-tag + type="primary" + effect="plain" + Loading (动画)
- * - 其他: el-tag + type=* + effect="plain", 不加 icon, 保持简洁
- * 取代 v2.5.24 之前的自定义 span+inline style, 统一走 el-tag
+ * StateBadge - 训练任务状态徽标 (v2.5.25 简化)
+ * 设计目标: 最低视觉干扰, 白底细边 + 文字, 状态靠文案承担
+ * - 仅 SUCCESS / FAILURE / PROGRESS 用类型色 (绿/红/蓝) 提示
+ * - PENDING / REVOKED / PAUSED 全部用 info 灰, 视觉降噪
+ * - 不加任何 icon (包括 SUCCESS 的 CircleCheck, PROGRESS 的 Loading spinner)
+ *   训练中的"动态感"由 el-progress 列的 0-100% 数字承担
+ * 取代 v2.5.24 的 icon+dark 方案, 解决表格色块过重问题
  */
 import { computed } from 'vue'
-import { Loading, CircleCheck } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   state: string  // PENDING | PROGRESS | SUCCESS | FAILURE | REVOKED | PAUSED
@@ -17,40 +16,27 @@ const props = defineProps<{
 }>()
 
 type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger'
-type TagEffect = 'plain' | 'dark'
 
-const META: Record<string, {
-  label: string
-  type: TagType
-  effect: TagEffect
-  icon?: any
-}> = {
-  PENDING:  { label: '等待中', type: 'info',    effect: 'plain' },
-  PROGRESS: { label: '训练中', type: 'primary', effect: 'plain', icon: Loading },
-  SUCCESS:  { label: '已完成', type: 'success', effect: 'dark',  icon: CircleCheck },
-  FAILURE:  { label: '失败',   type: 'danger',  effect: 'plain' },
-  REVOKED:  { label: '已取消', type: 'info',    effect: 'plain' },
-  PAUSED:   { label: '已暂停', type: 'warning', effect: 'plain' },
+// 配色规则: 仅强调"训练完成 / 失败 / 进行中" 3 个有信息量的状态
+// 其余用 info 灰, 让表格整体更"安静"
+const META: Record<string, { label: string; type: TagType }> = {
+  PENDING:  { label: '等待中', type: 'info' },
+  PROGRESS: { label: '训练中', type: 'primary' },
+  SUCCESS:  { label: '已完成', type: 'success' },
+  FAILURE:  { label: '失败',   type: 'danger' },
+  REVOKED:  { label: '已取消', type: 'info' },
+  PAUSED:   { label: '已暂停', type: 'warning' },
 }
 
 const meta = computed(() => META[props.state] || {
-  label: props.state, type: 'info' as TagType, effect: 'plain' as TagEffect,
+  label: props.state, type: 'info' as TagType,
 })
 // el-tag size: 'small' | 'default' | 'large'
 const tagSize = computed(() => props.size === 'md' ? 'default' : 'small')
-// PROGRESS 走 Element Plus 自带 is-loading 旋转动画
-const isLoading = computed(() => props.state === 'PROGRESS')
 </script>
 
 <template>
-  <el-tag :type="meta.type" :effect="meta.effect" :size="tagSize">
-    <el-icon
-      v-if="meta.icon"
-      :class="{ 'is-loading': isLoading }"
-      style="margin-right: 3px; vertical-align: -2px;"
-    >
-      <component :is="meta.icon" />
-    </el-icon>
+  <el-tag :type="meta.type" effect="plain" :size="tagSize">
     {{ meta.label }}
   </el-tag>
 </template>

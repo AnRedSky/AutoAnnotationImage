@@ -1596,15 +1596,11 @@ const stopSilentRefresh = () => {
           <template #default="{ row }">{{ datasetNameOf(row.dataset_id) }}</template>
         </el-table-column>
         <el-table-column prop="base_model" label="基础模型" min-width="92" show-overflow-tooltip />
-        <!-- 任务类型列 (v2.5.24): 与 Models/Datasets 页统一 — el-tag + effect="plain" + 类型色
-             不加 icon 和 tooltip, 与 Models 页保持视觉一致 -->
+        <!-- 任务类型列 (v2.5.25 简化): 全部用 info 灰 + plain, 文案承担信息
+             之前用 meta.type (primary/success/warning 三色) 在表格里色块过多, 视觉嘈杂 -->
         <el-table-column label="任务类型" width="120" align="center">
           <template #default="{ row }">
-            <el-tag
-              :type="getTaskTypeMeta(row.task_type || 'classification').type"
-              effect="plain"
-              size="small"
-            >
+            <el-tag type="info" effect="plain" size="small">
               {{ getTaskTypeMeta(row.task_type || 'classification').label }}
             </el-tag>
           </template>
