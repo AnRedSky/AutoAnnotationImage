@@ -366,6 +366,17 @@ const createFormBaseOptions = computed(
   () => BASE_MODELS_BY_TASK[createFormTaskType.value] || BASE_MODELS_BY_TASK.classification
 )
 
+/**
+ * v2.5.24: 新建任务对话框的"任务类型"下拉选项
+ * - 固定排序: 图片分类 / 目标检测 / 图片分割
+ * - 与 Annotate 工作台的 TASK_TYPE_FILTER_OPTIONS 保持一致
+ */
+const CREATE_TASK_TYPE_OPTIONS = [
+  { value: 'classification', label: '图片分类' },
+  { value: 'detection',      label: '目标检测' },
+  { value: 'segmentation',   label: '图片分割' },
+] as const
+
 /** 根据当前 task_type 重置 createForm.base_model 和 model_name */
 const resetCreateFormByTaskType = (taskType: string) => {
   const newBase = getDefaultBaseModel(taskType)
@@ -388,33 +399,41 @@ const openCreateDialog = () => {
 }
 
 /**
- * S7 新增: 监听 createForm.dataset_id 变化
- * - 根据 dataset.task_type 动态切换 base_model 默认值
- * - model_name 同步重生成, 避免与切换后的 base_model 命名空间冲突
+ * S7 改造: 任务类型下拉 — 用户主动选择, 不再由 dataset 反向推断
+ * 流程对齐图片分类/目标检测/图片分割的固定排序 (与 Annotate 工作台一致)
+ * - 切换 task_type 时:
+ *   · 重置 base_model + model_name (走任务类型默认模型)
+ *   · 若当前 dataset_id 不在新筛选范围, 清空 (UI 会强制重新选)
+ * - 选 dataset 时: 不再反向改 task_type (用户已主动选, 不要覆盖)
  */
-watch(
-  () => createForm.value.dataset_id,
-  async (newId) => {
-    if (!newId) {
-      createFormTaskType.value = 'classification'
-      resetCreateFormByTaskType('classification')
-      return
-    }
-    try {
-      // 优先用本地缓存, 减少一次请求; 否则拉 detail
-      let ds: any = DATASET_OPTIONS.value.find((d: any) => d.id === newId)
-      if (!ds) {
-        ds = await datasetApi.get(newId)
-      }
-      const t = ds?.task_type || 'classification'
-      createFormTaskType.value = t
-      resetCreateFormByTaskType(t)
-    } catch {
-      createFormTaskType.value = 'classification'
-      resetCreateFormByTaskType('classification')
+const onCreateTaskTypeChange = (t: string) => {
+  createFormTaskType.value = t
+  resetCreateFormByTaskType(t)
+  // 当前 dataset_id 可能不在新筛选范围, 清空强制重选
+  const cur = createForm.value.dataset_id
+  if (cur) {
+    const stillValid = DATASET_OPTIONS.value.find(
+      (d: any) => d.id === cur && (d.task_type || 'classification') === t
+    )
+    if (!stillValid) {
+      // createForm 是 ref, 需要解包成 TrainingParams 才能传给 onParamsChange
+      onParamsChange(createForm.value, { dataset_id: null })
     }
   }
-)
+}
+
+/**
+ * v2.5.24: 按当前 task_type 过滤后的数据集列表 (供 TrainingParamsForm 用)
+ * - 'all' 或空值: 全部展示 (兜底, 实际 createFormTaskType 必填)
+ * - 'classification'/'detection'/'segmentation': 仅展示同 task_type
+ * - 与父组件 (Annotate) 的逻辑保持一致
+ */
+const filteredDatasets = computed(() => {
+  const t = createFormTaskType.value || 'classification'
+  return DATASET_OPTIONS.value.filter(
+    (d: any) => (d.task_type || 'classification') === t
+  )
+})
 
 /**
  * 训练任务入队的统一占位逻辑 (新建/再训练 共用)
@@ -1677,12 +1696,28 @@ const stopSilentRefresh = () => {
       destroy-on-close
       :close-on-click-modal="false"
     >
-      <!-- S7 改造: base-models 按当前 task_type 动态切换
-           - classification: timm 6 个 (含 framework/params 完整元信息)
-           - detection/segmentation: 字符串数组, 临时构造成 BaseModelOption 格式 -->
+      <!-- v2.5.24: 任务类型下拉 (在数据集筛选框前)
+           - 固定排序: 图片分类 / 目标检测 / 图片分割
+           - 切换 task_type 后, 数据集下拉只显示同类型
+           - 切换会重置 base_model + model_name (走任务类型默认模型)
+           - 与 Annotate 工作台的任务类型筛选逻辑保持一致 -->
+      <el-form label-width="90px" size="default">
+        <el-form-item label="任务类型">
+          <el-select
+            :model-value="createFormTaskType"
+            @update:model-value="(v: string) => onCreateTaskTypeChange(v)"
+            class="app-select" style="width: 160px;"
+          >
+            <el-option
+              v-for="opt in CREATE_TASK_TYPE_OPTIONS"
+              :key="opt.value" :value="opt.value" :label="opt.label"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
       <TrainingParamsForm
         :form="createForm"
-        :datasets="DATASET_OPTIONS"
+        :datasets="filteredDatasets"
         :base-models="createFormBaseOptions.map((name) => ({
           name,
           framework: createFormTaskType === 'classification' ? 'timm'
@@ -1694,15 +1729,6 @@ const stopSilentRefresh = () => {
         }))"
         @form-change="(p) => onParamsChange(createForm, p)"
       />
-      <!-- S7 新增: 任务类型提示 -->
-      <el-tag
-        v-if="createFormTaskType"
-        :type="getTaskTypeMeta(createFormTaskType).type"
-        effect="plain"
-        style="margin-top: 4px;"
-      >
-        任务类型: {{ getTaskTypeMeta(createFormTaskType).label }}
-      </el-tag>
       <el-alert
         title="提示: 训练任务启动后会进入 Celery 队列, 需要 worker 在跑才能真正开始执行"
         type="info" :closable="false" show-icon
