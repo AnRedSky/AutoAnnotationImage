@@ -105,6 +105,14 @@ def train_detection_task(
                 existing.finished_at = None
                 existing.duration_seconds = None
                 existing.task_type = "detection"
+                # v2.5.28: 重投递 / API 预创建都重置数据集统计, 避免上一轮的
+                # data_total/data_train/.../class_names 残留. 之前没清, 如果
+                # 这次是新的数据集训练, 详情页"总样本数"会显示旧值, 用户困惑.
+                existing.data_total = None
+                existing.data_train = None
+                existing.data_val = None
+                existing.num_classes = None
+                existing.class_names = None
                 await db.commit()
                 await db.refresh(existing)
                 return existing.id
@@ -183,14 +191,27 @@ def train_detection_task(
         sticky_meta["data_val"] = export_info["val_count"]
         sticky_meta["num_classes"] = len(export_info["classes"])
         sticky_meta["class_names"] = export_info["classes"]
+        # v2.5.28: 同步到模块全局, 失败路径 (_finish_failed_job) 也能读
+        _LAST_STICKY_META["value"] = dict(sticky_meta)
 
-        # 同步写库 (与 tasks.py 风格一致, 即便失败不阻塞训练)
+        # 同步写库 (与 tasks.py / segmentation_tasks.py 风格一致, 即便失败不阻塞训练)
         _set_task_state(self, "PROGRESS", {
             **sticky_meta,
             "progress": 5.0,
             "msg": f"数据集就绪: train={export_info['train_count']} val={export_info['val_count']}",
             "total_epochs": epochs,
         })
+        # v2.5.28 修复: 数据集就绪那一刻立即把统计写库, 失败路径也能保留
+        # 之前: 只在 _finish_job 成功路径写, FAILURE 后 /jobs/{id} 返回的 ORM
+        #       行 data_total/data_train/data_val/num_classes/class_names 全 None,
+        #       详情页「总样本数 0 张 / 类别数 0 类」, 用户看不到数据集规模
+        # 现在: 训练启动就绪那一刻 (不论后续成功失败) 把 5 个字段写库
+        try:
+            from app.workers.tasks import _persist_dataset_stats
+            _persist_dataset_stats(task_id, sticky_meta)
+        except Exception as e:
+            # 写库失败不影响训练
+            print(f"[warn] det _persist_dataset_stats failed: {type(e).__name__}: {e}")
 
         # 3) 跑训练
         result = train_yolo(
@@ -265,7 +286,11 @@ def train_detection_task(
 
 
 def _finish_failed_job(self, job_id: int, exc: Exception, started_at: datetime):
-    """训练失败统一清理: 写 DB FAILURE + Celery update_state(FAILURE)"""
+    """训练失败统一清理: 写 DB FAILURE + Celery update_state(FAILURE)
+
+    v2.5.28 新增: 支持把已计算的 sticky_meta (数据集统计) 写库, 避免失败
+    任务详情页显示全 0. 调用方可在调用前 set 一下 _last_sticky_meta 即可.
+    """
     from app.database import AsyncSessionLocal
     from app.models.training_job import TrainingJob
     try:
@@ -277,6 +302,23 @@ def _finish_failed_job(self, job_id: int, exc: Exception, started_at: datetime):
                     job.error = str(exc)[:500]
                     job.finished_at = datetime.utcnow()
                     job.duration_seconds = (job.finished_at - started_at).total_seconds()
+                    # v2.5.28: 即便失败, 已计算的 sticky_meta (数据集统计) 也要写库
+                    # 之前: 训练跑通 export_yolo_dataset 后才挂, 统计在 sticky_meta
+                    #       里但没写库, _finish_failed_job 又只清 error/finished,
+                    #       结果详情页「总样本数 / 类别数」显示空
+                    # 现在: 从模块全局 _last_sticky_meta 拿 (worker 训练中赋值)
+                    _sm = _LAST_STICKY_META.get("value")
+                    if isinstance(_sm, dict) and _sm:
+                        if "data_total" in _sm:
+                            job.data_total = _sm["data_total"]
+                        if "data_train" in _sm:
+                            job.data_train = _sm["data_train"]
+                        if "data_val" in _sm:
+                            job.data_val = _sm["data_val"]
+                        if "num_classes" in _sm:
+                            job.num_classes = _sm["num_classes"]
+                        if "class_names" in _sm:
+                            job.class_names = _sm["class_names"]
                     await db.commit()
         _run_async(_fail())
     except Exception:
@@ -287,6 +329,12 @@ def _finish_failed_job(self, job_id: int, exc: Exception, started_at: datetime):
         "error": str(exc)[:500],
         "job_id": job_id,
     })
+
+
+# v2.5.28: 跨函数共享 sticky_meta (失败时 _finish_failed_job 也能拿到已计算的统计)
+# 不放进 train_detection_task 闭包是因为 _finish_failed_job 是模块级函数, 无法
+# 直接读 train_detection_task 局部变量. 用一个模块级 dict 透传, 简单够用.
+_LAST_STICKY_META: dict = {}
 
 
 # ============== 任务 2: 自动标注 (用已训练模型批量推理) ==============
