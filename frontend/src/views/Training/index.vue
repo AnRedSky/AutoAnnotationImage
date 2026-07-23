@@ -6,7 +6,7 @@ import {
   List as ListIcon, DataLine, Search, InfoFilled
 } from '@element-plus/icons-vue'
 import { trainingApi, datasetApi, autoAnnotateApi } from '@/api'
-import { getDefaultBaseModel, TASK_TYPE_OPTIONS } from '@/utils/taskType'
+import { getDefaultBaseModel, getTaskTypeMeta, TASK_TYPE_OPTIONS } from '@/utils/taskType'
 import * as echarts from 'echarts'
 // v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
 import TrainingParamsForm, { type TrainingParams } from './components/TrainingParamsForm.vue'
@@ -1581,6 +1581,27 @@ const stopSilentRefresh = () => {
           <template #default="{ row }">{{ datasetNameOf(row.dataset_id) }}</template>
         </el-table-column>
         <el-table-column prop="base_model" label="基础模型" min-width="92" show-overflow-tooltip />
+        <!-- 任务类型列 (v2.5.24): 与 Models/Datasets 页统一, tooltip 显示类型说明
+             位置放在 base_model 之后, 语义上"任务类型决定了可选 base_model" -->
+        <el-table-column label="任务类型" width="120" align="center">
+          <template #default="{ row }">
+            <el-tooltip
+              :content="getTaskTypeMeta(row.task_type || 'classification').desc"
+              placement="top"
+            >
+              <el-tag
+                size="small"
+                effect="plain"
+                :type="getTaskTypeMeta(row.task_type || 'classification').type"
+              >
+                <el-icon style="margin-right: 3px; vertical-align: -2px;">
+                  <component :is="getTaskTypeMeta(row.task_type || 'classification').icon" />
+                </el-icon>
+                {{ getTaskTypeMeta(row.task_type || 'classification').label }}
+              </el-tag>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column prop="model_name" label="模型版本" min-width="118" show-overflow-tooltip />
         <!-- 训练资源: 实际使用的设备 (GPU/CPU), 后端采集 + 写库 -->
         <el-table-column label="设备" min-width="118" show-overflow-tooltip>
