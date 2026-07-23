@@ -42,22 +42,54 @@ const onSizeChange = (s: number) => { pageSize.value = s; page.value = 1 }
 /** 表格序号: 当前页 = (page - 1) * pageSize + 行索引 (从 1 开始) */
 const indexMethod = (idx: number) => (page.value - 1) * pageSize.value + idx + 1
 
+/** v2.5.28: 任务类型变更
+ *  - 重置数据集下拉选择: 旧选的数据集可能与新任务类型不匹配, 留在下拉里
+ *    会让用户看到「我明明选了 XX, 但表格是空的」的迷惑场景
+ *  - 翻到第 1 页
+ *  - 与 Training 页 (onTaskTypeFilterChange) 行为一致
+ */
+const onTaskTypeChange = () => {
+  // 如果当前数据集选择不在新的联动下拉里, 自动清空
+  if (filterDatasetId.value !== '' && filterTaskType.value) {
+    const stillValid = filterableDatasetsForFilter.value.some(
+      (d) => d.id === filterDatasetId.value
+    )
+    if (!stillValid) filterDatasetId.value = ''
+  }
+  page.value = 1
+}
+
 // ============== 数据集下拉选项 (用于筛选) ==============
 // 从 model list 推导出「出现过的 dataset_id」, 同时按数据集 id 升序去重
 // 比直接调 /api/datasets 列表更省一次往返, 也避免无关数据集污染下拉
 // 选项 label 只用 dataset_name, 不再加 ID 前缀 (按产品要求)
-const datasetOptions = computed(() => {
-  const seen = new Map<number, { id: number; name: string }>()
+//
+// v2.5.28: 同步带上 task_type, 供 filterableDatasetsForFilter 联动筛选
+// 之前: datasetOptions 是无 task_type 的 [{id,name}], 与 filterTaskType 脱钩,
+//       用户选了「目标检测」后, 数据集下拉还是显示全量, 经常筛出 0 命中组合
+//       (task_type=detection + dataset=分类数据集 = 0 行)
+// 现在: 在推导时记 task_type (回退 classification 兼容老数据), 下拉按
+//       filterTaskType 联动只显示同类型数据集
+const datasetsWithTaskType = computed(() => {
+  const seen = new Map<number, { id: number; name: string; task_type: string }>()
   for (const m of data.value) {
     if (m.dataset_id != null && !seen.has(m.dataset_id)) {
-      // 优先用后端 join 出的 dataset_name, 缺失时回退到「未命名数据集」(不带 ID)
       seen.set(m.dataset_id, {
         id: m.dataset_id,
         name: m.dataset_name || '未命名数据集',
+        task_type: m.task_type || 'classification',
       })
     }
   }
   return Array.from(seen.values()).sort((a, b) => a.id - b.id)
+})
+/** 数据集下拉联动: 选了任务类型后, 数据集下拉只显示同任务类型的数据集
+ *  复用与 Training 页一致的语义, 避免筛出 0 命中组合 */
+const filterableDatasetsForFilter = computed(() => {
+  if (!filterTaskType.value) return datasetsWithTaskType.value
+  return datasetsWithTaskType.value.filter(
+    (d) => d.task_type === filterTaskType.value
+  )
 })
 
 // ============== 筛选后数据 (即时, 客户端计算) ==============
@@ -299,9 +331,11 @@ const pct = (v: any) => (v != null ? `${(Number(v) * 100).toFixed(2)}%` : '-')
 const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
 
 // ============== 筛选重置 ==============
+// v2.5.28: 同时清掉任务类型 (与 Training 页 resetFilters 保持一致)
 const resetFilters = () => {
   filterKeyword.value = ''
   filterDatasetId.value = ''
+  filterTaskType.value = ''
   page.value = 1
 }
 </script>
@@ -362,13 +396,14 @@ const resetFilters = () => {
       <!-- v2.5.24: 任务类型筛选挪到最前方 (与 Annotate 工作台 / 训练任务页 顺序一致)
            - 固定排序: 图片分类 / 目标检测 / 图片分割
            - 复用 utils/taskType.ts 的 TASK_TYPE_OPTIONS
-           - 留空 = 全部 (本页面是客户端过滤, 不发后端请求) -->
+           - 留空 = 全部 (本页面是客户端过滤, 不发后端请求)
+           - v2.5.28: 改用 onTaskTypeChange, 联动重置数据集下拉 -->
       <el-select
         v-model="filterTaskType"
         clearable
         placeholder="任务类型"
         class="app-select filter-task-type"
-        @change="onFilterChange"
+        @change="onTaskTypeChange"
       >
         <el-option label="全部任务类型" value="" />
         <el-option
@@ -377,6 +412,8 @@ const resetFilters = () => {
           :value="opt.value"
         />
       </el-select>
+      <!-- v2.5.28: 数据集下拉联动任务类型, 只显示同任务类型的数据集
+           (与 Training 页 filterableDatasetsForFilter 语义一致) -->
       <el-select
         v-model="filterDatasetId"
         clearable
@@ -384,9 +421,12 @@ const resetFilters = () => {
         class="app-select"
         @change="onFilterChange"
       >
-        <el-option label="全部数据集" value="" />
         <el-option
-          v-for="ds in datasetOptions" :key="ds.id"
+          :label="filterTaskType ? `全部${getTaskTypeMeta(filterTaskType).label}数据集` : '全部数据集'"
+          value=""
+        />
+        <el-option
+          v-for="ds in filterableDatasetsForFilter" :key="ds.id"
           :label="ds.name"
           :value="ds.id"
         />
@@ -450,27 +490,39 @@ const resetFilters = () => {
       </div>
     </div>
 
-    <el-table v-loading="loading" :data="pagedData" border stripe class="data-table"
-      @selection-change="onSelectionChange">
-      <template #empty>
-        <div class="empty-state">
-          <div class="empty-state__icon empty-state__icon--brand">
-            <el-icon><Grid /></el-icon>
+    <!-- v2.5.28: 表格行高稳定性修复
+         - 用 .table-wrapper 包裹, 给一个 min-height 兜底, 避免筛选后行数骤变
+           (10 行 → 3 行) 时表格高度塌缩导致的"行高晃动" (data-table 直接
+           放在 flex 容器里没有 min-height 撑底, 每次 filter 后浏览器
+           重新计算 cell 高度, 行会"跳"一下)
+         - el-table 加 height="100%" 属性, 强制进入"固定表头+内部滚动"模式,
+           这样行高是 el-table 自己控制的, 不会受外层容器变化影响
+         - 显式 padding: 8px 0 让每行高度固定 ~38px, 与 Training 页一致
+         - 边框移到 wrapper, 避免 el-table border 与外层 border 叠加 -->
+    <div class="table-wrapper">
+      <el-table v-loading="loading" :data="pagedData" stripe class="data-table"
+        height="100%" style="width: 100%;"
+        @selection-change="onSelectionChange">
+        <template #empty>
+          <div class="empty-state">
+            <div class="empty-state__icon empty-state__icon--brand">
+              <el-icon><Grid /></el-icon>
+            </div>
+            <div class="empty-state__title">
+              {{ filterKeyword || filterTaskType || filterDatasetId !== ''
+                ? '没有匹配的模型' : '还没有模型版本' }}
+            </div>
+            <div class="empty-state__desc">
+              {{ (filterKeyword || filterTaskType || filterDatasetId !== '')
+                ? '尝试调整筛选条件'
+                : '到「训练任务」页选定数据集并启动训练, 完成后模型会自动出现在这里'
+              }}
+            </div>
           </div>
-          <div class="empty-state__title">
-            {{ filterKeyword ? '没有匹配的模型' : '还没有模型版本' }}
-          </div>
-          <div class="empty-state__desc">
-            {{ filterKeyword
-              ? '尝试调整搜索关键词'
-              : '到「训练任务」页选定数据集并启动训练, 完成后模型会自动出现在这里'
-            }}
-          </div>
-        </div>
-      </template>
-      <el-table-column type="index" :index="indexMethod" label="#" width="42" />
-      <el-table-column type="selection" width="40" />
-      <el-table-column prop="name" label="模型名" min-width="200">
+        </template>
+        <el-table-column type="index" :index="indexMethod" label="#" width="42" />
+        <el-table-column type="selection" width="40" />
+        <el-table-column prop="name" label="模型名" min-width="200">
         <template #default="{ row }">
           <div class="model-name-cell">
             <div class="model-icon">
@@ -583,7 +635,9 @@ const resetFilters = () => {
           </div>
         </template>
       </el-table-column>
-    </el-table>
+      </el-table>
+    </div>
+    <!-- /.table-wrapper v2.5.28 -->
 
     <!-- 分页栏: 固定在页面底部 (position: sticky 兜底) -->
     <div class="pager">
@@ -879,13 +933,36 @@ const resetFilters = () => {
   font-size: 14px;
 }
 
-/* ============== 表格 ============== */
-.data-table {
+/* ============== 表格 (v2.5.28 行高稳定性改造) ==============
+   之前: .data-table 直接 flex:1 在容器里, 没有 min-height 兜底, 筛选后
+   行数从 10 变 3 时, 表格整体高度塌缩, el-table 重新计算每行高度, 视觉
+   上行会"跳"一下 (行高晃动). 改造方案与 Training/index.vue 一致:
+   - .table-wrapper 包裹 + min-height: 420px 撑底 (即使 0 行也有稳定高度)
+   - el-table 加 height="100%" 属性, 强制固定表头+内部滚动模式
+   - 显式 cell padding 8px 0, 行高固定 ~38px
+   - 边框移到 wrapper, 避免 el-table border 与外层 border 叠加 */
+.table-wrapper {
   flex: 1 1 0;
-  min-height: 0;
+  min-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+.table-wrapper .data-table {
   height: 100% !important;
-  border-radius: var(--radius-md) !important;
-  overflow: hidden;
+  width: 100% !important;
+  font-size: 13px;
+}
+/* 单元格内边距: 默认 12px 0 偏大, 压缩到 8px 让单行更紧凑; 行高随之 ~38px,
+   内容变化时不会出现"行内 cell 高度重新计算"的视觉跳变 */
+.data-table :deep(.el-table .el-table__cell) {
+  padding: 8px 0 !important;
+}
+.data-table :deep(.el-table th.el-table__cell) {
+  font-size: 13px !important;
+  font-weight: 600;
+  background: var(--bg-soft) !important;
 }
 
 .model-name-cell {
