@@ -11,6 +11,12 @@ Start Celery Worker
   uv run python start_workers.py --status                 # 查状态
   uv run python start_workers.py --loglevel debug         # 改日志级别
 
+并发配置 (v2.5.15+ 可调):
+  uv run python start_workers.py --pool=threads --concurrency=4
+  优先级: CLI 参数 > 环境变量 > config.py 默认值
+  - pool: solo (1 进程 1 任务, 稳) | threads (1 进程 N 线程, I/O 友好) | prefork (Linux only) | gevent
+  - concurrency: solo 下被忽略, threads 下为同时跑的线程数
+
 自动行为：
   - 检查 Redis 是否运行（未运行尝试从 PATH 或常见位置启动 redis-server.exe）
   - detached 模式下：父进程退出不影响 worker
@@ -173,6 +179,70 @@ def kill_pid(pid: int):
 
 
 # ============================================================
+#  Worker 并发参数解析
+# ============================================================
+# 优先级: CLI 参数 > 环境变量 > config.py 默认值
+_VALID_POOLS = {"solo", "threads", "prefork", "gevent"}
+
+
+def _get_arg_value(flag: str, default: str) -> str:
+    """
+    从 sys.argv 解析 --flag=value 或 --flag value 形式
+    没传则返回 default
+    """
+    for i, a in enumerate(sys.argv):
+        if a == flag and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return default
+
+
+def resolve_worker_settings() -> tuple[str, int]:
+    """
+    解析 worker pool + concurrency, 优先级: CLI > env > config 默认
+
+    Returns:
+        (pool, concurrency)
+    """
+    from app.config import settings  # 延后 import, 避免 settings 初始化早于 .env
+
+    # 1) CLI 优先
+    pool = _get_arg_value("--pool", "")
+    if pool:
+        if pool not in _VALID_POOLS:
+            err(f"非法 --pool: {pool!r}, 必须是 {_VALID_POOLS}")
+            raise SystemExit(2)
+    else:
+        # 2) 环境变量, 3) config 默认
+        pool = os.getenv("CELERY_WORKER_POOL") or settings.CELERY_WORKER_POOL
+
+    conc_str = _get_arg_value("--concurrency", "")
+    if conc_str:
+        try:
+            concurrency = int(conc_str)
+        except ValueError:
+            err(f"非法 --concurrency: {conc_str!r}, 必须是正整数")
+            raise SystemExit(2)
+    else:
+        env_conc = os.getenv("CELERY_WORKER_CONCURRENCY")
+        if env_conc:
+            try:
+                concurrency = int(env_conc)
+            except ValueError:
+                err(f"非法 CELERY_WORKER_CONCURRENCY 环境变量: {env_conc!r}, 必须是正整数")
+                raise SystemExit(2)
+        else:
+            concurrency = settings.CELERY_WORKER_CONCURRENCY
+
+    if concurrency < 1:
+        err(f"concurrency 必须 >= 1, 实际 {concurrency}")
+        raise SystemExit(2)
+
+    return pool, concurrency
+
+
+# ============================================================
 #  Celery 启动
 # ============================================================
 def start_foreground():
@@ -193,14 +263,18 @@ def start_foreground():
         i = sys.argv.index("--loglevel")
         if i + 1 < len(sys.argv):
             loglevel = sys.argv[i + 1]
+
+    pool, concurrency = resolve_worker_settings()
     ok(f"Celery broker: {celery_app.conf.broker_url}")
+    ok(f"Worker pool: {pool} | concurrency: {concurrency}"
+       + (" (concurrency 在 solo 池下被忽略)" if pool == "solo" else ""))
     print()
     try:
         celery_app.worker_main([
             "worker",
             f"--loglevel={loglevel}",
-            "--pool=solo",  # Windows 上必须用 solo 池
-            "--concurrency=1",
+            f"--pool={pool}",
+            f"--concurrency={concurrency}",
         ])
     except KeyboardInterrupt:
         print("\n[INFO] Celery worker stopped")
@@ -221,7 +295,7 @@ def start_detach():
         return 0
     PID_FILE.unlink(missing_ok=True)
 
-    # 构造 detached 启动参数
+    # 构造 detached 启动参数, 把当前 CLI 的 --pool/--concurrency 透传给子进程
     argv = [
         sys.executable, str(Path(__file__).resolve()),  # 重新跑本脚本，不带 --detach
         "--loglevel", "info",
@@ -231,6 +305,11 @@ def start_detach():
         i = sys.argv.index("--loglevel")
         if i + 1 < len(sys.argv):
             argv[3] = sys.argv[i + 1]
+    # 透传 --pool / --concurrency (detached 模式下子进程会再走 resolve_worker_settings)
+    for flag in ("--pool", "--concurrency"):
+        val = _get_arg_value(flag, "")
+        if val:
+            argv += [flag, val]
 
     log = open(LOG_FILE, "ab", buffering=0)
     err_log = open(LOG_FILE, "ab", buffering=0)  # 同一文件

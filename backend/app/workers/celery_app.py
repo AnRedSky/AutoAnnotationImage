@@ -37,4 +37,9 @@ celery_app.conf.update(
     broker_connection_max_retries=2,
     broker_transport_options={"visibility_timeout": 30},
     result_backend_transport_options={"visibility_timeout": 30},
+    # ===== Worker 并发默认值 (CLI --pool/--concurrency 可覆盖) =====
+    # solo 池下 worker_concurrency 被忽略, threads 池下表示同时跑的线程数
+    # Windows 上 prefork 不可用, 推荐 threads
+    worker_pool=settings.CELERY_WORKER_POOL,
+    worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,
 )

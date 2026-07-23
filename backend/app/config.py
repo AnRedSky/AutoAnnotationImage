@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: Optional[str] = os.getenv("CELERY_BROKER_URL")
     CELERY_RESULT_BACKEND: Optional[str] = os.getenv("CELERY_RESULT_BACKEND")
 
+    # ===== Celery Worker 并发配置 =====
+    # pool: solo (1 进程 1 任务, Windows 最稳) | threads (1 进程 N 线程, I/O 密集友好) |
+    #       prefork (N 进程, Linux only) | gevent (需装 gevent)
+    # Windows 上 prefork 不可用, 推荐 threads; 若要保留旧行为设 CELERY_WORKER_POOL=solo
+    CELERY_WORKER_POOL: str = os.getenv("CELERY_WORKER_POOL", "threads")
+    # concurrency: solo 池下被忽略; threads 池下表示同时跑的线程数
+    # 设太大时 CPU 训练任务会互踩, I/O 自动标注任务可适当调高
+    CELERY_WORKER_CONCURRENCY: int = int(os.getenv("CELERY_WORKER_CONCURRENCY", "2"))
+
     # ===== JWT =====
     # 兼容 .env 的 SECRET_KEY 与旧名 JWT_SECRET
     SECRET_KEY: Optional[str] = os.getenv("SECRET_KEY")
@@ -232,6 +241,7 @@ _ENV_SYNC_KEYS = [
     "MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE",
     "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET", "MINIO_SECURE",
     "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
+    "CELERY_WORKER_POOL", "CELERY_WORKER_CONCURRENCY",
     "SECRET_KEY",
 ]
 for _k in _ENV_SYNC_KEYS:
