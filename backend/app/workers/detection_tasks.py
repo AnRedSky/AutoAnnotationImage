@@ -154,7 +154,7 @@ def train_detection_task(
 
     try:
         # 2) 导 YOLO 数据集
-        workdir = Path(f"backend/models/yolo_data/{model_alias}_{task_id}")
+        workdir = Path(f"models/yolo_data/{model_alias}_{task_id}")
         _set_task_state(self, "PROGRESS", {
             "progress": 1.0,
             "msg": "正在导出 YOLO 数据集...",
