@@ -28,7 +28,8 @@ frontend/.env.production.local
 
 # Project
 uploads/
-# 项目根目录的 ML 权重 (历史, 未使用)
+
+# 项目根目录的 ML 权重 (历史, 未使用; 后端运行时不会写到这里)
 /models/
 /models/*.pth
 /models/*.onnx
@@ -40,8 +41,16 @@ uploads/
 /backend/models/*.onnx
 /backend/models/*.safetensors
 /backend/models/hf_cache/
+# 统一预训练权重缓存 (HF_HOME / TORCH_HOME / ULTRALYTICS_HOME)
+/backend/models/cache/
+# YOLOv8 训练 run 目录 (每次训练一个子目录)
 /backend/models/runs/
-/backend/models
+# DeepLabV3+ 分割训练权重 (state_dict, 落盘于此)
+/backend/models/seg_runs/
+# 训练用临时数据 (YOLO 数据集导出等)
+/backend/models/data/
+# 兜底: 整个 backend/models 子目录里只要不是 .py ORM 都忽略
+/backend/models/*
 
 # 兜底: 任何位置的模型文件
 *.pt
