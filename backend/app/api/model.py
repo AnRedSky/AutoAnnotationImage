@@ -128,11 +128,21 @@ async def list_models(
                 "base_model": m.base_model,
                 "dataset_id": m.dataset_id,
                 "dataset_name": ds_map.get(m.dataset_id) if m.dataset_id else None,
+                # v2.5.16: 任务类型 (classification/detection/segmentation)
+                # 此前未返回, 前端兜底 "|| 'classification'" 把所有模型都显示为"图片分类"
+                "task_type": m.task_type,
                 "num_classes": m.num_classes,
                 "accuracy": float(m.accuracy or 0),
                 "precision": float(m.precision or 0),
                 "recall": float(m.recall or 0),
                 "f1_score": float(m.f1_score or 0),
+                # 检测专属指标 (m.task_type == "detection" 时非空)
+                "map_50": float(m.map_50) if m.map_50 is not None else None,
+                "map_50_95": float(m.map_50_95) if m.map_50_95 is not None else None,
+                # 分割专属指标 (m.task_type == "segmentation" 时非空)
+                "miou": float(m.miou) if m.miou is not None else None,
+                "pixel_accuracy": float(m.pixel_accuracy) if m.pixel_accuracy is not None else None,
+                "dice_score": float(m.dice_score) if m.dice_score is not None else None,
                 "is_active": m.is_active,
                 "created_at": m.created_at.isoformat(),
             }
@@ -179,6 +189,8 @@ async def list_active_models(
                 "base_model": m.base_model,
                 "dataset_id": m.dataset_id,
                 "dataset_name": ds_map.get(m.dataset_id) if m.dataset_id else None,
+                # v2.5.16: 任务类型透出 (与 list_models 对齐)
+                "task_type": m.task_type,
                 "num_classes": m.num_classes,
                 "accuracy": float(m.accuracy or 0),
                 "f1_score": float(m.f1_score or 0),
@@ -332,11 +344,20 @@ async def get_model_detail(
         "base_model": m.base_model,
         "dataset_id": m.dataset_id,
         "dataset_name": ds_name,
+        # v2.5.16: 任务类型透出 (与 list_models 对齐)
+        "task_type": m.task_type,
         "num_classes": m.num_classes,
         "accuracy": float(m.accuracy or 0),
         "precision": float(m.precision or 0),
         "recall": float(m.recall or 0),
         "f1_score": float(m.f1_score or 0),
+        # 检测专属指标
+        "map_50": float(m.map_50) if m.map_50 is not None else None,
+        "map_50_95": float(m.map_50_95) if m.map_50_95 is not None else None,
+        # 分割专属指标
+        "miou": float(m.miou) if m.miou is not None else None,
+        "pixel_accuracy": float(m.pixel_accuracy) if m.pixel_accuracy is not None else None,
+        "dice_score": float(m.dice_score) if m.dice_score is not None else None,
         "is_active": m.is_active,
         "created_at": m.created_at.isoformat() if m.created_at else None,
         "training_log": m.training_log,
