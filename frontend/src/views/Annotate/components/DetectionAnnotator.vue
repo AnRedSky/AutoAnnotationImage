@@ -272,6 +272,11 @@ function undoAll() {
  * - 弹窗让用户确认, 避免误操作
  * - 确认后清空并 snapshot, 允许 Ctrl+Z 撤销此次清空
  * - 同样给按钮调用, 不绑定快捷键
+ *
+ * v2.5.38: 弹窗文案调整 — 明确告知用户「清空」后还需要点「保存」才能
+ *   真正从后端删除已标注的 bbox, 避免「以为已经清掉」但实际后端仍有数据。
+ *   - 本函数只清本地草稿, 标记 dirty=true, 配合「保存 (0)」按钮提交后端
+ *   - 「清空」本身不会向后端发送任何请求
  */
 async function clearAllWithConfirm() {
   if (!props.modelValue || props.modelValue.length === 0) {
@@ -280,11 +285,16 @@ async function clearAllWithConfirm() {
   }
   try {
     await ElMessageBox.confirm(
-      `确定清空全部 ${props.modelValue.length} 个标注? 此操作可通过「撤销」恢复`,
+      [
+        `确定清空全部 ${props.modelValue.length} 个标注?`,
+        '',
+        '「清空」仅清空本地草稿, 需点「保存 (0)」才会真正从数据库删除。',
+        '若误操作, 可点击「撤销本次修改」恢复到清空前状态。',
+      ].join('\n'),
       '清空确认',
       {
         type: 'warning',
-        confirmButtonText: '清空',
+        confirmButtonText: '清空 (本地草稿)',
         cancelButtonText: '取消',
       }
     )
@@ -293,7 +303,7 @@ async function clearAllWithConfirm() {
     emit('update:modelValue', [])
     selectedIndex.value = null
     draw()
-    ElMessage.success('已清空全部标注')
+    ElMessage.success('本地草稿已清空, 请点「保存 (0)」删除数据库中的标注')
   } catch {
     // 用户取消弹窗, 不做任何处理
   }
@@ -731,12 +741,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 // 保存 / 取消
 function onSave() {
-  if (!props.modelValue || props.modelValue.length === 0) {
-    ElMessage.warning('至少画一个 bbox')
-    return
-  }
-  initial.value = JSON.stringify(props.modelValue)
-  emit('save', props.modelValue)
+  // v2.5.38 修复: 允许保存空列表 (用于「清空全部」后保存以删除后端标注)
+  // - 之前: props.modelValue.length === 0 时直接 ElMessage.warning 拦截,
+  //         导致右侧保存按钮在 bboxList 为空时被 disabled,
+  //         且即便绕过 disabled, onSave 也会拒绝空列表, 用户无法清空已标注信息
+  // - 现在: 走标准 save 流程, 父组件的 saveDetectionBBoxes 会先调 clearBBoxes
+  //         (DELETE /api/detection/annotations/clear/{imageId}) 删后端全部 bbox,
+  //         再用空列表循环 0 次, 效果等于删除全部已保存标注
+  initial.value = JSON.stringify(props.modelValue || [])
+  emit('save', props.modelValue || [])
 }
 
 // 渲染

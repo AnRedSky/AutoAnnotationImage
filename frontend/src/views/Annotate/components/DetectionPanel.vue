@@ -186,18 +186,23 @@
     <!-- 5. 提交
          v2.5.14: 移除「取消」按钮 (功能由 Section 1 的「撤销本次修改」承担)
          · 取消按钮原本是"放弃本次修改, 回到 last saved 状态"
-         · 现改为更明确的「撤销本次修改」按钮, 用户语义更清晰 -->
+         · 现改为更明确的「撤销本次修改」按钮, 用户语义更清晰
+         v2.5.38: 移除 disabled 条件中的 `bboxList.length === 0` 误禁用
+         · 之前: 用户在「清空全部」后 bboxList.length=0, 保存按钮被禁用,
+         ·       无法把"删除所有 bbox"的 dirty 状态提交到后端, 旧标注仍在 DB
+         · 现在: dirty 即可点保存, saveDetectionBBoxes 会先调 clearBBoxes
+         ·       再以空列表循环 0 次, 实际语义为「从数据库删除全部标注」 -->
     <div class="op-section">
       <div class="op-section-title">5. 提交</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
         <el-button
           type="primary"
           :icon="Check"
-          :disabled="!detDirty || bboxList.length === 0 || annotatorSaving"
+          :disabled="!detDirty || annotatorSaving"
           :loading="annotatorSaving"
           style="flex: 1;"
           @click="emit('save')"
-        >保存 ({{ bboxList.length }})</el-button>
+        >{{ bboxList.length === 0 ? '保存 (清空全部)' : `保存 (${bboxList.length})` }}</el-button>
       </div>
     </div>
 

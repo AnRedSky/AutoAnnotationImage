@@ -150,7 +150,12 @@ export function useDetectionAnnotate(options: {
           source: 'human',
         })
       }
-      ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
+      // v2.5.38: 根据 bboxes 数量给出不同反馈 — 空列表语义为"清空全部"
+      if (bboxes.length === 0) {
+        ElMessage.success('已清空全部标注 (0 个 bbox 写入数据库)')
+      } else {
+        ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
+      }
       await loadDetectionAnnotations(image.value.id)
       // 等待 bboxList 更新传到子组件后, 重置 initial -> dirty=false
       await nextTick()
