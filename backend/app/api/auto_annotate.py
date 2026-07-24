@@ -12,7 +12,7 @@ Auto-Annotate API: AI 预标注独立接口
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -218,13 +218,185 @@ async def list_available_models(current_user: User = Depends(get_current_user)):
     """
     列出系统支持的 timm 模型（论文核心实验用）
     framework: 模型来源框架（统一为 timm，便于前端展示标注）
+
+    v2.5.46 新增: 追加 torchvision 预训练分割模型 (COCO 21 类), 用于标注工作台
+    「基础模型」分支 (AnnotationToolbar segmentation + useFinetune=OFF)。
+    前端按 task_type 字段过滤显示。
     """
     return {
         "models": [
-            {"name": "resnet50",              "params": "25.6M", "imagenet_top1": 76.1, "framework": "timm", "recommended": True},
-            {"name": "efficientnet_b0",       "params": "5.3M",  "imagenet_top1": 77.1, "framework": "timm", "recommended": True},
-            {"name": "convnext_tiny",         "params": "28.6M", "imagenet_top1": 82.1, "framework": "timm", "recommended": True},
-            {"name": "mobilenetv3_small",     "params": "2.5M",  "imagenet_top1": 67.5, "framework": "timm", "recommended": False},
-            {"name": "vit_small_patch16_224", "params": "22.1M", "imagenet_top1": 78.7, "framework": "timm", "recommended": False},
+            {"name": "resnet50",              "params": "25.6M", "imagenet_top1": 76.1, "framework": "timm",       "task_type": "classification", "recommended": True},
+            {"name": "efficientnet_b0",       "params": "5.3M",  "imagenet_top1": 77.1, "framework": "timm",       "task_type": "classification", "recommended": True},
+            {"name": "convnext_tiny",         "params": "28.6M", "imagenet_top1": 82.1, "framework": "timm",       "task_type": "classification", "recommended": True},
+            {"name": "mobilenetv3_small",     "params": "2.5M",  "imagenet_top1": 67.5, "framework": "timm",       "task_type": "classification", "recommended": False},
+            {"name": "vit_small_patch16_224", "params": "22.1M", "imagenet_top1": 78.7, "framework": "timm",       "task_type": "classification", "recommended": False},
+            # v2.5.46: 分割预训练 (COCO 21 类, weights='DEFAULT')
+            {"name": "fcn_resnet50",          "params": "32.9M",                                "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
+            {"name": "deeplabv3_resnet50",    "params": "39.6M",                                "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
+            {"name": "deeplabv3_resnet101",   "params": "58.7M",                                "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
         ]
     }
+
+
+# v2.5.46: 分割任务「基础预标注」请求/响应 schema
+# 区别于检测/分割 fine-tune 的 Celery 异步路径 (POST /api/segmentation/auto-annotate),
+# 该端点是**同步**的: 数据集小 + COCO 预训练推理快, 同步即可 (auto_annotate.py 的
+# classification 路径也是同步的, 保持架构一致)
+class RunSegmentationPretrainedRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    dataset_id: int
+    model_name: str = "deeplabv3_resnet50"
+    confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    crop_size: int = Field(default=256, ge=64, le=1024)
+    device: str = "cpu"
+    # 是否覆盖已有人工标注的 mask (与 /api/segmentation/auto-annotate 语义一致)
+    overwrite_existing: bool = False
+
+
+class RunSegmentationPretrainedResponse(BaseModel):
+    total: int
+    auto_labeled: int
+    need_human: int
+    model_name: str
+    threshold: float
+    mode: str = "sync"
+
+
+@router.post(
+    "/run-segmentation-pretrained",
+    response_model=RunSegmentationPretrainedResponse,
+)
+async def run_segmentation_pretrained(
+    req: RunSegmentationPretrainedRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    v2.5.46: 分割任务「基础预标注」同步端点
+    - 加载 torchvision 预训练 (COCO 21 类) 分割模型, 对 pending 图同步跑推理
+    - max_softmax >= confidence_threshold → image.status = 'ai_labeled'
+      否则保留 'pending', 但 SegmentationMask 仍写入 (source='ai') 供后续人工精修
+    - overwrite_existing=False: 已存在 mask 的图直接跳过 (避免覆盖人工标注)
+    - 网络错误 (HF 不可达 / OSError) → 503, 文案与 classification 路径 (L122-127) 对齐
+    """
+    # 1. 数据集校验
+    dataset = await db.get(Dataset, req.dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+    if (dataset.task_type or "classification") != "segmentation":
+        raise HTTPException(
+            400,
+            f"该接口仅服务于分割任务数据集, 当前 dataset.task_type='{dataset.task_type}'",
+        )
+
+    # 2. 加载 torchvision 预训练模型
+    from app.ml.segmentation import seg_predict
+    try:
+        model = seg_predict.load_pretrained_torchvision(
+            req.model_name, device=req.device,
+        )
+    except ValueError as ve:
+        # 不支持的 backbone → 400
+        raise HTTPException(400, str(ve))
+    except Exception as e:
+        # 网络/权重下载等错误 → 503, 与 auto_annotate.py:122-127 文案一致
+        err_msg = str(e)[:200]
+        if any(k in err_msg.lower() for k in ["winerror 10060", "connection", "timeout", "huggingface"]):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Model '{req.model_name}' cannot be loaded: no internet/HuggingFace access "
+                    f"({err_msg}). Please pre-download the weights or set HF_HUB_OFFLINE=1."
+                ),
+            )
+        raise HTTPException(500, f"Failed to load pretrained model: {err_msg}")
+
+    # 3. 取候选图片: 优先 pending; overwrite_existing=True 时取全部非已锁定状态
+    if req.overwrite_existing:
+        result = await db.execute(
+            select(Image).where(
+                Image.dataset_id == req.dataset_id,
+                Image.status.in_(["pending", "ai_labeled"]),
+            )
+        )
+    else:
+        result = await db.execute(
+            select(Image).where(
+                Image.dataset_id == req.dataset_id,
+                Image.status == "pending",
+            )
+        )
+    images = result.scalars().all()
+    total = len(images)
+    if total == 0:
+        return RunSegmentationPretrainedResponse(
+            total=0, auto_labeled=0, need_human=0,
+            model_name=req.model_name, threshold=req.confidence_threshold,
+        )
+
+    # 4. 同步批量推理
+    storage_root = settings.UPLOAD_DIR
+    image_paths = [str(storage_root / img.storage_path) for img in images]
+    try:
+        masks_with_conf = seg_predict.predict_to_mask_image_with_conf(
+            model, image_paths, crop_size=req.crop_size, device=req.device,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Inference failed: {str(e)[:200]}")
+
+    # 5. upsert SegmentationMask + 写 status + 审计
+    from app.models.segmentation_mask import SegmentationMask
+    auto_labeled = 0
+    for img in images:
+        abs_path = str(storage_root / img.storage_path)
+        if abs_path not in masks_with_conf:
+            # 单图推理失败 (e.g. 损坏的图像) → 跳过, 不影响整体
+            continue
+        pil_mask, max_softmax = masks_with_conf[abs_path]
+
+        # overwrite_existing=False 时: 已存在 mask 直接跳过
+        existing = (await db.execute(
+            select(SegmentationMask).where(SegmentationMask.image_id == img.id)
+        )).scalars().first()
+        if existing and not req.overwrite_existing:
+            continue
+
+        # 持久化 mask 到 storage_service
+        mask_path = seg_predict.save_mask_pil(pil_mask, req.dataset_id, img.id)
+
+        if existing:
+            # 覆盖: 删旧 + 写新
+            await db.delete(existing)
+            await db.flush()
+        new_mask = SegmentationMask(
+            image_id=img.id,
+            mask_path=mask_path,
+            source="ai",
+            annotated_by=current_user.id,
+        )
+        db.add(new_mask)
+
+        # 判定是否落标 (max_softmax 是 softmax 输出最大值, ∈ [0, 1])
+        would_label = max_softmax >= req.confidence_threshold
+        if would_label:
+            img.status = "ai_labeled"
+            db.add(AnnotationLog(
+                image_id=img.id,
+                user_id=current_user.id,
+                action="ai_predict",
+                from_label_id=img.final_label_id,
+                to_label_id=None,  # 分割任务无单 label_id
+                time_spent_ms=0,
+            ))
+            auto_labeled += 1
+        # 否则保持 pending (mask 已写入, 人工可继续精修)
+
+    await db.commit()
+
+    return RunSegmentationPretrainedResponse(
+        total=total,
+        auto_labeled=auto_labeled,
+        need_human=total - auto_labeled,
+        model_name=req.model_name,
+        threshold=req.confidence_threshold,
+    )
