@@ -250,16 +250,36 @@ const hasFinetuneModel = computed(() => finetuneModels.value.length > 0)
  * v2.5.45: 当前数据集的任务类型判定
  * - 用于条件渲染「测评」按钮等任务类型相关操作
  * - dataset.value 可能在 load 完成前为 null, 默认值走 'classification' 保持向后兼容
+ * - 返回固定联合类型, 避免下游 PreviewList 等组件出现 TS2322
  */
-const currentDatasetTaskType = computed(
-  () => (dataset.value?.task_type as string) || 'classification'
+const currentDatasetTaskType = computed<'classification' | 'detection' | 'segmentation'>(
+  () => {
+    const tt = (dataset.value?.task_type as string) || 'classification'
+    if (tt === 'detection' || tt === 'segmentation') return tt
+    return 'classification'
+  }
 )
+
 /**
- * v2.5.45: 是否目标检测任务
- * - true 时: 隐藏「测评」按钮 (详见测评按钮处的 v-if + 注释)
- * - 分类/分割任务保持原有行为
+ * v2.5.46: 测评按钮的 tooltip 文案 — 按任务类型动态切换
+ * - 分类: top-1 标签 + 置信度 + top-3 候选
+ * - 检测: bbox 计数 + 最高置信度 + bbox 类别摘要
+ * - 分割: 最大 softmax + 像素级 mask
+ * 无 fine-tune 模型时统一走"无模型引导"提示
  */
-const isDetectionTask = computed(() => currentDatasetTaskType.value === 'detection')
+const previewTooltipText = computed(() => {
+  if (!hasFinetuneModel.value) {
+    return '该数据集暂无训练模型, 请先到「训练任务」页选定该数据集启动训练'
+  }
+  const tt = currentDatasetTaskType.value
+  if (tt === 'detection') {
+    return 'dry-run 试跑当前页图片, 不写库, 弹窗显示 bbox 计数 + 最高置信度 + 类目摘要, 帮你在执行批量预标注前评估阈值是否合适'
+  }
+  if (tt === 'segmentation') {
+    return 'dry-run 试跑当前页图片, 不写库, 弹窗显示每张图的最大 softmax 与是否会被落标, 帮你在执行批量预标注前评估阈值是否合适'
+  }
+  return 'dry-run 试跑当前页图片, 不写库, 弹窗显示 3 类: 会标/待标/无交集, 帮你在执行批量预标注前评估阈值是否合适'
+})
 
 function onSelectionChange(rows: any[]) {
   selectedIds.value = rows.map((r) => r.id)
@@ -794,24 +814,14 @@ watch(() => route.params.id, resetPage)
               </el-tag>
             </div>
           </el-tooltip>
-          <!-- v2.5.45: 测评按钮对目标检测任务冗余, 隐藏
-               详细分析:
-               - 测评接口 POST /api/images/preview-confidence 走 batch_predict (top-1/top-5),
-                 是「单标签分类」单图二值「标/不标」预览, 返回字段 (top1/top1_conf/reason)
-                 都基于单标签分类假设
-               - 目标检测每张图含多个 bbox, 每 bbox 独立类别+置信度,
-                 「会被标注」二值判定不准确, 与实际预标注差异大
-               - 用户在标注工作台 DetectionPanel 能直接看到每 bbox 的置信度,
-                 干跑预览的边际价值低
-               - 后端 API 本身保留 (分类任务仍要用), 仅前端按任务类型隐藏入口
-               分割任务同样不适用 top-1 预览, 但本数据集若 task_type=segmentation
-               通常也不会走到这个数据集的检测 UI, 暂不批量隐藏 -->
+          <!-- v2.5.46: 测评按钮三任务均可用, 后端 preview_confidence 按 dataset.task_type 三路分派
+               - 分类: top-1 标签 + 置信度 + top-3 候选
+               - 检测: bbox 计数 + 最高置信度 + bbox 类别摘要
+               - 分割: 最大 softmax + 像素级 mask
+               测评是 dry-run (不写库, 不写审计), 让用户在执行批量预标注前评估阈值是否合适 -->
           <el-tooltip
-            v-if="!isDetectionTask"
             placement="top" :show-after="200"
-            :content="hasFinetuneModel
-              ? 'dry-run 试跑当前页图片, 不写库, 弹窗显示 3 类: 会标/待标/无交集, 帮你在执行批量预标注前评估阈值是否合适'
-              : '该数据集暂无训练模型, 请先到「训练任务」页选定该数据集启动训练'"
+            :content="previewTooltipText"
           >
             <el-button
               plain :icon="DataAnalysis" :loading="previewing"
@@ -939,9 +949,11 @@ watch(() => route.params.id, resetPage)
               circle
               @click.stop="openViewer(img.id)"
             />
-            <el-tooltip content="清除标注" placement="top">
+            <el-tooltip
+              v-if="hasAnnotation(img)"
+              content="清除标注" placement="top"
+            >
               <el-button
-                v-if="hasAnnotation(img)"
                 class="clear-btn"
                 type="warning"
                 :icon="RefreshLeft"
@@ -1151,19 +1163,19 @@ watch(() => route.params.id, resetPage)
           <template #label>
             <span><el-icon><Check /></el-icon> 会被标注 ({{ previewGroups.would.length }})</span>
           </template>
-          <PreviewList :items="previewGroups.would" />
+          <PreviewList :items="previewGroups.would" :task-type="currentDatasetTaskType" />
         </el-tab-pane>
         <el-tab-pane :name="'human'">
           <template #label>
             <span><el-icon><InfoFilled /></el-icon> 需人工复核 ({{ previewGroups.human.length }})</span>
           </template>
-          <PreviewList :items="previewGroups.human" />
+          <PreviewList :items="previewGroups.human" :task-type="currentDatasetTaskType" />
         </el-tab-pane>
         <el-tab-pane :name="'none'">
           <template #label>
             <span><el-icon><CircleClose /></el-icon> 无匹配 ({{ previewGroups.none.length }})</span>
           </template>
-          <PreviewList :items="previewGroups.none" />
+          <PreviewList :items="previewGroups.none" :task-type="currentDatasetTaskType" />
         </el-tab-pane>
       </el-tabs>
 
