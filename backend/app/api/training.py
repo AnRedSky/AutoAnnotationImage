@@ -212,19 +212,16 @@ async def stream_training_progress(
     token: str | None = Query(default=None),
     current_user: User | None = Depends(get_user_optional_for_query),
 ):
-    """SSE 端点: 实时推送训练进度
+    """SSE 端点: 实时推送训练进度 (v3.0.0 Phase 4: 委托 JobStateService.get_snapshot_with_fresh_db)
 
-    - 每 1s 拉一次 Celery state (PENDING/PROGRESS/SUCCESS/FAILURE/REVOKED)
-    - 终端态下 Celery result.info 缺 progress/msg 时回退到 MySQL TrainingJob
+    - 每 1s 拉一次 JobStateService 拿权威快照
+    - 终端态下推完最后一帧后服务端主动结束流
     - 仅在 (state, progress, message, current_epoch) 签名变化时推送, 避免静默期洪水
-    - 终端态推完最后一帧后服务端主动结束流, 客户端无需靠超时判断
     - 长空闲期 (state=PENDING 且 worker 未接走) 周期性发 keepalive 注释帧
     - 客户端断开 (页面刷新 / 切页) 通过 request.is_disconnected() 立即退出
     """
+    from app.services import JobStateService
     from celery.result import AsyncResult
-    from app.database import AsyncSessionLocal
-    from app.models.training_job import TrainingJob
-    from sqlalchemy import select
 
     async def event_generator():
         last_signature = None
@@ -246,106 +243,45 @@ async def stream_training_progress(
                 # 某些 ASGI 中间件下 is_disconnected 会抛, 视为已断开
                 break
 
-            state = "PENDING"
-            info: dict = {}
+            # ---- 委托 JobStateService 拿权威快照 (DB 优先 + Celery 兜底) ----
             try:
-                result = AsyncResult(task_id)
+                snap = await JobStateService.get_snapshot_with_fresh_db(task_id)
+            except Exception:
+                # 极端异常: 5xx 兜底
+                snap = None
+
+            # 兼容极端情况: JobStateService 抛错时退化到 Celery raw
+            info: dict = {}
+            if snap is None:
+                state = "PENDING"
                 try:
-                    state = result.state
+                    r = AsyncResult(task_id)
+                    state = r.state or "PENDING"
+                    if isinstance(r.info, dict):
+                        info = r.info
                 except Exception:
-                    state = "PENDING"
+                    pass
+                progress = float(info.get("progress", 0.0))
+                current_epoch = info.get("epoch")
+                total_epochs = info.get("total_epochs")
+                message = info.get("msg") or info.get("info") or ""
+                started_at = None
+                finished_at = None
+            else:
+                state = snap.state
+                progress = snap.progress
+                current_epoch = snap.current_epoch
+                total_epochs = snap.total_epochs
+                message = snap.message
+                started_at = snap.started_at
+                finished_at = snap.finished_at
+                # 透传 progress_callback 推过来的 extra (data_total/class_names 等)
                 try:
-                    raw_info = result.info
-                    if isinstance(raw_info, dict):
-                        info = raw_info
+                    r = AsyncResult(task_id)
+                    if isinstance(r.info, dict):
+                        info = r.info
                 except Exception:
                     info = {}
-            except Exception:
-                state = "PENDING"
-                info = {}
-
-            # ---- 关键: 永远先查 DB, 拿到权威 (state, progress, message) ----
-            # Celery 的 PENDING 状态有歧义:
-            #   a) 任务刚入队, worker 还没接走 (此时 DB 可能还没记录)
-            #   b) 任务已被 worker 处理, 但 worker 在 mark_as_done/FAILURE 路径上
-            #      崩了, Redis 端 result 缺失/损坏, Celery 退化为 PENDING
-            #   c) 任务完全没存在过 (前端传的 task_id 是假的)
-            # 对于 (b), DB 一定有 TrainingJob 记录且 state 可能是 PROGRESS/FAILURE.
-            # 对于 (a)/(c), DB 没有记录.
-            # 因此: 始终查 DB, 优先用 DB 状态; 查不到才用 Celery 状态.
-            # 这样 UI 永远显示真实状态, 不会因为 worker 崩溃而误导.
-            db_state = None
-            db_progress = None
-            db_msg = None
-            db_total_epochs = None
-            db_current_epoch = None
-            # v2.5.28: 拉 started_at / finished_at 一起回推, 详情页 SSE 实时刷新
-            # - started_at: PENDING 为 None, worker 接手时写入, 之后 PROGRESS/SUCCESS 不变
-            # - finished_at: 仅终态有值 (SUCCESS/FAILURE/REVOKED)
-            db_started_at = None
-            db_finished_at = None
-            try:
-                async with AsyncSessionLocal() as db:
-                    row = (await db.execute(
-                        select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
-                    )).scalar_one_or_none()
-                if row is not None:
-                    db_state = row.state
-                    db_progress = row.progress
-                    db_msg = row.message
-                    if row.error and not db_msg:
-                        db_msg = row.error[:200]
-                    db_total_epochs = row.epochs
-                    if isinstance(row.history, list) and row.history:
-                        db_current_epoch = row.history[-1].get("epoch")
-                    # v2.5.28: 时间字段序列化 (ORM 直接给 datetime, JSON 序列化 OK)
-                    db_started_at = row.started_at
-                    db_finished_at = row.finished_at
-            except Exception:
-                pass
-
-            # DB 优先: 如果 DB 有记录, 用 DB state 覆盖 Celery state
-            # 终端态 (SUCCESS/FAILURE/REVOKED) 永远以 DB 为准
-            # PROGRESS 时: DB 的 progress 来自最近一次 progress_callback 写库
-            #              (实际上 callback 只写 Celery, 不写 DB; 所以保留 Celery 的 progress)
-            #              但 message 字段 DB 写的更可靠
-            if db_state is not None:
-                if db_state in ("SUCCESS", "FAILURE", "REVOKED"):
-                    state = db_state
-                    if db_progress is not None:
-                        progress = float(db_progress)
-                    else:
-                        progress = float(info.get("progress", 0))
-                    if db_msg:
-                        message = db_msg
-                    else:
-                        # v2.5.27 修复: 兼容分割 _train_cb 推的 info 字段 (而非 msg)
-                        # 原: message = info.get("msg", "") -> 分割场景永远空
-                        # 现: msg 优先, info 兜底
-                        message = info.get("msg") or info.get("info") or ""
-                    if db_total_epochs is not None:
-                        total_epochs = db_total_epochs
-                    else:
-                        total_epochs = info.get("total_epochs")
-                    if db_current_epoch is not None:
-                        current_epoch = db_current_epoch
-                    else:
-                        current_epoch = info.get("current_epoch") or info.get("epoch")
-                else:
-                    # PROGRESS / PENDING 状态: Celery info 里有实时 meta, 优先用
-                    state = db_state  # 但 state 字段用 DB 的 (避免 Celery PENDING 误导)
-                    progress = float(info.get("progress", 0))
-                    current_epoch = info.get("current_epoch") or info.get("epoch")
-                    total_epochs = info.get("total_epochs")
-                    # v2.5.27 修复: 同上, 兼容分割 info 字段
-                    message = info.get("msg") or info.get("info") or ""
-            else:
-                # DB 没记录 (任务完全没存在过), 用 Celery 状态
-                progress = float(info.get("progress", 0))
-                current_epoch = info.get("current_epoch") or info.get("epoch")
-                total_epochs = info.get("total_epochs")
-                # v2.5.27 修复: 同上
-                message = info.get("msg") or info.get("info") or ""
 
             payload = {
                 "task_id": task_id,
@@ -355,19 +291,11 @@ async def stream_training_progress(
                 "total_epochs": total_epochs,
                 "message": message,
             }
-            # v2.5.28: 透传 started_at / finished_at (DB 权威), 详情页 SSE 实时刷新
-            # - openDetail 时拉过 DB, 但 worker 接手后 (started_at 写入) SSE 没推, 详情会卡在 None
-            # - 终态下 finished_at 一旦有值 (FAILURE/SUCCESS 写库后) 立即推, 不必等下次 onComplete
-            # - datetime 直接 JSON 序列化 (FastAPI 会 ISO 化)
-            if db_started_at is not None:
-                payload["started_at"] = db_started_at.isoformat() if hasattr(db_started_at, "isoformat") else db_started_at
-            if db_finished_at is not None:
-                payload["finished_at"] = db_finished_at.isoformat() if hasattr(db_finished_at, "isoformat") else db_finished_at
-            # ---- 透传 progress_callback 的 extra (数据集统计 + 增量训练状态) ----
-            # 训练启动那一刻, train.py 会把 data_total/data_train/data_val/
-            # num_classes/class_names 通过 extra 一次性推过来; 增量训练时
-            # pretrained_loaded/pretrained_path 也会在那一刻推过来. 后续 epoch
-            # 这些字段保持不变, 静默期 SSE 不重发, 终端态下前端仍能看到完整统计.
+            if started_at is not None:
+                payload["started_at"] = started_at.isoformat() if hasattr(started_at, "isoformat") else started_at
+            if finished_at is not None:
+                payload["finished_at"] = finished_at.isoformat() if hasattr(finished_at, "isoformat") else finished_at
+            # 透传 extra 字段 (data_total / num_classes / class_names / 增量训练状态)
             for _ek, _ev in (info or {}).items():
                 if _ek in ("data_total", "data_train", "data_val",
                            "num_classes", "class_names",
@@ -376,15 +304,13 @@ async def stream_training_progress(
                     payload[_ek] = _ev
 
             # ---- 签名去重: 状态/进度/消息/当前 epoch/时间字段 任一变化才推 ----
-            # v2.5.28: 加入 started_at / finished_at, 让"worker 接手"和"任务结束"
-            # 这两个时间点的变化也能触发推送 (否则首帧没值就一直空着)
             signature = (
                 state,
                 round(progress, 1),
                 message,
                 current_epoch,
-                str(db_started_at) if db_started_at is not None else None,
-                str(db_finished_at) if db_finished_at is not None else None,
+                str(started_at) if started_at is not None else None,
+                str(finished_at) if finished_at is not None else None,
             )
             if signature != last_signature:
                 # SSE 字段: data= 一行 JSON, 后跟一个空行表示一帧结束
