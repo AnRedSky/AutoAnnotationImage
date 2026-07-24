@@ -263,10 +263,9 @@ class DetectionService:
             if cat_id is not None:
                 cat = await db.get(Category, cat_id)
                 if not cat:
-                    raise HTTPException(400, f"Category id={cat_id} not found")
+                    raise NotFoundError(f"Category id={cat_id} not found")
                 if cat.dataset_id != image.dataset_id:
-                    raise HTTPException(
-                        400,
+                    raise ValidationError(
                         f"Category id={cat_id} 不属于 dataset id={image.dataset_id}",
                     )
 

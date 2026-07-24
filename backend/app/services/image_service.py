@@ -304,9 +304,9 @@ class ImageService:
         from app.services.storage_service import storage_service
 
         if not image_ids:
-            raise HTTPException(400, "image_ids cannot be empty")
+            raise ValidationError("image_ids cannot be empty")
         if len(image_ids) > 500:
-            raise HTTPException(400, "Too many ids (max 500)")
+            raise ValidationError("Too many ids (max 500)")
 
         # 1) 找出需要删的图
         result = await db.execute(

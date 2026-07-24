@@ -216,10 +216,9 @@ async def delete_mask(
     """
     删除 mask (v3.0.0 Phase 4: thin wrapper, 业务下沉到 SegmentationService.delete_mask)
     - ORM 软记录直接删, 磁盘文件同时清理
+    - 找不到时由 Service 抛 NotFoundError, 全局 handler 统一返回 404
     """
-    deleted = await SegmentationService.delete_mask(db, mask_id)
-    if not deleted:
-        raise HTTPException(404, f"Mask id={mask_id} not found")
+    await SegmentationService.delete_mask(db, mask_id)
     return {
         "success": True,
         "deleted_id": mask_id,

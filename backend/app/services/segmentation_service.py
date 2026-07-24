@@ -27,6 +27,7 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.exceptions import NotFoundError, ValidationError
 from app.model.annotation_log import AnnotationLog
 from app.model.image import Image
 from app.model.segmentation_mask import SegmentationMask
@@ -278,8 +279,7 @@ class SegmentationService:
         max_allowed = max([c.id for c in cats], default=0)
         overflow = [v for v in counts.keys() if v > max_allowed]
         if overflow:
-            raise HTTPException(
-                400,
+            raise ValidationError(
                 f"mask 像素值超过 dataset 类别数 (max_category_id={max_allowed}, "
                 f"overflow={sorted(overflow)[:5]}...)",
             )

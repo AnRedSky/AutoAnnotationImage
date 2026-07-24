@@ -81,14 +81,13 @@ class AutoAnnotateService:
         """业务校验: 数据集存在 + 有类目"""
         dataset = await db.get(Dataset, dataset_id)
         if not dataset:
-            raise HTTPException(404, "Dataset not found")
+            raise NotFoundError("Dataset not found")
         # 检查类目
         cat_count = (await db.execute(
             select(Category).where(Category.dataset_id == dataset_id).limit(1)
         )).scalar_one_or_none()
         if not cat_count:
-            raise HTTPException(
-                400,
+            raise ValidationError(
                 "数据集没有预设类目, 请先添加类目 (Dataset -> 类别) 再启动 AI 预标注",
             )
         return dataset
@@ -163,7 +162,6 @@ class AutoAnnotateService:
                         detail=f"Model '{model_name}' cannot be loaded: no internet/HuggingFace access ({err_msg}).",
                     )
                 raise HTTPException(500, f"Failed to load model: {err_msg}")
-
         # 3) 推理
         storage_root = settings.UPLOAD_DIR
         image_paths = [str(storage_root / img.storage_path) for img in images]
