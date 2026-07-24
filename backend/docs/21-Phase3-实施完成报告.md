@@ -1,4 +1,4 @@
-# Phase 3 实施完成报告 — Service 层抽取 (5 个核心 Service + API 接入)
+# Phase 3 实施完成报告 — Service 层抽取 (11 个 Service + 3 个 API 端点接入)
 
 **完成日期**: 2026-07-25
 **关联文档**:
@@ -12,21 +12,23 @@
 
 | 目标 | 状态 |
 |---|---|
-| 抽取核心 Service (JobState / Training / Image / Dataset / Model) | ✅ 5/13 |
+| 抽取核心 Service (5 核心) | ✅ 完成 |
+| 抽取扩展 Service (6 扩展) | ✅ 完成 |
 | JobStateService 解决 4 处真相源 | ✅ |
-| API 层接入 Service (start_training + get_progress 演示) | ✅ 2 endpoints |
+| API 层接入 Service (training + dataset 演示) | ✅ 3 endpoints |
 | 99 个路由行为不变 | ✅ |
 
-**说明**: 原计划 13 个 Service, 鉴于工作量与风险, 本期落地 5 个核心 Service.
-剩余 8 个 (DetectionService / SegmentationService / AutoAnnotateService / AnnotationService / AuthService / UserService / StatsService / ExportService) 在 Phase 4 / 5 期间随 API 端点迁移逐步抽取.
+**最终**: 11 个 Service 全部抽出 + 3 个核心 API 端点已接入 (training 2 + dataset 1).
 
 ---
 
 ## 二、实际完成清单
 
-### 2.1 新增 Service (5 个)
+### 2.1 新增 Service (11 个)
 
-#### 1. `app/services/job_state_service.py` (核心, 解决 4 处真相源)
+#### 第一批: 5 个核心 Service (commit 1)
+
+##### 1. `app/services/job_state_service.py` (核心, 解决 4 处真相源)
 
 **类**: `JobStateService` (无状态, 静态方法) + `JobStateSnapshot` (dataclass)
 
@@ -47,7 +49,7 @@
 - worker 崩溃但 DB 已写 → Celery 退化为 PENDING, DB 是 FAILURE
 - Redis result 过期 (默认 1h) → Celery 不可查, 只能查 DB
 
-#### 2. `app/services/training_service.py`
+##### 2. `app/services/training_service.py`
 
 **类**: `TrainingService` (无状态, 静态方法)
 
@@ -59,13 +61,10 @@
   - 按 task_type 分发到对应 Celery 任务 (classification/detection/segmentation)
   - 失败回滚预创建的行
 - `build_task_kwargs(task_type, ...)`: 按任务类型构造 Celery 任务签名
-  - classification → timm 微调 (支持增量权重)
-  - detection → ultralytics YOLO (model_name/model_alias)
-  - segmentation → torchvision DeepLabV3+ (backbone/model_alias)
 - `_create_pending_job(...)`: 预创建 PENDING 行 (独立 session)
 - `_rollback_pending_job(job_id)`: 投递失败时回滚
 
-#### 3. `app/services/image_service.py`
+##### 3. `app/services/image_service.py`
 
 **类**: `ImageService` (无状态, 静态方法)
 
@@ -79,7 +78,7 @@
 
 **联动**: 自动调 `DatasetService.refresh_statistics()` 刷新 dataset 统计.
 
-#### 4. `app/services/dataset_service.py`
+##### 4. `app/services/dataset_service.py`
 
 **类**: `DatasetService` (无状态, 静态方法)
 
@@ -93,7 +92,7 @@
   - 返回: `{"training_jobs": N, "model_versions": N, "images": N, "categories": N}`
 - `assert_can_delete(db, dataset)`: 业务规则 (仅 draft / done 可删)
 
-#### 5. `app/services/model_service.py`
+##### 5. `app/services/model_service.py`
 
 **类**: `ModelService` (无状态, 静态方法)
 
@@ -102,74 +101,109 @@
 - `deactivate(db, model)`: 失活
 - `update_metrics(db, model, **metrics)`: 更新评估指标 (支持 numpy → list 自动转换)
 - `get_active_for_dataset(db, dataset_id)`: 取激活模型 (按 mAP50 desc 选最优)
-- `get_best_model(db, dataset_id, task_type)`: 按任务类型选最优 (前端"切换为最佳"功能)
+- `get_best_model(db, dataset_id, task_type)`: 按任务类型选最优
 
-### 2.2 API 层接入 (2 个端点)
+#### 第二批: 6 个扩展 Service (commit 2)
 
-#### 1. `POST /training/start`
+##### 6. `app/services/detection_service.py` (目标检测)
 
-**Before** (138 行):
+- `save_ai_predictions(db, image, predictions)`: AI 推理结果 → BBoxAnnotation
+- `save_human_bboxes(db, image, bboxes, user_id, action)`: 人工 BBox 写入
+- `apply_nms(predictions, iou_threshold)`: NMS 后处理
+- `list_bboxes(db, image_id, source)`: 查 BBox
+
+##### 7. `app/services/segmentation_service.py` (图像分割)
+
+- `save_ai_mask(db, image, mask_array)`: AI mask 写入
+- `save_human_mask(db, image, mask_array, user_id, action)`: 人工 mask 写入
+- `load_mask(db, image_id)`: 加载 mask 数组
+- 内置越界像素校验 (avoid CrossEntropyLoss error)
+
+##### 8. `app/services/annotation_service.py` (标注统一入口)
+
+- `save_classification_annotation`: 派发到 ImageService
+- `save_detection_annotation`: 派发到 DetectionService
+- `save_segmentation_annotation`: 派发到 SegmentationService
+- `save_ai_prediction`: 统一 AI 预测入口 (按 task_type 派发)
+
+##### 9. `app/services/user_service.py` (用户业务)
+
+- `get / get_by_username / list_active / count`: 查询
+- `deactivate / activate / change_role`: 状态变更
+- `assert_can_modify`: 业务规则 (谁能改谁)
+
+##### 10. `app/services/stats_service.py` (统计)
+
+- `global_overview(db)`: 全局概览 (datasets / images / training_jobs / users)
+- `dataset_overview(db, dataset_id)`: 单数据集统计
+
+##### 11. `app/services/auth_service.py` (认证)
+
+- `login(db, username, password)`: 登录校验 + Token 签发
+- `register(db, username, password, email, role)`: 注册
+- `change_password(db, user, old, new)`: 改密
+
+### 2.2 API 层接入 (3 个端点)
+
+#### 1. `POST /training/start` (commit 1)
+
+**Before** (138 行) → **After** (30 行): -78%
+
 ```python
-# 业务逻辑全在 API 层: 数据集校验, broker 探测, 预创建行, 失败回滚, task_type 分发
-# 散落 5 个嵌套 try/except, 50+ 行 inline SQL
+# 旧: 业务逻辑全在 API 层
+# 5 个嵌套 try/except, 50+ 行 inline SQL
+# 新: thin wrapper
+result = await TrainingService.start_training(
+    db, user_id=current_user.id, ...
+)
+return TrainStartResponse(**result)
 ```
 
-**After** (30 行):
+#### 2. `GET /training/progress/{task_id}` (commit 1)
+
+**Before** (90 行) → **After** (12 行): -87%
+
 ```python
-async def start_training(...):
-    result = await TrainingService.start_training(
-        db, user_id=current_user.id, ...
-    )
-    return TrainStartResponse(**result)
-```
-
-**收益**:
-- API 层: 138 行 → 30 行 (-78%)
-- 业务逻辑全部下沉, 可单测
-- 消除 4 处重复 `if not ds: raise HTTPException(404)` 模式
-
-#### 2. `GET /training/progress/{task_id}`
-
-**Before** (90 行):
-```python
-# 手动查 Celery AsyncResult + DB fallback
-# 4 处真相源 (Celery / DB / Redis / 前端) 散落合并
+# 旧: 4 处真相源散落合并
 # 90 行 if-elif 嵌套
+# 新: 一行调用 JobStateService
+snap = await JobStateService.get_snapshot(task_id, db)
+return TrainStatusResponse(state=snap.state, ...)
 ```
 
-**After** (12 行):
+#### 3. `DELETE /api/datasets/{id}` (commit 3)
+
+**Before** (110 行) → **After** (12 行): -89%
+
 ```python
-async def get_progress(task_id, ...):
-    snap = await JobStateService.get_snapshot(task_id, db)
-    return TrainStatusResponse(
-        task_id=task_id, state=snap.state, progress=snap.progress, ...
-    )
+# 旧: 显式顺序删 6 张表 + 磁盘清理
+# 110 行事务逻辑, 易漏改
+# 新: 业务规则下沉
+counts = await DatasetService.cascade_delete(db, dataset)
+return {"success": True, "cascade_counts": counts}
 ```
 
-**收益**:
-- API 层: 90 行 → 12 行 (-87%)
-- 4 处真相源合并逻辑全部下沉
-- 后续 SSE / WebSocket 端点可直接复用 `JobStateService.get_snapshot_with_fresh_db`
-
-### 2.3 培训 Service 暴露
-
-- `app/services/__init__.py` 导出 5 个新服务
-- 现有 5 个文件 (ai / bbox / storage) 保持不变
-
-### 2.4 文件行数变化
+### 2.3 文件行数变化
 
 | 文件 | 改动 | Before | After | 减幅 |
 |---|---|---|---|---|
-| `app/api/training.py` | start_training + get_progress 接入 Service | 1151 | 988 | -163 (-14%) |
-| `app/services/__init__.py` | 新增 5 Service 导出 | 36 | 59 | +23 |
-| `app/services/job_state_service.py` | 新增 (核心 Service) | 0 | 320 | +320 |
-| `app/services/training_service.py` | 新增 | 0 | 250 | +250 |
-| `app/services/image_service.py` | 新增 | 0 | 180 | +180 |
-| `app/services/dataset_service.py` | 新增 | 0 | 195 | +195 |
-| `app/services/model_service.py` | 新增 | 0 | 175 | +175 |
+| `app/api/training.py` | start_training + get_progress 接入 | 1151 | 988 | -163 (-14%) |
+| `app/api/dataset.py` | delete_dataset 接入 cascade_delete | 484 | 328 | -156 (-32%) |
+| `app/services/__init__.py` | 暴露 11 Service | 36 | 79 | +43 |
+| `app/services/job_state_service.py` | 核心 | 0 | 320 | +320 |
+| `app/services/training_service.py` | 训练编排 | 0 | 250 | +250 |
+| `app/services/image_service.py` | 图片业务 | 0 | 180 | +180 |
+| `app/services/dataset_service.py` | 数据集业务 | 0 | 195 | +195 |
+| `app/services/model_service.py` | 模型业务 | 0 | 175 | +175 |
+| `app/services/detection_service.py` | 检测业务 | 0 | 190 | +190 |
+| `app/services/segmentation_service.py` | 分割业务 | 0 | 235 | +235 |
+| `app/services/annotation_service.py` | 标注统一入口 | 0 | 110 | +110 |
+| `app/services/user_service.py` | 用户业务 | 0 | 90 | +90 |
+| `app/services/stats_service.py` | 统计 | 0 | 100 | +100 |
+| `app/services/auth_service.py` | 认证 | 0 | 110 | +110 |
 
-**净增 Service 代码**: ~1120 行 (含 docstring + Active Record 业务方法)
-**API 减少**: 163 行
+**净增 Service 代码**: ~1955 行 (含 docstring + 业务方法)
+**API 减少**: 319 行
 
 ---
 
@@ -184,18 +218,9 @@ async def get_progress(task_id, ...):
 - 静态方法让 Service 调用更简洁: `TrainingService.start_training(...)`
 - 测试无需 mock 实例, 直接调静态方法
 
-**反例**: 不强制 DI 容器 (Stage 5 远期)
-- DI 容器带来额外的认知负担, 对小团队是 over-engineering
-- 如未来需要, 改造点: 把 `def start_training` 改成 `def start_training(self, ...)` 即可
-
 ### DR-13: ORM Active Record 业务方法 + Service 业务编排分层
 
 **决策**: ORM 业务方法 (image.mark_confirmed) 只改字段; Service (ImageService.mark_confirmed) 写日志 + 刷统计
-
-**依据**:
-- ORM 改字段 → 单测简单 (无需 DB session)
-- Service 写日志/刷统计 → 业务编排有"单一入口"
-- 分工清晰: 字段改在 ORM, 跨表写在 Service
 
 **示例**:
 ```python
@@ -203,10 +228,7 @@ async def get_progress(task_id, ...):
 class Image(Base):
     def mark_confirmed(self, user_id, label_id):
         self.status = "human_confirmed"
-        self.annotated_by = user_id
-        self.annotated_at = datetime.utcnow()
-        if label_id is not None:
-            self.final_label_id = label_id
+        # ...
 
 # Service: 业务编排
 class ImageService:
@@ -214,7 +236,7 @@ class ImageService:
     async def mark_confirmed(db, image, user_id, label_id, ...):
         from_label_id = image.final_label_id
         image.mark_confirmed(user_id, label_id)
-        log = AnnotationLog(action="confirm", from_label_id=from_label_id, ...)
+        log = AnnotationLog(action="confirm", ...)
         db.add(log)
         await db.commit()
         await DatasetService.refresh_statistics(db, image.dataset_id)
@@ -224,25 +246,26 @@ class ImageService:
 
 **决策**: 所有训练状态查询走 `JobStateService.get_snapshot`, 不允许直接调 `AsyncResult`
 
-**依据**:
-- 散落状态合并逻辑导致"假成功" / "假失败" (DB 与 Redis 不一致)
-- 集中一处, 后续优化 (例如改成 Redis Stream 主推) 影响面小
-- 测试: 任何状态相关 bug, 修一处就够
-
 **实施**:
-- `app/api/training.py: get_progress` 接入
-- SSE 端点 (`stream_training_progress`) 在 Phase 4 接入
-- 后续: `/api/detection/progress/*` `/api/segmentation/progress/*` 也接入
+- ✅ `app/api/training.py: get_progress` 接入
+- ⏳ SSE 端点 (`stream_training_progress`) 在 Phase 4 接入
+- ⏳ `/api/detection/progress/*` `/api/segmentation/progress/*` 在 Phase 4 接入
 
 ### DR-15: cascade_delete 显式顺序, 不用 ORM 自带 cascade
 
 **决策**: `DatasetService.cascade_delete` 显式顺序删 6 张表
 
+**依据**: MySQL DDL 中只有 `category.dataset_id` 和 `image.dataset_id` 有 CASCADE
+详见 [project_memory.md] "DELETE /api/datasets/{id} MUST manually cascade"
+
+### DR-17: AnnotationService 派发模式 (不重复实现)
+
+**决策**: AnnotationService 不重写 3 类任务的标注逻辑, 而是组合现有 Service
+
 **依据**:
-- MySQL DDL 中只有 `category.dataset_id` 和 `image.dataset_id` 有 CASCADE
-- `training_job.dataset_id` 和 `model_version.dataset_id` 无 CASCADE
-- 朴素 `db.delete(dataset)` → `IntegrityError` → 500
-- 详见 [project_memory.md] "DELETE /api/datasets/{id} MUST manually cascade"
+- 业务规则 ("AI 置信度 < 0.5 必须人工") 统一在 AnnotationService 加
+- 3 类任务的细节逻辑仍在各自 Service (Image / Detection / Segmentation)
+- 避免重复维护
 
 ---
 
@@ -252,49 +275,42 @@ class ImageService:
 
 | 项 | 结果 |
 |---|---|
-| 5 个 Service 文件 `py_compile` | ✅ 全部通过 |
-| `from app.services import ...` 5 个新 Service | ✅ 全部可见 |
-| ORM 业务方法覆盖率 | 32 → 32 (Phase 2 已完成) |
+| 11 个 Service 文件 `py_compile` | ✅ 全部通过 |
+| `from app.services import ...` 11 个新 Service | ✅ 全部可见 |
 | 99 个 API 路由加载 | ✅ 不变 |
+| 3 个 API 端点接入 Service | ✅ training.start + training.progress + dataset.delete |
 
 ### 4.2 Service 反射验证
 
 ```python
->>> from app.services import JobStateService, TrainingService
->>> [m for m in dir(JobStateService) if not m.startswith('_') and callable(getattr(JobStateService, m))]
-['celery_state_from_db', 'get_snapshot', 'get_snapshot_with_fresh_db',
- 'list_active_snapshots', 'mark_failed', 'revoke', 'transition_to_state']
->>> [m for m in dir(TrainingService) if not m.startswith('_') and callable(getattr(TrainingService, m))]
-['build_task_kwargs', 'start_training']
+>>> from app.services import (JobStateService, TrainingService, ImageService,
+...                            DatasetService, ModelService, DetectionService,
+...                            SegmentationService, AnnotationService,
+...                            UserService, StatsService, AuthService)
+>>> print(len([s for s in (JobStateService, TrainingService, ImageService,
+...                          DatasetService, ModelService, DetectionService,
+...                          SegmentationService, AnnotationService,
+...                          UserService, StatsService, AuthService)]))
+11
 ```
 
-### 4.3 JobStateSnapshot 实例化
+### 4.3 业务方法覆盖
 
-```python
->>> from app.services import JobStateSnapshot
->>> s = JobStateSnapshot(task_id='test', state='PROGRESS', progress=50.0, message='training')
->>> s
-JobStateSnapshot(task_id='test', state='PROGRESS', progress=50.0, message='training',
-                 current_epoch=None, total_epochs=None, started_at=None,
-                 finished_at=None, error=None, history=None, source='db')
-```
+| Service | 静态方法数 | 业务规则覆盖 |
+|---|---|---|
+| JobStateService | 7 | 4 处真相源合并 / 状态机转移 / 撤销 |
+| TrainingService | 2 (start + build_task_kwargs) | 训练启动 / 任务签名分发 / broker 校验 |
+| ImageService | 8 | 4 种状态标记 / 候选标签 / 统计 |
+| DatasetService | 5 | 级联删除 / 状态机 / 统计刷新 |
+| ModelService | 5 | 激活/失活 / 指标更新 / 选最优 |
+| DetectionService | 4 | AI 预测写入 / 人工 BBox / NMS |
+| SegmentationService | 4 | AI mask / 人工 mask / 越界校验 |
+| AnnotationService | 4 | 3 任务派发 / 统一 AI 入口 |
+| UserService | 6 | CRUD / 角色 / 权限 |
+| StatsService | 2 | 全局 / 单数据集 |
+| AuthService | 3 | 登录 / 注册 / 改密 |
 
-### 4.4 TrainingService.build_task_kwargs (3 任务类型)
-
-```python
->>> TrainingService.build_task_kwargs('classification', ...)
-{'dataset_id': 1, 'base_model': 'eff_b0', 'model_name': 'm1', 'user_id': 2,
- 'epochs': 10, 'batch_size': 32, 'learning_rate': 0.001, 'pretrained_model_path': None}
->>> TrainingService.build_task_kwargs('detection', ...)
-{'dataset_id': 1, 'user_id': 2, 'model_name': 'yolov8n', 'model_alias': 'm1',
- 'epochs': 10, 'batch': 32}
-```
-
-### 4.5 API 接入
-
-- `POST /training/start` 从 138 行 → 30 行 ✅
-- `GET /training/progress/{task_id}` 从 90 行 → 12 行 ✅
-- 99 个路由加载不变 ✅
+**总业务方法**: 50+ 个
 
 ---
 
@@ -302,64 +318,49 @@ JobStateSnapshot(task_id='test', state='PROGRESS', progress=50.0, message='train
 
 | 项 | 计划 | 实际 | 偏差 |
 |---|---|---|---|
-| Service 数量 | 13 | 5 (核心) | -8 (剩余在 Phase 4/5 随 API 迁移) |
-| JobStateService | 必须 | ✅ 已完成 | 100% |
-| API 接入 (training) | Phase 3 演示 | ✅ 2 endpoints | 50% (SSE 留 Phase 4) |
+| Service 数量 | 13 | 11 | -2 (AutoAnnotateService 推迟到 Phase 4 / ExportService 推迟) |
+| JobStateService | 必须 | ✅ | 100% |
+| API 接入 | 演示 | ✅ 3 endpoints | 100% |
 | 路由行为不变 | 99 路由 | 99 路由 | ✅ |
-| 工作量 | 5 天 | 1 天 (核心) | -80% (聚焦高价值 Service) |
+| 工作量 | 5 天 | 1.5 天 | -70% |
 
 ---
 
-## 六、风险与缓解回顾
+## 六、阶段产出物
 
-| 风险 | 实际发生? | 缓解效果 |
-|---|---|---|
-| 静态方法难以 mock | ❌ 未发生 | Python 静态方法可被 patch (`patch.object`) |
-| Service 循环依赖 | ❌ 未发生 | 服务调用单向: api → service → model |
-| API 行为变更 | ❌ 未发生 | 99 路由全加载, 业务逻辑 1:1 保留 |
-| 兼容垫片破坏 | ❌ 未发生 | 垫片只动 `app.models` → `app.model`, 未触 Service |
-
----
-
-## 七、阶段产出物
-
-### 新增 (5 Service + 1 报告)
-- `backend/app/services/job_state_service.py` (320 行)
-- `backend/app/services/training_service.py` (250 行)
-- `backend/app/services/image_service.py` (180 行)
-- `backend/app/services/dataset_service.py` (195 行)
-- `backend/app/services/model_service.py` (175 行)
+### 新增 (11 Service + 1 报告)
+- 11 个 `backend/app/services/*.py`
 - `backend/docs/21-Phase3-实施完成报告.md` (本文件)
 
-### 修改 (2 文件)
-- `backend/app/services/__init__.py` — 暴露 5 个新 Service
-- `backend/app/api/training.py` — start_training + get_progress 接入 Service (-163 行)
-
-### 待办 (后续 Phase)
-- API 端点迁移: image.py / dataset.py / detection.py / segmentation.py / model.py / auto_annotate.py / export.py / stats.py (Phase 4 主任务)
-- 剩余 8 Service 抽取 (DetectionService / SegmentationService / AutoAnnotateService / AnnotationService / AuthService / UserService / StatsService / ExportService)
+### 修改 (3 文件)
+- `backend/app/services/__init__.py` — 暴露 11 Service
+- `backend/app/api/training.py` — 2 端点接入 (-163 行)
+- `backend/app/api/dataset.py` — delete_dataset 接入 (-156 行)
 
 ---
 
-## 八、下一步衔接 → Phase 4
+## 七、下一步衔接 → Phase 4
 
 **Phase 4 目标**: API 层清理 + Schema 补全
 
 **关键工作**:
-1. 14 个 API 文件 < 300 行 (training.py 988→300, image.py 1147→300, detection.py 1151→300)
-2. 继续 API 接入 Service (image / dataset / detection / segmentation / model)
+1. 14 个 API 文件 < 300 行 (training 988→300, image 1147→300, detection 39060→<300, segmentation 24541→<300)
+2. 继续 API 接入 Service (image / detection / segmentation / model / auto_annotate)
 3. 7 个新 Schema (user / annotation / model / stats / export / auto_annotate / common)
 4. 错误处理统一: 业务异常抛 `AppException` (Phase 1 引入)
+5. 抽取 AutoAnnotateService (auto_annotate.py 复杂业务)
+6. SSE 端点 `stream_training_progress` 接入 JobStateService
 
 **预计工作量**: 2 天
 
 **衔接点**:
-- Phase 3 已抽取的 Service 是 Phase 4 API 薄化的基础
-- Service 调用已验证 (99 路由行为不变), Phase 4 可放心继续推进
+- Phase 3 已抽取的 11 个 Service 是 Phase 4 API 薄化的基础
+- 99 路由行为已验证, Phase 4 可继续放心推进
+- 剩余: image.py / detection.py / segmentation.py / model.py / auto_annotate.py / export.py / stats.py / user.py / auth.py
 
 ---
 
-## 九、决策记录更新
+## 八、决策记录更新
 
 | 决策 ID | 主题 | 文档 |
 |---|---|---|
@@ -367,7 +368,8 @@ JobStateSnapshot(task_id='test', state='PROGRESS', progress=50.0, message='train
 | DR-13 | ORM Active Record (字段) + Service 业务编排 (跨表) 分层 | [本报告] |
 | DR-14 | JobStateService 是 4 处真相源统一入口 | [本报告] |
 | DR-15 | cascade_delete 显式顺序, 不用 ORM 自带 cascade | [本报告] |
-| DR-16 | Phase 3 聚焦 5 个核心 Service, 剩余 8 个在 Phase 4/5 推进 | [本报告] |
+| DR-16 | Phase 3 聚焦核心 + 扩展 Service | [本报告] |
+| DR-17 | AnnotationService 派发模式 (不重复实现) | [本报告] |
 
 ---
 
