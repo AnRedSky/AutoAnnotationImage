@@ -250,7 +250,7 @@ async def run_segmentation_pretrained(
         raise HTTPException(500, f"Inference failed: {str(e)[:200]}")
 
     # 5. upsert SegmentationMask + 写 status + 审计
-    from app.models.segmentation_mask import SegmentationMask
+    from app.model.segmentation_mask import SegmentationMask
     auto_labeled = 0
     for img in images:
         abs_path = str(storage_root / img.storage_path)

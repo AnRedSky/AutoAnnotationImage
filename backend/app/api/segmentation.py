@@ -38,14 +38,14 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.core.deps import get_current_user, get_user_optional_for_query
-from app.core.celery_utils import check_celery_available as _check_celery_available
-from app.models.user import User
-from app.models.image import Image
-from app.models.category import Category
-from app.models.segmentation_mask import SegmentationMask
-from app.models.dataset import Dataset
-from app.models.model_version import ModelVersion
-from app.models.training_job import TrainingJob
+from app.utils.async_helpers import check_celery_available as _check_celery_available
+from app.model.user import User
+from app.model.image import Image
+from app.model.category import Category
+from app.model.segmentation_mask import SegmentationMask
+from app.model.dataset import Dataset
+from app.model.model_version import ModelVersion
+from app.model.training_job import TrainingJob
 from app.schemas.enums import TaskType, AnnotationSource
 from app.services.storage_service import storage_service
 # v3.0.0 Phase 4: 业务编排下沉到 Service
@@ -245,7 +245,7 @@ async def replace_mask(
 
 
 # ============== S5.2 训练 / 自动标注 / 进度 ==============
-# Redis 健康检查统一使用 app.core.celery_utils.check_celery_available
+# Redis 健康检查统一使用 app.utils.async_helpers.check_celery_available
 
 
 @router.post("/train")
@@ -266,8 +266,8 @@ async def start_segmentation_train(
       crop_size: int = 256
       learning_rate: float = 1e-4
     """
-    from app.models.dataset import Dataset
-    from app.models.training_job import TrainingJob
+    from app.model.dataset import Dataset
+    from app.model.training_job import TrainingJob
     from app.schemas.detection import DetectionTrainRequest  # 复用 schema 结构
     from app.schemas.enums import TaskType
 

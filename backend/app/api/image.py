@@ -14,11 +14,11 @@ from io import BytesIO
 from datetime import datetime
 
 from app.database import get_db
-from app.models.image import Image
-from app.models.dataset import Dataset
-from app.models.category import Category
-from app.models.annotation_log import AnnotationLog
-from app.models.user import User
+from app.model.image import Image
+from app.model.dataset import Dataset
+from app.model.category import Category
+from app.model.annotation_log import AnnotationLog
+from app.model.user import User
 from app.core.deps import get_current_user
 from app.services import ai_service
 from app.services.ai_service import filter_predictions_to_categories
@@ -908,8 +908,8 @@ async def list_images(
     has_mask_by_img: dict = {}
     if img_ids:
         ds_id = dataset_id
-        from app.models.bbox_annotation import BBoxAnnotation
-        from app.models.segmentation_mask import SegmentationMask
+        from app.model.bbox_annotation import BBoxAnnotation
+        from app.model.segmentation_mask import SegmentationMask
         det_ids_subq = select(Image.id).where(
             Image.dataset_id == ds_id,
             Image.id.in_(img_ids),

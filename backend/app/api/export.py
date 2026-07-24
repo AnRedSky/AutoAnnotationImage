@@ -23,12 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models.image import Image
-from app.models.category import Category
-from app.models.dataset import Dataset
-from app.models.user import User
-from app.models.bbox_annotation import BBoxAnnotation
-from app.models.segmentation_mask import SegmentationMask
+from app.model.image import Image
+from app.model.category import Category
+from app.model.dataset import Dataset
+from app.model.user import User
+from app.model.bbox_annotation import BBoxAnnotation
+from app.model.segmentation_mask import SegmentationMask
 from app.core.deps import get_current_user
 from app.ml.detection.yolo_dataset import export_yolo_dataset
 from app.schemas.enums import TaskType

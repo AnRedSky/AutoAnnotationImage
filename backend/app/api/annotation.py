@@ -18,14 +18,14 @@ from sqlalchemy import select, func, update, delete
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models.image import Image
-from app.models.dataset import Dataset
-from app.models.category import Category
-from app.models.annotation_log import AnnotationLog
-from app.models.user import User
+from app.model.image import Image
+from app.model.dataset import Dataset
+from app.model.category import Category
+from app.model.annotation_log import AnnotationLog
+from app.model.user import User
 # v2.5.16: 引入检测 / 分割的 ORM 模型, 用于按 task_type 清理
-from app.models.bbox_annotation import BBoxAnnotation
-from app.models.segmentation_mask import SegmentationMask
+from app.model.bbox_annotation import BBoxAnnotation
+from app.model.segmentation_mask import SegmentationMask
 from app.services.storage_service import storage_service
 from app.core.deps import get_current_user
 
@@ -358,7 +358,7 @@ async def list_annotations(
     - 分页 + 按 action 过滤 (confirm / correct)
     - 返回图片名 + 用户名 + 耗时 + 时间
     """
-    from app.models.user import User as UserModel
+    from app.model.user import User as UserModel
     base = (
         select(AnnotationLog, Image.filename, UserModel.username)
         .join(Image, Image.id == AnnotationLog.image_id)
@@ -416,7 +416,7 @@ async def recent_annotations(
     """
     全系统最近 N 条标注 (Dashboard 活动流)
     """
-    from app.models.user import User as UserModel
+    from app.model.user import User as UserModel
     stmt = (
         select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
         .join(Image, Image.id == AnnotationLog.image_id)

@@ -18,10 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from app.database import get_db
-from app.models.model_version import ModelVersion
-from app.models.dataset import Dataset
-from app.models.training_job import TrainingJob
-from app.models.user import User
+from app.model.model_version import ModelVersion
+from app.model.dataset import Dataset
+from app.model.training_job import TrainingJob
+from app.model.user import User
 from app.core.deps import get_current_user
 from app.config import settings
 

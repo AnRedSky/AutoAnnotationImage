@@ -15,13 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
 from app.database import get_db
-from app.models.image import Image
-from app.models.dataset import Dataset
-from app.models.category import Category
-from app.models.annotation_log import AnnotationLog
-from app.models.model_version import ModelVersion
-from app.models.training_job import TrainingJob
-from app.models.user import User
+from app.model.image import Image
+from app.model.dataset import Dataset
+from app.model.category import Category
+from app.model.annotation_log import AnnotationLog
+from app.model.model_version import ModelVersion
+from app.model.training_job import TrainingJob
+from app.model.user import User
 from app.core.deps import get_current_user
 
 router = APIRouter()

@@ -760,7 +760,7 @@ async def start_existing_training_job(
     pretrained_model_path = None
     pretrained_source_mv_id = None
     if mode == "restart":
-        from app.models.model_version import ModelVersion
+        from app.model.model_version import ModelVersion
         active_mv = (await db.execute(
             select(ModelVersion)
             .where(

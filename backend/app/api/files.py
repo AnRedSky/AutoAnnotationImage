@@ -19,8 +19,8 @@ from sqlalchemy import select
 import logging
 
 from app.database import get_db
-from app.models.image import Image
-from app.models.user import User
+from app.model.image import Image
+from app.model.user import User
 from app.core.security import decode_token
 from app.services.storage_service import storage_service
 

@@ -44,14 +44,14 @@ from sqlalchemy import select, delete
 
 from app.database import get_db
 from app.core.deps import get_current_user, get_user_optional_for_query
-from app.core.celery_utils import check_celery_available as _check_celery_available
-from app.models.user import User
-from app.models.image import Image
-from app.models.dataset import Dataset
-from app.models.category import Category
-from app.models.bbox_annotation import BBoxAnnotation
-from app.models.training_job import TrainingJob
-from app.models.model_version import ModelVersion
+from app.utils.async_helpers import check_celery_available as _check_celery_available
+from app.model.user import User
+from app.model.image import Image
+from app.model.dataset import Dataset
+from app.model.category import Category
+from app.model.bbox_annotation import BBoxAnnotation
+from app.model.training_job import TrainingJob
+from app.model.model_version import ModelVersion
 from app.schemas.detection import (
     BBoxCreate, BBoxOut, BBoxListOut,
     BBoxBatchCreate, BBoxBatchSaveResult,
@@ -296,7 +296,7 @@ async def batch_save_bboxes(
 
 
 # ============== S3.2 训练 / 自动标注 / 进度 ==============
-# Redis 健康检查统一使用 app.core.celery_utils.check_celery_available
+# Redis 健康检查统一使用 app.utils.async_helpers.check_celery_available
 
 
 @router.post("/train", response_model=DetectionTrainResponse)
@@ -447,7 +447,7 @@ async def start_auto_annotate_pretrained(
     # 校验数据集类目与 COCO 80 类的交集, 提示用户可能无命中
     coco_class_names = _get_coco_class_names()
     async def _load_cats() -> list:
-        from app.models.category import Category
+        from app.model.category import Category
         from sqlalchemy import select as _sel
         rows = (await db.execute(
             _sel(Category).where(Category.dataset_id == dataset_id)

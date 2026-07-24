@@ -221,9 +221,9 @@ async def list_categories(
       - ai_candidate_count:  AI 候选 (仅分类有效, 检测/分割恒为 0)
       - sample_count:        human + ai 之和
     """
-    from app.models.image import Image
-    from app.models.bbox_annotation import BBoxAnnotation
-    from app.models.segmentation_mask import SegmentationMask
+    from app.model.image import Image
+    from app.model.bbox_annotation import BBoxAnnotation
+    from app.model.segmentation_mask import SegmentationMask
     from app.services.storage_service import storage_service
     from pathlib import Path as _P
     from PIL import Image as _PIL
