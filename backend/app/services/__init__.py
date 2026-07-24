@@ -16,6 +16,7 @@ Services Package
 - StatsService: 统计业务
 - AuthService: 认证业务
 - AutoAnnotateService: AI 预标注业务编排 (v3.0.0 Phase 4 新增)
+- TrainingLifecycleService: 训练生命周期 (worker 编排) (v3.0.0 Phase 5 新增)
 
 **工具服务 (Phase 1 已有)**:
 - ai_service: timm 模型加载/推理
@@ -51,6 +52,8 @@ from app.services.stats_service import StatsService
 from app.services.auth_service import AuthService
 # v3.0.0 Phase 4 新增
 from app.services.auto_annotate_service import AutoAnnotateService, AutoAnnotateResult, ASYNC_THRESHOLD
+# v3.0.0 Phase 5 新增
+from app.services.training_lifecycle_service import TrainingLifecycleService
 
 __all__ = [
     # 工具服务
@@ -83,4 +86,6 @@ __all__ = [
     "AutoAnnotateService",
     "AutoAnnotateResult",
     "ASYNC_THRESHOLD",
+    # v3.0.0 Phase 5 新增
+    "TrainingLifecycleService",
 ]
