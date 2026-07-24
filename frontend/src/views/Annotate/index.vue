@@ -63,6 +63,8 @@ const modelName = ref('efficientnet_b0')           // 基础模型 (仅 useFinet
 const threshold = ref(0.6)
 const iouThreshold = ref(0.45)                    // 检测 NMS 阈值
 const detectionModelName = ref('yolov8n')         // 检测预训练模型
+// v2.5.46: 分割预训练模型 (torchvision COCO 21 类, useFinetune=OFF 时使用)
+const segmentationModelName = ref('deeplabv3_resnet50')
 const models = ref<any[]>([])                     // base models (timm ImageNet)
 const finetuneModels = ref<any[]>([])             // 项目训练的 fine-tune models
 const selectedModelId = ref<number | null>(null)  // 当前选中的 fine-tune model id
@@ -531,7 +533,7 @@ const {
   onStartAutoLabelClick,
 } = useAutoAnnotate({
   datasetId, threshold, iouThreshold, useFinetune,
-  selectedModelId, modelName, detectionModelName,
+  selectedModelId, modelName, detectionModelName, segmentationModelName,
   finetuneModels, activeModel, refreshStats, loadNext,
 })
 
@@ -636,6 +638,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
       :threshold="threshold"
       :iou-threshold="iouThreshold"
       :detection-model-name="detectionModelName"
+      :segmentation-model-name="segmentationModelName"
       :models="models"
       :finetune-models="finetuneModels"
       :selected-model-id="selectedModelId"
@@ -655,6 +658,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
       @threshold-change="(v: number) => threshold = v"
       @iou-threshold-change="(v: number) => iouThreshold = v"
       @detection-model-change="(v: string) => detectionModelName = v"
+      @segmentation-model-change="(v: string) => segmentationModelName = v"
       @selected-model-change="(v: number | null) => selectedModelId = v"
       @model-name-change="(v: string) => modelName = v"
       @use-finetune-change="(v: boolean) => useFinetune = v"

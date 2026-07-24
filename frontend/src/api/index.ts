@@ -174,7 +174,26 @@ export const autoAnnotateApi = {
       confidence_threshold: params.confidence_threshold,
       use_finetune: params.use_finetune ?? false,
     },
-  })
+  }),
+  // v2.5.46: 分割任务「基础预标注」(torchvision COCO 21 类预训练, 同步接口)
+  // - 后端: POST /api/auto-annotate/run-segmentation-pretrained
+  // - 对应: backend/app/api/auto_annotate.py:265
+  // - 不走 Celery, 直接同步推理 + 写库
+  runSegmentationPretrained: (data: {
+    dataset_id: number
+    model_name: string
+    confidence_threshold?: number
+    crop_size?: number
+    device?: string
+    overwrite_existing?: boolean
+  }) => http.post<{
+    total: number
+    auto_labeled: number
+    need_human: number
+    model_name: string
+    threshold: number
+    mode: 'sync'
+  }>('/auto-annotate/run-segmentation-pretrained', data),
 }
 
 // ============== 训练 ==============

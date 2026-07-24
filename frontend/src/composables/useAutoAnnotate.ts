@@ -1,12 +1,15 @@
 /**
  * useAutoAnnotate.ts
  * ===================================================
- * AI 预标注 composable (v2.5.7 拆分自 Annotate.vue; v2.5.36 接入 SSE 实时进度)
+ * AI 预标注 composable (v2.5.7 拆分自 Annotate.vue; v2.5.36 接入 SSE 实时进度;
+ *                     v2.5.46 +分割预训练分支)
  *
  * 职责:
  * - 分类任务的 AI 预标注 (走 fine-tune / ImageNet 预训练, 同步接口)
  * - 检测任务的 AI 预标注 (走 fine-tune / 预训练 yolov8n/s/m/l/x, Celery 异步 + SSE)
- * - 分割任务的 AI 预标注 (仅走 fine-tune; Celery 异步 + SSE)
+ * - 分割任务的 AI 预标注
+ *   · fine-tune: 走 Celery 异步 + SSE (v2.5.36)
+ *   · 基础模型 (useFinetune=OFF): 走 torchvision 预训练同步端点 (v2.5.46 新增)
  * - 严格模式: 默认走 fine-tune, 走基础模型前弹窗警告
  *
  * v2.5.36 改造:
@@ -17,9 +20,14 @@
  *   / Notification 实时展示
  * - 切页 / 重复点击会自动取消旧的 SSE 连接, 防止僵尸流
  *
+ * v2.5.46 新增:
+ * - segmentationModelName 入参 (torchvision 预训练名)
+ * - runSegmentationPretrained: 同步调 /api/auto-annotate/run-segmentation-pretrained
+ *   走 torchvision COCO 21 类预训练, 不经 Celery
+ *
  * 依赖:
  * - 入参: datasetId, threshold, iouThreshold, useFinetune, selectedModelId,
- *         modelName, detectionModelName, finetuneModels, activeModel
+ *         modelName, detectionModelName, segmentationModelName, finetuneModels, activeModel
  * - 副作用: refreshStats (父组件定义), loadNext (父组件定义)
  * - 输出: autoLabeling (loading 状态), autoLabelProgress (0-100),
  *         autoLabelProgressMessage (最近一次进度消息)
@@ -36,6 +44,8 @@ export function useAutoAnnotate(options: {
   selectedModelId: Ref<number | null>
   modelName: Ref<string>
   detectionModelName: Ref<string>
+  /** v2.5.46: 分割预训练 (torchvision) 模型名 */
+  segmentationModelName: Ref<string>
   finetuneModels: Ref<any[]>
   activeModel: Ref<any>
   refreshStats: () => Promise<void> | void
@@ -43,7 +53,7 @@ export function useAutoAnnotate(options: {
 }) {
   const {
     datasetId, threshold, iouThreshold, useFinetune,
-    selectedModelId, modelName, detectionModelName,
+    selectedModelId, modelName, detectionModelName, segmentationModelName,
     finetuneModels, activeModel, refreshStats, loadNext,
   } = options
 
@@ -202,7 +212,7 @@ export function useAutoAnnotate(options: {
   /**
    * 启动按钮 dispatcher: 按当前 dataset task_type 分派
    * - 共享 useFinetune state, 由父组件按 dataset 自动隔离
-   * - 分割任务: 关闭 useFinetune 时弹 warning 阻止 (后端无预训练分割接口)
+   * - v2.5.46: 分割任务在 useFinetune=OFF 时, 走 torchvision 同步预训练分支
    */
   const onStartAutoLabelClick = async (taskType: string) => {
     if (!datasetId.value) {
@@ -214,7 +224,12 @@ export function useAutoAnnotate(options: {
     } else if (taskType === 'detection') {
       await runDetectionAutoAnnotate()
     } else if (taskType === 'segmentation') {
-      await runSegmentationAutoAnnotate()
+      // v2.5.46: 分割基础模型分支走 torchvision 同步端点
+      if (!useFinetune.value) {
+        await runSegmentationPretrained()
+      } else {
+        await runSegmentationAutoAnnotate()
+      }
     } else {
       ElMessage.warning('未知任务类型: ' + taskType)
     }
@@ -520,6 +535,56 @@ export function useAutoAnnotate(options: {
     // 注意: autoLabeling 在 SSE 终态 / onComplete / onError 时统一收尾, 这里不 finally 改回
   }
 
+  /**
+   * v2.5.46 新增: 分割任务「基础预标注」(torchvision COCO 21 类)
+   * - 走同步端点 POST /api/auto-annotate/run-segmentation-pretrained
+   * - 与 runSegmentationAutoAnnotate (走 fine-tune Celery) 互斥
+   * - 用户在 AnnotationToolbar 关闭「项目模型」开关时, 启动按钮会走本分支
+   * - 后端: backend/app/api/auto_annotate.py:265 (RunSegmentationPretrainedRequest)
+   * - 弹窗确认: 沿用检测基础模型的警示文案风格, 提示 COCO 21 类与项目类目的不匹配风险
+   */
+  const runSegmentationPretrained = async () => {
+    if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
+    try {
+      await ElMessageBox.confirm(
+        [
+          `当前使用「预训练 ${segmentationModelName.value}」(torchvision COCO 21 类).`,
+          '仅当数据集类目名与 COCO 类目重合时, 才会写入 SegmentationMask.',
+          '建议: 训练项目 fine-tune 模型后再做预标注, 效果更精准.',
+          '',
+          '是否继续?',
+        ].join('\n'),
+        '预训练模型预标注确认',
+        { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return
+    }
+    autoLabeling.value = true
+    autoLabelProgress.value = 0
+    autoLabelProgressMessage.value = '同步推理中 (无 worker, 进度不可见)...'
+    try {
+      const resp: any = await autoAnnotateApi.runSegmentationPretrained({
+        dataset_id: datasetId.value,
+        model_name: segmentationModelName.value,
+        confidence_threshold: threshold.value,
+        crop_size: 256,
+      })
+      const nm = resp.model_name || segmentationModelName.value
+      ElMessage.success(
+        `[预训练 ${nm}] 共 ${resp.total} 张, 自动标注 ${resp.auto_labeled} 张, 需人工 ${resp.need_human} 张`,
+      )
+      await refreshStats()
+      await loadNext()
+    } catch (e: any) {
+      ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
+    } finally {
+      autoLabeling.value = false
+      autoLabelProgress.value = 0
+      autoLabelProgressMessage.value = ''
+    }
+  }
+
   return {
     autoLabeling,
     autoLabelProgress,
@@ -529,5 +594,7 @@ export function useAutoAnnotate(options: {
     runAutoAnnotate,
     runDetectionAutoAnnotate,
     runSegmentationAutoAnnotate,
+    /** v2.5.46: 分割预训练 (torchvision) 同步预标注 */
+    runSegmentationPretrained,
   }
 }
