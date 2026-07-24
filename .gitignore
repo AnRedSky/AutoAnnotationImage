@@ -25,6 +25,8 @@ frontend/.env.production.local
 .idea/
 *.swp
 *.swo
+.tmp
+.trae/
 
 # Project
 uploads/
@@ -78,3 +80,10 @@ Thumbs.db
 backend/backend_log.txt
 logs/
 *.pid
+
+# 测试覆盖数据 (pytest-cov / coverage.py 跑测生成)
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache/
