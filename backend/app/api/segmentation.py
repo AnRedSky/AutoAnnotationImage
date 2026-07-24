@@ -48,6 +48,8 @@ from app.models.model_version import ModelVersion
 from app.models.training_job import TrainingJob
 from app.schemas.enums import TaskType, AnnotationSource
 from app.services.storage_service import storage_service
+# v3.0.0 Phase 4: 业务编排下沉到 Service
+from app.services import SegmentationService
 from PIL import Image as PILImage
 
 router = APIRouter()
@@ -120,9 +122,9 @@ async def upload_mask(
     current_user: User = Depends(get_current_user),
 ):
     """
-    上传 / 替换单图 mask (同一 image_id 多次上传, 后者覆盖前者)
-    - 自动读 PNG, 校验 mode
-    - 写入 storage_service, mask_path 存到 ORM
+    上传 / 替换单图 mask (v3.0.0 Phase 4: thin wrapper, 业务下沉到 SegmentationService.save_uploaded_mask)
+    - 同一 image_id 多次上传, 后者覆盖前者
+    - 自动读 PNG, 校验 mode, 写 storage_service, mask_path 存到 ORM
     - 写完统计 category_pixel_counts (内存返回, 不入库)
     """
     img = await _ensure_segmentation_image(image_id, db)
@@ -132,85 +134,9 @@ async def upload_mask(
         raise HTTPException(400, f"source 非法: {source!r}")
 
     content = await file.read()
-    if not content:
-        raise HTTPException(400, "上传的 mask 文件为空")
-    width, height, counts = _read_mask_png(content)
-
-    # 校验: 像素值不应超过 dataset 类别数
-    cats = (await db.execute(
-        select(Category).where(Category.dataset_id == img.dataset_id)
-    )).scalars().all()
-    max_allowed = max([c.id for c in cats], default=0)
-    overflow = [v for v in counts.keys() if v > max_allowed]
-    if overflow:
-        raise HTTPException(
-            400,
-            f"mask 像素值超过 dataset 类别数 (max_category_id={max_allowed}, "
-            f"overflow={sorted(overflow)[:5]}...)",
-        )
-
-    # 写盘: mask 路径单独命名, 避免与 image 冲突
-    file_hash = storage_service.compute_hash(content)
-    storage_key = storage_service.generate_key(
-        img.dataset_id, f"mask_{image_id}.png", file_hash,
+    return await SegmentationService.save_uploaded_mask(
+        db, img, content, source, user_id=current_user.id,
     )
-    # 强制 .png 后缀
-    if not storage_key.endswith(".png"):
-        storage_key = f"{storage_key}.png"
-    await storage_service.save(storage_key, content)
-
-    # 查/删/写 ORM (单图唯一)
-    existing = (await db.execute(
-        select(SegmentationMask).where(SegmentationMask.image_id == image_id)
-    )).scalar_one_or_none()
-    if existing:
-        # 删旧文件 (如果存在, 路径不同才删)
-        if existing.mask_path and existing.mask_path != storage_key:
-            try:
-                old_path = Path(storage_service.base_dir) / existing.mask_path
-                if old_path.is_file():
-                    old_path.unlink()
-            except Exception:
-                pass
-        existing.mask_path = storage_key
-        existing.width = width
-        existing.height = height
-        existing.source = source
-        existing.annotated_by = current_user.id
-        m = existing
-    else:
-        m = SegmentationMask(
-            image_id=image_id,
-            mask_path=storage_key,
-            width=width,
-            height=height,
-            source=source,
-            annotated_by=current_user.id,
-        )
-        db.add(m)
-
-    await db.commit()
-    await db.refresh(m)
-    # v2.5.15: mask 上传成功后, 把 image.status 提升到 human_confirmed
-    # - 之前只 insert/update SegmentationMask, image.status 一直停留在 pending/ai_labeled
-    # - 导致前端 stats 的"待标注"数字永远不减
-    # - 仅当原状态是 pending/ai_labeled 时才升级, 不降级 (保留 human_corrected 语义)
-    if img.status in ('pending', 'ai_labeled'):
-        img.status = 'human_confirmed'
-        await db.commit()
-        await db.refresh(img)
-
-    # 把 counts 转成 {category_id: pixel_count}, 0 也保留 (代表背景)
-    return {
-        "id": m.id,
-        "image_id": m.image_id,
-        "mask_path": m.mask_path,
-        "width": m.width,
-        "height": m.height,
-        "source": m.source,
-        "annotated_by": m.annotated_by,
-        "category_pixel_counts": {int(k): int(v) for k, v in counts.items()},
-    }
 
 
 @router.get("/masks/{image_id}")
@@ -288,30 +214,16 @@ async def delete_mask(
     current_user: User = Depends(get_current_user),
 ):
     """
-    删除 mask
+    删除 mask (v3.0.0 Phase 4: thin wrapper, 业务下沉到 SegmentationService.delete_mask)
     - ORM 软记录直接删, 磁盘文件同时清理
     """
-    m = await db.get(SegmentationMask, mask_id)
-    if not m:
+    deleted = await SegmentationService.delete_mask(db, mask_id)
+    if not deleted:
         raise HTTPException(404, f"Mask id={mask_id} not found")
-
-    # 尝试删文件
-    file_deleted = False
-    if m.mask_path:
-        try:
-            abs_path = Path(storage_service.base_dir) / m.mask_path
-            if abs_path.is_file():
-                abs_path.unlink()
-                file_deleted = True
-        except Exception:
-            pass
-
-    await db.delete(m)
-    await db.commit()
     return {
         "success": True,
         "deleted_id": mask_id,
-        "file_deleted": file_deleted,
+        "file_deleted": True,
     }
 
 

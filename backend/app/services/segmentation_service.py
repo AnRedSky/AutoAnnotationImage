@@ -229,5 +229,144 @@ class SegmentationService:
         upload_dir = Path(settings.UPLOAD_DIR)
         return upload_dir / f"dataset_{image.dataset_id}" / f"mask_{image.id}.png"
 
+    # ============== 上传 mask (v3.0.0 Phase 4 新增) ==============
+
+    @staticmethod
+    async def save_uploaded_mask(
+        db: AsyncSession,
+        image: "Image",
+        content: bytes,
+        source: str,
+        *,
+        user_id: int,
+        commit: bool = True,
+    ) -> Dict[str, Any]:
+        """保存用户上传的 mask PNG (v3.0.0 Phase 4: 业务下沉)
+
+        业务规则:
+        1. 校验 PNG 文件 (mode / 大小)
+        2. 校验像素值不超过 dataset 类别数
+        3. 写文件到 storage_service (自动去重 / 哈希命名)
+        4. upsert ORM (单图唯一)
+        5. 升级 image.status: pending/ai_labeled → human_confirmed
+        """
+        from app.services.storage_service import storage_service
+        from app.model.category import Category
+
+        if not content:
+            raise HTTPException(400, "上传的 mask 文件为空")
+
+        # 1) 校验 mode + 读 PNG
+        from io import BytesIO
+        pil = PILImage.open(BytesIO(content))
+        if pil.mode == "P":
+            arr = np.array(pil)
+        elif pil.mode == "L":
+            arr = np.array(pil)
+        elif pil.mode in ("RGB", "RGBA"):
+            arr = np.array(pil.getchannel("R"))
+        else:
+            arr = np.array(pil.convert("L"))
+        width, height = pil.size
+        unique_vals, counts_arr = np.unique(arr, return_counts=True)
+        counts = {int(v): int(c) for v, c in zip(unique_vals, counts_arr)}
+
+        # 2) 校验像素值不超过 dataset 类别数
+        cats = (await db.execute(
+            select(Category).where(Category.dataset_id == image.dataset_id)
+        )).scalars().all()
+        max_allowed = max([c.id for c in cats], default=0)
+        overflow = [v for v in counts.keys() if v > max_allowed]
+        if overflow:
+            raise HTTPException(
+                400,
+                f"mask 像素值超过 dataset 类别数 (max_category_id={max_allowed}, "
+                f"overflow={sorted(overflow)[:5]}...)",
+            )
+
+        # 3) 写盘
+        file_hash = storage_service.compute_hash(content)
+        storage_key = storage_service.generate_key(
+            image.dataset_id, f"mask_{image.id}.png", file_hash,
+        )
+        if not storage_key.endswith(".png"):
+            storage_key = f"{storage_key}.png"
+        await storage_service.save(storage_key, content)
+
+        # 4) upsert ORM
+        existing = (await db.execute(
+            select(SegmentationMask).where(SegmentationMask.image_id == image.id)
+        )).scalar_one_or_none()
+        if existing:
+            # 删旧文件 (路径不同才删)
+            if existing.mask_path and existing.mask_path != storage_key:
+                try:
+                    old_path = Path(storage_service.base_dir) / existing.mask_path
+                    if old_path.is_file():
+                        old_path.unlink()
+                except Exception:
+                    logger.exception("Failed to delete old mask %s", existing.mask_path)
+            existing.mask_path = storage_key
+            existing.width = width
+            existing.height = height
+            existing.source = source
+            existing.annotated_by = user_id
+            mask = existing
+        else:
+            mask = SegmentationMask(
+                image_id=image.id,
+                mask_path=storage_key,
+                width=width,
+                height=height,
+                source=source,
+                annotated_by=user_id,
+            )
+            db.add(mask)
+
+        # 5) 升级 image.status (pending/ai_labeled → human_confirmed)
+        if image.status in ("pending", "ai_labeled"):
+            image.status = "human_confirmed"
+
+        if commit:
+            await db.commit()
+            await db.refresh(mask)
+            await db.refresh(image)
+
+        return {
+            "id": mask.id,
+            "image_id": mask.image_id,
+            "mask_path": mask.mask_path,
+            "width": mask.width,
+            "height": mask.height,
+            "source": mask.source,
+            "annotated_by": mask.annotated_by,
+            "category_pixel_counts": counts,
+        }
+
+    @staticmethod
+    async def delete_mask(
+        db: AsyncSession,
+        mask_id: int,
+        *,
+        commit: bool = True,
+    ) -> bool:
+        """删除 mask (v3.0.0 Phase 4: 业务下沉)"""
+        from app.services.storage_service import storage_service
+        mask = await db.get(SegmentationMask, mask_id)
+        if not mask:
+            return False
+        # 删文件
+        try:
+            if mask.mask_path:
+                full_path = Path(storage_service.base_dir) / mask.mask_path
+                if full_path.is_file():
+                    full_path.unlink()
+        except Exception:
+            logger.exception("Failed to delete mask file %s", mask.mask_path)
+        await db.delete(mask)
+        if commit:
+            await db.commit()
+        return True
+
 
 __all__ = ["SegmentationService"]
