@@ -6,12 +6,11 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Plus, View, Delete, Download, CollectionTag, Lightning, Folder, DataAnalysis
+  Plus, View, Delete, Download, CollectionTag, Lightning, Folder
 } from '@element-plus/icons-vue'
-import { datasetApi, autoAnnotateApi, exportApi, detectionApi } from '@/api'
+import { datasetApi, autoAnnotateApi, exportApi } from '@/api'
 // v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
 import UploadQueue from './components/UploadQueue.vue'
-import DetectionStatsPanel from './components/DetectionStatsPanel.vue'
 import {
   getTaskTypeMeta, TASK_TYPE_OPTIONS
 } from '@/utils/taskType'
@@ -207,21 +206,6 @@ const openCategory = (ds: any) => {
   catOpen.value = true
 }
 
-const openStats = async (ds: any) => {
-  statsDs.value = ds
-  statsData.value = null
-  statsOpen.value = true
-  statsLoading.value = true
-  try {
-    const r: any = await detectionApi.stats(ds.id)
-    statsData.value = r
-  } catch (e: any) {
-    ElMessage.error('加载统计失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    statsLoading.value = false
-  }
-}
-
 const closeUpload = async () => {
   // 关闭前主动刷新一次, 确保 image_count 立即更新
   await load()
@@ -302,11 +286,6 @@ const closeUpload = async () => {
           <el-button size="small" :icon="View" type="primary" @click="openDetail(row)">
             查看
           </el-button>
-          <el-button
-            v-if="row.task_type === 'detection'"
-            size="small" :icon="DataAnalysis" type="success" plain
-            @click="openStats(row)"
-          >统计</el-button>
           <el-button size="small" :icon="CollectionTag" @click="openCategory(row)">类别</el-button>
           <el-button size="small" :icon="Lightning" @click="onAutoAnnotate(row)">AI 预标注</el-button>
           <el-dropdown @command="(cmd: any) => handleExport(row, cmd)">
@@ -431,23 +410,6 @@ const closeUpload = async () => {
         </el-table-column>
       </el-table>
       <el-empty v-if="categories.length === 0" description="暂无类别" :image-size="60" />
-    </el-dialog>
-
-    <!-- 检测标注统计 (v2.2.0 S9.2) -->
-    <el-dialog
-      v-model="statsOpen"
-      :title="`标注统计 -「${statsDs?.name}」`"
-      width="1100px" top="5vh"
-    >
-      <div v-loading="statsLoading" style="min-height: 200px;">
-        <DetectionStatsPanel
-          v-if="statsData"
-          :stats="statsData"
-        />
-      </div>
-      <template #footer>
-        <el-button @click="statsOpen = false">关闭</el-button>
-      </template>
     </el-dialog>
 
     <!-- 新建数据集 -->
