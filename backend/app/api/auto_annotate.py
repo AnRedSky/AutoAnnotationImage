@@ -229,33 +229,43 @@ async def list_available_models(current_user: User = Depends(get_current_user)):
     - 前端按 task_type 字段过滤显示, 避免出现"任务类型不匹配的基础模型"
     - task_type 必填, 不允许 null (缺省 classification)
     - recommended=True 是论文 demo 默认推荐项 (1-3 个)
+    - description: 中文适用场景说明, 前端在 option 底部 + tooltip 展示 (v2.5.47 新增)
     """
     return {
         "models": [
             # ----- classification: timm ImageNet -----
-            {"name": "resnet50",              "params": "25.6M", "imagenet_top1": 76.1, "framework": "timm",       "task_type": "classification", "recommended": True},
-            {"name": "efficientnet_b0",       "params": "5.3M",  "imagenet_top1": 77.1, "framework": "timm",       "task_type": "classification", "recommended": True},
-            {"name": "convnext_tiny",         "params": "28.6M", "imagenet_top1": 82.1, "framework": "timm",       "task_type": "classification", "recommended": True},
-            # P0.1: 命名对齐 — 训练页 Training/index.vue 用的是 mobilenetv3_large_100
-            # (top1 ≈ 75.0, 与 mobilenetv3_small 67.5 差距明显, large_100 更具代表性)
-            {"name": "mobilenetv3_large_100", "params": "5.5M",  "imagenet_top1": 75.0, "framework": "timm",       "task_type": "classification", "recommended": False},
-            {"name": "vit_small_patch16_224", "params": "22.1M", "imagenet_top1": 78.7, "framework": "timm",       "task_type": "classification", "recommended": False},
-            # ----- P0.2: detection 补充 5 个 YOLO 预训练 (COCO 80 类) -----
-            # 修复: 检测任务「基础模型」分支下拉空白的根本原因
-            # - 前端 Annotate 工作台 models.filter(m => m.task_type === 'detection') 拿不到任何选项
-            # - 后端 detection.py:441 pattern='^yolov8[nsmxl]$' 早已支持这 5 个
-            # - 现在通过该接口暴露, 与 classification / segmentation 对称
-            # - params 取 ultralytics 官方公布值, 推荐 nano / small
-            {"name": "yolov8n", "params": "3.2M",  "coco_mAP50": 37.3, "framework": "ultralytics", "task_type": "detection",     "recommended": True},
-            {"name": "yolov8s", "params": "11.2M", "coco_mAP50": 44.9, "framework": "ultralytics", "task_type": "detection",     "recommended": True},
-            {"name": "yolov8m", "params": "25.9M", "coco_mAP50": 50.2, "framework": "ultralytics", "task_type": "detection",     "recommended": False},
-            {"name": "yolov8l", "params": "43.7M", "coco_mAP50": 52.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False},
-            {"name": "yolov8x", "params": "68.2M", "coco_mAP50": 53.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False},
+            {"name": "resnet18",              "params": "11.7M", "imagenet_top1": 70.6, "framework": "timm",       "task_type": "classification", "recommended": False,
+             "description": "轻量级残差网络, 训练快、显存占用低, 适合中小数据集快速实验或 CPU/低端 GPU 部署"},
+            {"name": "resnet50",              "params": "25.6M", "imagenet_top1": 76.1, "framework": "timm",       "task_type": "classification", "recommended": True,
+             "description": "经典深度残差网络, 特征表达力强, 适合中等规模数据集与追求高精度的训练场景"},
+            {"name": "efficientnet_b0",       "params": "5.3M",  "imagenet_top1": 77.1, "framework": "timm",       "task_type": "classification", "recommended": True,
+             "description": "复合缩放轻量网络, 速度与精度平衡, 适合移动端、实时推理或算力受限场景"},
+            {"name": "efficientnet_b3",       "params": "12.0M", "imagenet_top1": 81.6, "framework": "timm",       "task_type": "classification", "recommended": False,
+             "description": "B0 的精度升级版, 中等规模数据下表现更稳, 适合精度-速度折中的工业分类任务"},
+            {"name": "mobilenetv3_large_100", "params": "5.5M",  "imagenet_top1": 75.0, "framework": "timm",       "task_type": "classification", "recommended": False,
+             "description": "移动端优化网络, 延迟极低, 适合边缘设备、嵌入式或 Web 前端推理部署"},
+            {"name": "convnext_tiny",         "params": "28.6M", "imagenet_top1": 82.1, "framework": "timm",       "task_type": "classification", "recommended": True,
+             "description": "现代化纯卷积架构, 精度可比 Transformer, 适合数据量充足、追求高精度的训练任务"},
+            {"name": "vit_small_patch16_224", "params": "22.1M", "imagenet_top1": 78.7, "framework": "timm",       "task_type": "classification", "recommended": False,
+             "description": "小型 Vision Transformer, 224 输入, 注意力机制捕获全局依赖, 适合中等规模数据集与精度敏感任务"},
+            # ----- detection: ultralytics YOLOv8 COCO 80 类 -----
+            {"name": "yolov8n", "params": "3.2M",  "coco_mAP50": 37.3, "framework": "ultralytics", "task_type": "detection",     "recommended": True,
+             "description": "YOLOv8 nano, 3.2M 参数, 速度极快, 适合移动端部署、实时检测或算力受限的工业场景"},
+            {"name": "yolov8s", "params": "11.2M", "coco_mAP50": 44.9, "framework": "ultralytics", "task_type": "detection",     "recommended": True,
+             "description": "YOLOv8 small, 11.2M 参数, 速度-精度平衡, 适合论文 demo 与一般工业质检任务"},
+            {"name": "yolov8m", "params": "25.9M", "coco_mAP50": 50.2, "framework": "ultralytics", "task_type": "detection",     "recommended": False,
+             "description": "YOLOv8 medium, 25.9M 参数, 中等规模, 适合数据量充足且追求较高精度的检测任务"},
+            {"name": "yolov8l", "params": "43.7M", "coco_mAP50": 52.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False,
+             "description": "YOLOv8 large, 43.7M 参数, 高精度, 适合复杂场景检测 (如小目标、密集目标)"},
+            {"name": "yolov8x", "params": "68.2M", "coco_mAP50": 53.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False,
+             "description": "YOLOv8 xlarge, 68.2M 参数, 极致精度, 需要大显存 GPU (≥ 16GB), 适合离线批检测或竞赛级精度需求"},
             # ----- segmentation: torchvision COCO 21 类 -----
-            # P1.1 同步: Training/index.vue segmentation 候选需要补 fcn_resnet50
-            {"name": "fcn_resnet50",          "params": "32.9M", "coco_mIoU": 60.5, "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
-            {"name": "deeplabv3_resnet50",    "params": "39.6M", "coco_mIoU": 66.4, "framework": "torchvision", "task_type": "segmentation",  "recommended": True},
-            {"name": "deeplabv3_resnet101",   "params": "58.7M", "coco_mIoU": 67.4, "framework": "torchvision", "task_type": "segmentation",  "recommended": True},
+            {"name": "fcn_resnet50",          "params": "32.9M", "coco_mIoU": 60.5, "framework": "torchvision", "task_type": "segmentation",  "recommended": False,
+             "description": "FCN + ResNet50 骨干, 32.9M 参数, 经典全卷积分割, 速度快, 适合算力受限或实时分割场景"},
+            {"name": "deeplabv3_resnet50",    "params": "39.6M", "coco_mIoU": 66.4, "framework": "torchvision", "task_type": "segmentation",  "recommended": True,
+             "description": "DeepLabV3 + ResNet50 骨干, 39.6M 参数, ASPP 多尺度模块, 速度-精度平衡, 适合一般语义分割任务"},
+            {"name": "deeplabv3_resnet101",   "params": "58.7M", "coco_mIoU": 67.4, "framework": "torchvision", "task_type": "segmentation",  "recommended": True,
+             "description": "DeepLabV3 + ResNet101 骨干, 58.7M 参数, 深层特征, 适合精度优先的复杂场景分割"},
         ]
     }
 
