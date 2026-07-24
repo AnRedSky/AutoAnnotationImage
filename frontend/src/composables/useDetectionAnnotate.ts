@@ -203,6 +203,22 @@ export function useDetectionAnnotate(options: {
     detAnnotRef.value?.removeAtWithConfirm?.(idx)
   }
 
+  /**
+   * v2.5.40 修复: dirty-change 事件回调
+   * - 之前 index.vue 用 inline lambda `@dirty-change="(v) => detDirty = v"`
+   *   在 Vue 3 模板中, ref 会被自动 unwrap, `detDirty = v` 实际是给 unwrap 后的
+   *   局部 boolean 变量赋值, ref 永远不会被更新
+   * - 表现: 用户点「清空全部」后, 子组件内部 dirty=true 并 emit('dirty-change', true),
+   *   但父组件的 detDirty 仍是 false, 右侧「保存」按钮在 handleSaveClick 中
+   *   `if (!props.detDirty)` 命中, 弹出「当前无修改, 无需保存」, 实际后端 bboxes 未删除
+   * - 现在: 用具名函数 + .value 显式赋值 ref, 与 useSegmentationAnnotate 的
+   *   onSegDirtyChange 保持完全一致
+   * - 同时把「撤销本次修改」按钮的 disabled 也间接修复 (它之前也是 `!detDirty` 永远 true)
+   */
+  const onDetDirtyChange = (v: boolean) => {
+    detDirty.value = v
+  }
+
   return {
     // state
     bboxList,
@@ -223,6 +239,8 @@ export function useDetectionAnnotate(options: {
     onPopoverVisibleChange,
     onDetTargetCategoryChange,
     removeBboxByIndex,
+    // v2.5.40: 画布 dirty 同步 (取代 inline lambda, 修复 ref 不更新问题)
+    onDetDirtyChange,
     // 工具
     catColor,
   }

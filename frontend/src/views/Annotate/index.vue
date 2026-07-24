@@ -90,6 +90,7 @@ const {
   onDetCategoryChange,
   onPopoverVisibleChange,
   onDetTargetCategoryChange,
+  onDetDirtyChange,  // v2.5.40: 取代 inline lambda, 修复 ref 不更新导致「清空全部」后无法保存
   removeBboxByIndex,
 } = useDetectionAnnotate({
   image,
@@ -458,12 +459,15 @@ const loadPrev = async () => {
 
 /**
  * 「启动 AI 预标注」按钮: 按 task_type 分派
- * - classification -> runAutoAnnotate
- * - detection -> runDetectionAutoAnnotate
- * - segmentation -> 提示去训练页
+ * - classification -> runAutoAnnotate (同步, 不走 SSE)
+ * - detection -> runDetectionAutoAnnotate (Celery + SSE 实时进度)
+ * - segmentation -> runSegmentationAutoAnnotate (Celery + SSE 实时进度)
+ * - autoLabelProgress / autoLabelProgressMessage 暴露给 AnnotationToolbar 展示进度条
  */
 const {
   autoLabeling,
+  autoLabelProgress,
+  autoLabelProgressMessage,
   onStartAutoLabelClick,
 } = useAutoAnnotate({
   datasetId, threshold, iouThreshold, useFinetune,
@@ -563,6 +567,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
       :human-corrected-count="humanCorrectedCount"
       :session-stats="sessionStats"
       :auto-labeling="autoLabeling"
+      :auto-label-progress="autoLabelProgress"
+      :auto-label-progress-message="autoLabelProgressMessage"
       @dataset-change="(v: number) => datasetId = v"
       @task-type-filter-change="onTaskTypeFilterChange"
       @threshold-change="(v: number) => threshold = v"
@@ -613,7 +619,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
               @cancel="loadDetectionAnnotations(image.id)"
               @next="loadNext"
               @prev="loadPrev"
-              @dirty-change="(v: boolean) => detDirty = v"
+              @dirty-change="onDetDirtyChange"
             />
           </template>
           <template v-else-if="image?.task_type === 'segmentation'">
