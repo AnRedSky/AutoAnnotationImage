@@ -9,7 +9,7 @@ TrainingDataService — 训练数据加载与模型保存 (v3.0.0 Phase 5)
 
 **v3.0.0 Phase 5 设计**:
 - 从 `ml/train.py:run_training` 抽出所有 DB IO 逻辑
-- ML 模块只接收"已加载样本"和"已计算指标", 不再 import app.models / app.database
+- ML 模块只接收"已加载样本"和"已计算指标", 不再 import app.model / app.database
 - Worker 通过 `data_loader` / `model_saver` 回调注入本服务
 
 **API 调用模式**:
@@ -130,7 +130,7 @@ class TrainingDataService:
     @staticmethod
     def load_classification_samples_sync(dataset_id: int) -> Dict[str, Any]:
         """同步包装 (worker 调用)"""
-        from app.core.celery_utils import run_async_in_worker as _run_async
+        from app.utils.async_helpers import run_async_in_worker as _run_async
         return _run_async(TrainingDataService.load_classification_samples(dataset_id))
 
     # ============== 分类 ModelVersion 写入 ==============
@@ -202,7 +202,7 @@ class TrainingDataService:
     @staticmethod
     def save_classification_model_version_sync(**kwargs) -> int:
         """同步包装 (worker 调用)"""
-        from app.core.celery_utils import run_async_in_worker as _run_async
+        from app.utils.async_helpers import run_async_in_worker as _run_async
         return _run_async(TrainingDataService.save_classification_model_version(**kwargs))
 
 

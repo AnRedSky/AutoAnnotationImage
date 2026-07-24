@@ -33,9 +33,9 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Image as ImageModel
-from app.models import Category
-from app.models.bbox_annotation import BBoxAnnotation
+from app.model import Image as ImageModel
+from app.model import Category
+from app.model.bbox_annotation import BBoxAnnotation
 from app.services.bbox_service import bbox_to_yolo_line, validate_normalized_bbox
 from app.services.storage_service import storage_service
 

@@ -16,6 +16,7 @@ from PIL import Image
 
 from app.config import settings
 # v3.0.0 Phase 5: ML 模块不再直接 import app.core.celery_utils (DB IO 已委托给 service)
+# 当前 ML 模块已彻底解耦, 不再需要任何兼容垫片引用
 
 
 def collect_device_info() -> Dict[str, Any]:
@@ -163,7 +164,7 @@ def run_training(
             - 详见 _load_model_state 方法
         data_loader: 可选, 训练数据加载回调 (v3.0.0 Phase 5 新增)
             - 签名: (dataset_id: int) -> Dict[samples, label_name_to_idx, num_classes, ...]
-            - 默认: 内部 DB IO (向后兼容, 走 app.models)
+            - 默认: 内部 DB IO (向后兼容, 走 app.model)
             - 推荐: 注入 TrainingDataService.load_classification_samples_sync
         model_saver: 可选, ModelVersion 保存回调 (v3.0.0 Phase 5 新增)
             - 签名: (**kwargs) -> int (ModelVersion.id)
@@ -474,11 +475,11 @@ def run_training(
 
 
 # ============== 默认 data_loader / model_saver 实现 (v3.0.0 Phase 5) ==============
-# 当 run_training 调用方未注入回调时, 用这两个默认实现 (内部走 app.models/app.database).
+# 当 run_training 调用方未注入回调时, 用这两个默认实现 (内部走 app.model/app.database).
 # 推荐 Worker 注入 TrainingDataService 的实现 (解耦 ML ↔ DB).
 
 def _default_classification_data_loader(dataset_id: int) -> Dict:
-    """默认分类数据加载 (向后兼容, 内部走 app.models)
+    """默认分类数据加载 (向后兼容, 内部走 app.model)
 
     v3.0.0 Phase 5 重构: 等价于 TrainingDataService.load_classification_samples,
     保留为默认 fallback, 让 ML 模块在未注入回调时仍可独立运行.
@@ -488,6 +489,6 @@ def _default_classification_data_loader(dataset_id: int) -> Dict:
 
 
 def _default_classification_model_saver(**kwargs) -> int:
-    """默认 ModelVersion 保存 (向后兼容, 内部走 app.models)"""
+    """默认 ModelVersion 保存 (向后兼容, 内部走 app.model)"""
     from app.services.training_data_service import TrainingDataService
     return TrainingDataService.save_classification_model_version_sync(**kwargs)

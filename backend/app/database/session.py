@@ -31,7 +31,7 @@ async def init_db():
       现在启动时自动跑迁移, 用户零感知.
     """
     # 必须在 create_all 之前 import models, 避免 Base.metadata 为空导致建不出表
-    import app.models  # noqa: F401
+    import app.model  # noqa: F401
     import app.core.db_migration as dbm  # noqa: PLC0415
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.workers.celery_app import celery_app
-from app.core.celery_utils import run_async_in_worker as _run_async
+from app.utils.async_helpers import run_async_in_worker as _run_async
 from app.core.redis_client import redis_client
 
 # ---- 在最早期禁用 HF symlink + 设置缓存目录 ----

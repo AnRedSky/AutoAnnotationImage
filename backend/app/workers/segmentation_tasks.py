@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.workers.celery_app import celery_app
-from app.core.celery_utils import run_async_in_worker as _run_async
+from app.utils.async_helpers import run_async_in_worker as _run_async
 
 # 早期: 与 detection_tasks 一致的 HF symlink + 缓存目录兜底
 _model_dir_env = os.getenv("MODEL_DIR", "./models")

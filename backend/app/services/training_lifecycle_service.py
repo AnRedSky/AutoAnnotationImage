@@ -33,7 +33,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from app.core.celery_utils import run_async_in_worker as _run_async
+from app.utils.async_helpers import run_async_in_worker as _run_async
 from app.core.redis_client import redis_client
 from app.config import settings
 

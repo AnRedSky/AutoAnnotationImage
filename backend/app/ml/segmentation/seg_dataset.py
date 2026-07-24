@@ -19,8 +19,8 @@ from torch.utils.data import Dataset
 import torch
 from torchvision import transforms
 
-from app.models.image import Image as ImageModel
-from app.models.segmentation_mask import SegmentationMask
+from app.model.image import Image as ImageModel
+from app.model.segmentation_mask import SegmentationMask
 from app.services.storage_service import storage_service
 
 

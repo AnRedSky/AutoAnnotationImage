@@ -4,15 +4,16 @@ Model Package (Data Layer)
 
 所有 ORM 模型 + 查询函数 + Active Record 业务方法。
 
-v3.0.0 Phase 2 新增 (从 app.models 迁移):
+v3.0.0 Phase 2 新增 (从 app.models 迁移, Phase 5.6 已彻底删除兼容垫片):
 - 9 个 ORM 模型 (含业务方法)
 - 9 个 *_queries.py 查询函数文件
 - __init__.py 统一导出
 
-依赖方向: model/ 仅依赖 app.model.base + sqlalchemy, 不依赖 app.services/api/workers.
+v3.0.0 Phase 5.6 更新:
+- 兼容垫片 `app/models/` 已删除, 新代码统一 `from app.model.X import Y`
+- 兼容垫片 `app/core/celery_utils.py` 已删除, 新代码统一 `from app.utils.async_helpers import ...`
 
-新代码: `from app.model.user import User`
-旧代码: `from app.models.user import User` (兼容垫片在 app/models/__init__.py)
+依赖方向: model/ 仅依赖 app.model.base + sqlalchemy, 不依赖 app.services/api/workers.
 """
 from app.model.user import User
 from app.model.dataset import Dataset
