@@ -1,32 +1,28 @@
 """
-Celery Tasks: 目标检测训练 + 自动标注 (v2.0.0 S3.2)
+Celery Tasks: 目标检测训练 + 自动标注 (v3.0.0 Phase 5 薄化)
 ======================================================
 
-- train_detection_task:  训练 YOLOv8 (复用 S3.1 yolo_train.train_yolo)
-- auto_annotate_detection_task: 用已训练模型批量预测, 结果入库 BBoxAnnotation
+- train_detection_task:        训练 YOLOv8 (委托 TrainingLifecycleService)
+- auto_annotate_detection_task: 用已训练模型批量预测
+- auto_annotate_pretrained_task: 用预训练 YOLOv8 批量预测
 
-设计:
-- 复用 tasks.py 的 _run_async 工具, 保持一致的事件循环/连接池管理
-- 复用 TrainingJob ORM, 通过 task_type='detection' 区分 (S3.2 迁移新增列)
-- 训练/推理失败按 Celery 标准做法: update_state(FAILURE) + meta 必带 exc_type
-- auto_annotate 走 ai_service 风格: 写 ai_predict 审计 (虽然 detection 没
-  final_label 字段, 用 status 字段表达 'ai_labeled' 状态)
+**v3.0.0 Phase 5 重构**:
+- 业务编排 (TrainingJob 状态机 / sticky_meta / 历史推送 / 失败清理) 全部下沉到
+  TrainingLifecycleService, worker 主体从 ~700 行减到 ~350 行
+- ML 模块 (yolo_train/yolo_dataset/yolo_predict) 保持纯计算
 """
 from __future__ import annotations
 
-import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from app.workers.celery_app import celery_app
-from app.core.redis_client import redis_client
 from app.core.celery_utils import run_async_in_worker as _run_async
 
-
 # 早期: 与 tasks.py 同样的 HF symlink + 缓存目录兜底
-# 在 import huggingface_hub / ultralytics 前设置预训练权重缓存目录
 _model_dir_env = os.getenv("MODEL_DIR", "./models")
 _cache_dir_env = os.getenv("PRETRAINED_CACHE_DIR", str(Path(_model_dir_env) / "cache"))
 os.environ.setdefault("HF_HOME", str(Path(_cache_dir_env) / "huggingface"))
@@ -35,198 +31,103 @@ os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytic
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
-from app.config import settings
+from app.config import settings  # noqa: E402
 
-# ---- v2.5.29: ultralytics 路径强制覆盖 ----
-# 之前: ultralytics 读 $YOLO_CONFIG_DIR/settings.yaml 找 weights_dir, 用户全局
-#       yaml 里指向不存在的 ComfyUI 路径, ultralytics 回退到 cwd 下载 yolov8*.pt,
-#       导致 backend/ 根目录出现 yolov8n.pt / yolov8s.pt / yolov8x.pt 等几个大文件.
-# 现在: 显式设置 YOLO_CONFIG_DIR + 覆盖 settings.weights_dir / runs_dir / datasets_dir
-#       三个字段到 PRETRAINED_CACHE_DIR/ultralytics/ 下, 启动即生效.
-from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+# v2.5.29: ultralytics 路径强制覆盖
+from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
 configure_ultralytics()
-migrate_legacy_yolo_weights()  # 把 backend/ 残留 yolov8*.pt 迁到 cache
+migrate_legacy_yolo_weights()
 
 
-def _set_task_state(self, state: str, meta: dict):
-    """统一的 Celery update_state, 失败/退出元数据自动加 exc_type (Celery 硬要求)"""
-    if state == "FAILURE" and "exc_type" not in meta:
-        meta["exc_type"] = "UnknownError"
-    try:
-        self.update_state(state=state, meta=meta)
-    except Exception:
-        pass
-
-
-# ============== 任务 1: 训练 YOLOv8 ==============
+# ============== 训练 ==============
 
 @celery_app.task(bind=True)
 def train_detection_task(
     self,
     dataset_id: int,
     user_id: int,
-    model_name: str = "yolov8n",       # YOLOv8 预训练权重名 (不带 .pt)
-    model_alias: str = "yolov8n_run",  # 落盘名 / ModelVersion.name
+    model_name: str = "yolov8n",
+    model_alias: str = "yolov8n_run",
     epochs: int = 10,
     imgsz: int = 320,
     batch: int = 8,
     val_ratio: float = 0.2,
     device: str = "cpu",
 ):
-    """
-    异步 YOLOv8 训练
-
-    Args:
-        dataset_id: detection 数据集
-        user_id: 发起人 (写入 TrainingJob.user_id)
-        model_name: ultralytics 权重名 (yolov8n/s/m/l/x, 也可 .pt 绝对路径)
-        model_alias: 本次训练的别名 (ModelVersion.name), 避免与基础权重名冲突
-        epochs: 训练轮数
-        imgsz: 输入尺寸
-        batch: 批大小
-        val_ratio: train/val 拆分比例
-        device: cpu / cuda
-
-    Returns:
-        {status, job_id, best_pt, metrics}
-    """
-    from app.database import AsyncSessionLocal
-    from app.models.training_job import TrainingJob
-    from app.models.model_version import ModelVersion
-    from sqlalchemy import select
-    from app.ml.detection import (
-        export_yolo_dataset, train_yolo, YoloTrainError,
-    )
+    """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)"""
+    from app.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
+    from app.services import TrainingLifecycleService
 
     task_id = self.request.id
     started_at = datetime.utcnow()
 
-    # 1) 创建/复用 TrainingJob (task_type='detection')
-    async def _create_job():
-        async with AsyncSessionLocal() as db:
-            existing = (await db.execute(
-                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
-            )).scalar_one_or_none()
-            if existing is not None:
-                existing.state = "PROGRESS"
-                existing.progress = 0.0
-                existing.error = None
-                existing.started_at = started_at
-                existing.finished_at = None
-                existing.duration_seconds = None
-                existing.task_type = "detection"
-                # v2.5.28: 重投递 / API 预创建都重置数据集统计, 避免上一轮的
-                # data_total/data_train/.../class_names 残留. 之前没清, 如果
-                # 这次是新的数据集训练, 详情页"总样本数"会显示旧值, 用户困惑.
-                existing.data_total = None
-                existing.data_train = None
-                existing.data_val = None
-                existing.num_classes = None
-                existing.class_names = None
-                await db.commit()
-                await db.refresh(existing)
-                return existing.id
-            job = TrainingJob(
-                celery_task_id=task_id,
-                user_id=user_id,
-                dataset_id=dataset_id,
-                base_model=model_name,
-                model_name=model_alias,
-                task_type="detection",
-                epochs=epochs,
-                batch_size=batch,
-                learning_rate=0.0,  # YOLO 自带 lr 调度, 不显式传
-                state="PROGRESS",
-                progress=0.0,
-                started_at=started_at,
-            )
-            db.add(job)
-            await db.commit()
-            await db.refresh(job)
-            return job.id
+    # ---- 1) 创建/复用 TrainingJob (委托 Service) ----
+    job_id = TrainingLifecycleService.create_or_reset_job_sync(
+        task_id=task_id,
+        user_id=user_id,
+        dataset_id=dataset_id,
+        base_model=model_name,
+        model_name=model_alias,
+        task_type="detection",
+        epochs=epochs,
+        batch_size=batch,
+        learning_rate=0.0,
+        started_at=started_at,
+    )
 
-    job_id = _run_async(_create_job())
-    history_buffer: list = []
+    # ---- 2) 共享状态 ----
     sticky_meta: dict = {}
+    history_buffer: list = []
+    workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
 
-    def export_cb(stage, current, total, info=""):
-        meta = {
+    def _export_cb(stage, current, total, info=""):
+        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": round(current / max(total, 1) * 100, 2),
             "msg": f"[{stage}] {info}",
             "total_epochs": epochs,
-        }
-        if sticky_meta:
-            meta.update(sticky_meta)
-        _set_task_state(self, "PROGRESS", meta)
+            **sticky_meta,
+        })
 
-    def train_cb(stage, current_epoch, total_epochs, metrics):
-        # 累积曲线
+    def _train_cb(stage, current_epoch, total_epochs, metrics):
         history_buffer.append({
             "epoch": current_epoch,
             "total_epochs": total_epochs,
             **metrics,
         })
         progress_pct = round(current_epoch / max(total_epochs, 1) * 100, 2)
-        meta = {
+        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": progress_pct,
             "msg": f"训练 epoch {current_epoch}/{total_epochs}",
             "total_epochs": total_epochs,
             "current_epoch": current_epoch,
             **{f"train_{k}": v for k, v in metrics.items()
                if isinstance(v, (int, float))},
-        }
-        if sticky_meta:
-            meta.update(sticky_meta)
-        _set_task_state(self, "PROGRESS", meta)
+            **sticky_meta,
+        })
+        # 推历史曲线 (Redis + DB)
+        TrainingLifecycleService.push_history(
+            task_id, list(history_buffer),
+            job_id=job_id,
+            progress=progress_pct,
+            message=f"训练 epoch {current_epoch}/{total_epochs}",
+            current_epoch=current_epoch,
+        )
 
-        # ---- v2.5.29 修复: 实时同步 history 曲线到 Redis (前端 5s 轮询 /training/history 拿) ----
-        # 之前: 仅在 _finish_job 成功路径写 DB, 训练过程中 /history 端点返回空,
-        #       前端详情页"训练曲线"始终 "暂无历史曲线", 即便训练成功实时阶段也看不到.
-        # 现在: 跟 segmentation_tasks.py / tasks.py (classification) 一致, 每个
-        #       epoch 推 Redis + 写 DB, 前端 5s 轮询实时显示, 即便 worker 中途崩了
-        #       DB 也保留到最新一帧, 用户重启可看历史曲线.
-        if history_buffer:
-            try:
-                from app.workers.tasks import _update_training_history
-                _update_training_history(self.request.id, list(history_buffer))
-            except Exception as e:
-                # Redis 不可达不阻塞训练, 走 DB 兜底
-                print(f"[warn] det history -> redis failed: {type(e).__name__}: {e}")
-
-            # 同步持久化到 TrainingJob.history (Redis 失效兜底 + 训练后历史保留)
-            async def _update_job_history():
-                from app.database import AsyncSessionLocal
-                from app.models.training_job import TrainingJob
-                async with AsyncSessionLocal() as db:
-                    j = await db.get(TrainingJob, job_id)
-                    if not j:
-                        return
-                    j.progress = progress_pct
-                    j.message = f"训练 epoch {current_epoch}/{total_epochs}"
-                    j.current_epoch = current_epoch
-                    j.history = list(history_buffer)
-                    await db.commit()
-            try:
-                _run_async(_update_job_history())
-            except Exception as e:
-                # 写库失败不影响训练主流程, 仅记日志
-                print(f"[warn] det _update_job_history failed: {type(e).__name__}: {e}")
-
-    workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
+    # ---- 3) 导 YOLO 数据集 ----
     try:
-        # 2) 导 YOLO 数据集
-        _set_task_state(self, "PROGRESS", {
+        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": 1.0,
             "msg": "正在导出 YOLO 数据集...",
             "total_epochs": epochs,
         })
 
         async def _export():
+            from app.database import AsyncSessionLocal
             async with AsyncSessionLocal() as db:
                 return await export_yolo_dataset(
                     db=db, dataset_id=dataset_id,
                     workdir=workdir, val_ratio=val_ratio,
-                    progress_cb=export_cb,
+                    progress_cb=_export_cb,
                 )
 
         export_info = _run_async(_export())
@@ -235,29 +136,19 @@ def train_detection_task(
         sticky_meta["data_val"] = export_info["val_count"]
         sticky_meta["num_classes"] = len(export_info["classes"])
         sticky_meta["class_names"] = export_info["classes"]
-        # v2.5.28: 同步到模块全局, 失败路径 (_finish_failed_job) 也能读
-        _LAST_STICKY_META["value"] = dict(sticky_meta)
+        # 跨函数透传 (失败路径也能拿到)
+        TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
 
-        # 同步写库 (与 tasks.py / segmentation_tasks.py 风格一致, 即便失败不阻塞训练)
-        _set_task_state(self, "PROGRESS", {
+        # 数据集统计写库 + 推送
+        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             **sticky_meta,
             "progress": 5.0,
             "msg": f"数据集就绪: train={export_info['train_count']} val={export_info['val_count']}",
             "total_epochs": epochs,
         })
-        # v2.5.28 修复: 数据集就绪那一刻立即把统计写库, 失败路径也能保留
-        # 之前: 只在 _finish_job 成功路径写, FAILURE 后 /jobs/{id} 返回的 ORM
-        #       行 data_total/data_train/data_val/num_classes/class_names 全 None,
-        #       详情页「总样本数 0 张 / 类别数 0 类」, 用户看不到数据集规模
-        # 现在: 训练启动就绪那一刻 (不论后续成功失败) 把 5 个字段写库
-        try:
-            from app.workers.tasks import _persist_dataset_stats
-            _persist_dataset_stats(task_id, sticky_meta)
-        except Exception as e:
-            # 写库失败不影响训练
-            print(f"[warn] det _persist_dataset_stats failed: {type(e).__name__}: {e}")
+        TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta)
 
-        # 3) 跑训练
+        # ---- 4) 跑训练 (纯 ML) ----
         result = train_yolo(
             data_yaml=export_info["data_yaml"],
             model_name=f"{model_name}.pt",
@@ -267,107 +158,57 @@ def train_detection_task(
             device=device,
             project=str(settings.MODEL_DIR / "runs"),
             name=model_alias,
-            progress_cb=train_cb,
+            progress_cb=_train_cb,
         )
 
-        # 4) 写 ModelVersion
-        async def _finish_job():
-            async with AsyncSessionLocal() as db:
-                mv = ModelVersion(
-                    name=model_alias,
-                    base_model=model_name,
-                    dataset_id=dataset_id,
-                    task_type="detection",
-                    num_classes=len(export_info["classes"]),
-                    file_path=result["best_pt"],
-                    map_50=result["metrics"].get("map_50"),
-                    map_50_95=result["metrics"].get("map_50_95"),
-                    precision=result["metrics"].get("precision"),
-                    recall=result["metrics"].get("recall"),
-                    training_log={"history": history_buffer},
-                    is_active=False,
-                )
-                db.add(mv)
-                await db.commit()
-                await db.refresh(mv)
-                mv_id = mv.id
-
-                job = await db.get(TrainingJob, job_id)
-                if job:
-                    job.state = "SUCCESS"
-                    job.progress = 100.0
-                    job.message = f"训练完成 mAP50={result['metrics'].get('map_50', 0):.4f}"
-                    job.finished_at = datetime.utcnow()
-                    job.duration_seconds = (job.finished_at - started_at).total_seconds()
-                    job.model_version_id = mv_id
-                    job.history = history_buffer
-                    job.data_total = sticky_meta.get("data_total")
-                    job.data_train = sticky_meta.get("data_train")
-                    job.data_val = sticky_meta.get("data_val")
-                    job.num_classes = sticky_meta.get("num_classes")
-                    job.class_names = sticky_meta.get("class_names")
-                    await db.commit()
-                return mv_id
-
-        mv_id = _run_async(_finish_job())
+        # ---- 5) 写 ModelVersion + TrainingJob SUCCESS (委托 Service) ----
+        mv_id = TrainingLifecycleService.create_model_version_sync(
+            name=model_alias,
+            base_model=model_name,
+            dataset_id=dataset_id,
+            task_type="detection",
+            num_classes=len(export_info["classes"]),
+            file_path=result["best_pt"],
+            metrics=result["metrics"],
+            history=history_buffer,
+        )
+        TrainingLifecycleService.mark_success_sync(
+            job_id=job_id,
+            started_at=started_at,
+            history_buffer=history_buffer,
+            message=f"训练完成 mAP50={result['metrics'].get('map_50', 0):.4f}",
+            model_version_id=mv_id,
+            sticky_meta=sticky_meta,
+        )
         return {
             "status": "SUCCESS", "job_id": job_id, "model_version_id": mv_id,
             "best_pt": result["best_pt"], "metrics": result["metrics"],
         }
 
     except YoloTrainError as e:
-        # 业务失败
-        _finish_failed_job(self, job_id, e, started_at)
+        _finish_failed(self, job_id, e, started_at, task_id)
         return {"status": "FAILURE", "job_id": job_id, "error": str(e)[:500]}
-
     except Exception as e:
-        _finish_failed_job(self, job_id, e, started_at)
+        _finish_failed(self, job_id, e, started_at, task_id)
         return {"status": "FAILURE", "job_id": job_id, "error": str(e)[:500]}
     finally:
-        # 训练后清理临时数据集导出目录 (images/labels/data.yaml)
-        import shutil
+        # 清理临时数据集导出目录
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _finish_failed_job(self, job_id: int, exc: Exception, started_at: datetime):
-    """训练失败统一清理: 写 DB FAILURE + Celery update_state(FAILURE)
+def _finish_failed(self, job_id: int, exc: Exception, started_at: datetime, task_id: str):
+    """训练失败统一清理 (Phase 5: 委托 TrainingLifecycleService)"""
+    from app.services import TrainingLifecycleService
 
-    v2.5.28 新增: 支持把已计算的 sticky_meta (数据集统计) 写库, 避免失败
-    任务详情页显示全 0. 调用方可在调用前 set 一下 _last_sticky_meta 即可.
-    """
-    from app.database import AsyncSessionLocal
-    from app.models.training_job import TrainingJob
-    try:
-        async def _fail():
-            async with AsyncSessionLocal() as db:
-                job = await db.get(TrainingJob, job_id)
-                if job:
-                    job.state = "FAILURE"
-                    job.error = str(exc)[:500]
-                    job.finished_at = datetime.utcnow()
-                    job.duration_seconds = (job.finished_at - started_at).total_seconds()
-                    # v2.5.28: 即便失败, 已计算的 sticky_meta (数据集统计) 也要写库
-                    # 之前: 训练跑通 export_yolo_dataset 后才挂, 统计在 sticky_meta
-                    #       里但没写库, _finish_failed_job 又只清 error/finished,
-                    #       结果详情页「总样本数 / 类别数」显示空
-                    # 现在: 从模块全局 _last_sticky_meta 拿 (worker 训练中赋值)
-                    _sm = _LAST_STICKY_META.get("value")
-                    if isinstance(_sm, dict) and _sm:
-                        if "data_total" in _sm:
-                            job.data_total = _sm["data_total"]
-                        if "data_train" in _sm:
-                            job.data_train = _sm["data_train"]
-                        if "data_val" in _sm:
-                            job.data_val = _sm["data_val"]
-                        if "num_classes" in _sm:
-                            job.num_classes = _sm["num_classes"]
-                        if "class_names" in _sm:
-                            job.class_names = _sm["class_names"]
-                    await db.commit()
-        _run_async(_fail())
-    except Exception:
-        pass
-    _set_task_state(self, "FAILURE", {
+    sticky_meta = TrainingLifecycleService.get_last_sticky_meta(task_id)
+    TrainingLifecycleService.mark_failure_sync(
+        job_id=job_id,
+        error=str(exc),
+        started_at=started_at,
+        exc_type=type(exc).__name__,
+        sticky_meta=sticky_meta,
+    )
+    TrainingLifecycleService.set_task_state(self, "FAILURE", {
         "exc_type": type(exc).__name__,
         "exc_message": str(exc)[:200],
         "error": str(exc)[:500],
@@ -375,13 +216,7 @@ def _finish_failed_job(self, job_id: int, exc: Exception, started_at: datetime):
     })
 
 
-# v2.5.28: 跨函数共享 sticky_meta (失败时 _finish_failed_job 也能拿到已计算的统计)
-# 不放进 train_detection_task 闭包是因为 _finish_failed_job 是模块级函数, 无法
-# 直接读 train_detection_task 局部变量. 用一个模块级 dict 透传, 简单够用.
-_LAST_STICKY_META: dict = {}
-
-
-# ============== 任务 2: 自动标注 (用已训练模型批量推理) ==============
+# ============== 自动标注 (用已训练模型) ==============
 
 @celery_app.task(bind=True)
 def auto_annotate_detection_task(
@@ -395,90 +230,57 @@ def auto_annotate_detection_task(
     device: str = "cpu",
     overwrite_existing: bool = False,
 ):
-    """
-    用已训练好的 YOLOv8 模型批量预标注
-
-    Args:
-        dataset_id: 目标 detection 数据集
-        user_id: 发起人
-        model_version_id: ModelVersion.id (file_path 取自此)
-        conf_threshold: 置信度阈值
-        iou_threshold: NMS IoU 阈值
-        imgsz: 推理输入尺寸
-        device: cpu / cuda
-        overwrite_existing: True 时覆盖已有 BBoxAnnotation
-
-    Returns:
-        {status, total, auto_labeled, no_match, error_msg}
-    """
-    from app.database import AsyncSessionLocal
-    from app.models import Image as ImageModel
-    from app.models.bbox_annotation import BBoxAnnotation
-    from app.models.model_version import ModelVersion
-    from app.models.annotation_log import AnnotationLog
-    from app.models.category import Category
+    """用已训练好的 YOLOv8 模型批量预标注 (Phase 5: 编排下沉)"""
     from app.ml.detection import predict_image_grouped, YoloTrainError
-    from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from app.services import TrainingLifecycleService
 
     task_id = self.request.id
 
     try:
-        # 1) 拉 ModelVersion
+        # ---- 1) 加载 ModelVersion ----
         async def _load_mv():
+            from app.database import AsyncSessionLocal
+            from app.model.model_version import ModelVersion
             async with AsyncSessionLocal() as db:
                 return await db.get(ModelVersion, model_version_id)
         mv = _run_async(_load_mv())
         if not mv or not mv.file_path or not Path(mv.file_path).exists():
             raise YoloTrainError(f"ModelVersion id={model_version_id} 权重不存在")
 
-        # 2) 拉全部 detection 图
-        async def _load_images() -> list:
+        # ---- 2) 加载图片 / 类目 / 绝对路径 (worker 内联, 数据访问) ----
+        async def _load_data():
+            from sqlalchemy import select
+            from app.database import AsyncSessionLocal
+            from app.model.image import Image as ImageModel
+            from app.model.category import Category
+            from app.services.storage_service import storage_service
             async with AsyncSessionLocal() as db:
-                rows = (await db.execute(
-                    select(ImageModel)
-                    .where(
+                imgs = (await db.execute(
+                    select(ImageModel).where(
                         ImageModel.dataset_id == dataset_id,
                         ImageModel.task_type == "detection",
-                    )
-                    .order_by(ImageModel.id.asc())
+                    ).order_by(ImageModel.id.asc())
                 )).scalars().all()
-                # v2.5.30 修复: Image ORM 的字段是 storage_path, 不是 file_path
-                # 之前 r.file_path 会抛 AttributeError: 'Image' object has no attribute 'file_path'
-                return [(r.id, r.storage_path) for r in rows]
-        items = _run_async(_load_images())
-        if not items:
+                cats = (await db.execute(
+                    select(Category).where(Category.dataset_id == dataset_id).order_by(Category.id.asc())
+                )).scalars().all()
+                base = Path(storage_service.base_dir).resolve()
+                abs_paths, valid_ids = [], []
+                for r in imgs:
+                    p = Path(r.storage_path)
+                    if not p.is_absolute():
+                        p = (base / r.storage_path).resolve()
+                    if p.exists():
+                        abs_paths.append(str(p))
+                        valid_ids.append(r.id)
+                return list(cats), abs_paths, valid_ids
+        cats, abs_paths, valid_ids = _run_async(_load_data())
+        if not valid_ids:
             return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
 
-        # 3) 拉 Category (class_index → category_id)
-        async def _load_cats() -> list:
-            async with AsyncSessionLocal() as db:
-                rows = (await db.execute(
-                    select(Category)
-                    .where(Category.dataset_id == dataset_id)
-                    .order_by(Category.id.asc())
-                )).scalars().all()
-                return list(rows)
-        cats = _run_async(_load_cats())
-        index_to_cat = {i: c for i, c in enumerate(cats)}
-
-        # 4) 拼图片绝对路径 + 过滤存在的
-        from app.services.storage_service import storage_service
-        abs_paths = []
-        valid_ids = []
-        for img_id, fp in items:
-            p = Path(fp)
-            if not p.is_absolute():
-                # v2.5.31 修复: StorageService 的属性是 base_dir, 不是 base_path
-                # 之前 storage_service.base_path 会抛 AttributeError
-                p = (Path(storage_service.base_dir).resolve() / fp).resolve()
-            if p.exists():
-                abs_paths.append(str(p))
-                valid_ids.append(img_id)
-
-        # 5) 推理
+        # ---- 3) 推理 (纯 ML) ----
         def _progress_cb(p, msg):
-            _set_task_state(self, "PROGRESS", {
+            TrainingLifecycleService.set_task_state(self, "PROGRESS", {
                 "progress": round(p, 2),
                 "msg": msg,
                 "total": len(abs_paths),
@@ -493,9 +295,15 @@ def auto_annotate_detection_task(
             device=device,
         )
 
-        # 6) 写 BBoxAnnotation
+        # ---- 4) 写 BBoxAnnotation (worker 内联, 数据访问) ----
+        from app.model.bbox_annotation import BBoxAnnotation
+        from app.model.annotation_log import AnnotationLog
+        from sqlalchemy import select, delete as sa_delete
+        from app.database import AsyncSessionLocal
+
         async def _write_results():
             async with AsyncSessionLocal() as db:
+                index_to_cat = {i: c for i, c in enumerate(cats)}
                 auto_labeled = 0
                 no_match = 0
                 for i, (img_id, p) in enumerate(zip(valid_ids, abs_paths)):
@@ -505,8 +313,7 @@ def auto_annotate_detection_task(
                         continue
                     if overwrite_existing:
                         old = (await db.execute(
-                            select(BBoxAnnotation)
-                            .where(BBoxAnnotation.image_id == img_id)
+                            select(BBoxAnnotation).where(BBoxAnnotation.image_id == img_id)
                         )).scalars().all()
                         for o in old:
                             await db.delete(o)
@@ -523,7 +330,6 @@ def auto_annotate_detection_task(
                             source="ai",
                             annotated_by=user_id,
                         ))
-                        # 审计
                         db.add(AnnotationLog(
                             image_id=img_id, user_id=user_id,
                             action="ai_predict", time_spent_ms=0,
@@ -536,7 +342,6 @@ def auto_annotate_detection_task(
                             f"已标注 {i+1}/{len(valid_ids)}",
                         )
                 return auto_labeled, no_match
-
         auto_labeled, no_match = _run_async(_write_results())
         return {
             "status": "SUCCESS",
@@ -546,7 +351,7 @@ def auto_annotate_detection_task(
         }
 
     except Exception as e:
-        _set_task_state(self, "FAILURE", {
+        TrainingLifecycleService.set_task_state(self, "FAILURE", {
             "exc_type": type(e).__name__,
             "exc_message": str(e)[:200],
             "error": str(e)[:500],
@@ -554,8 +359,8 @@ def auto_annotate_detection_task(
         return {"status": "FAILURE", "error": str(e)[:500]}
 
 
-# ============== v2.3.2: 用 ultralytics 预训练 yolov8n/s/m/l/x 做自动标注 ==============
-# 不依赖 ModelVersion, 用户没训练模型也能用
+# ============== 自动标注 (用预训练模型) ==============
+
 PREDEFINED_YOLO_MODELS = {"yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x"}
 
 
@@ -571,18 +376,9 @@ def auto_annotate_pretrained_task(
     device: str = "cpu",
     overwrite_existing: bool = False,
 ):
-    """
-    v2.3.2: 用 ultralytics 预训练 YOLOv8n/s/m/l/x 做 detection 数据集预标注
-    与 auto_annotate_detection_task 区别: 不需要已训练 ModelVersion,
-    ultralytics 会自动下载预训练权重 (yolov8n.pt 等).
-    """
-    from app.database import AsyncSessionLocal
-    from app.models import Image as ImageModel
-    from app.models.bbox_annotation import BBoxAnnotation
-    from app.models.annotation_log import AnnotationLog
-    from app.models.category import Category
+    """用 ultralytics 预训练 YOLOv8n/s/m/l/x 做 detection 数据集预标注 (Phase 5: 编排下沉)"""
     from app.ml.detection import predict_image_grouped, YoloTrainError
-    from sqlalchemy import select, delete
+    from app.services import TrainingLifecycleService
 
     task_id = self.request.id
 
@@ -593,53 +389,38 @@ def auto_annotate_pretrained_task(
         }
 
     try:
-        # 1) 拉全部 detection 图
-        async def _load_images() -> list:
+        # ---- 1) 加载图片 / 类目 (worker 内联) ----
+        async def _load_data():
+            from sqlalchemy import select
+            from app.database import AsyncSessionLocal
+            from app.model.image import Image as ImageModel
+            from app.model.category import Category
+            from app.services.storage_service import storage_service
             async with AsyncSessionLocal() as db:
-                rows = (await db.execute(
-                    select(ImageModel)
-                    .where(
+                imgs = (await db.execute(
+                    select(ImageModel).where(
                         ImageModel.dataset_id == dataset_id,
                         ImageModel.task_type == "detection",
-                    )
-                    .order_by(ImageModel.id.asc())
+                    ).order_by(ImageModel.id.asc())
                 )).scalars().all()
-                # v2.5.30 修复: Image ORM 字段是 storage_path (与 auto_annotate_detection_task 同源)
-                return [(r.id, r.storage_path) for r in rows]
-        items = _run_async(_load_images())
-        if not items:
+                cats = (await db.execute(
+                    select(Category).where(Category.dataset_id == dataset_id).order_by(Category.id.asc())
+                )).scalars().all()
+                base = Path(storage_service.base_dir).resolve()
+                abs_paths, valid_ids = [], []
+                for r in imgs:
+                    p = Path(r.storage_path)
+                    if not p.is_absolute():
+                        p = (base / r.storage_path).resolve()
+                    if p.exists():
+                        abs_paths.append(str(p))
+                        valid_ids.append(r.id)
+                return list(cats), abs_paths, valid_ids
+        cats, abs_paths, valid_ids = _run_async(_load_data())
+        if not valid_ids or not abs_paths:
             return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
 
-        # 2) 拉 Category
-        async def _load_cats() -> list:
-            async with AsyncSessionLocal() as db:
-                rows = (await db.execute(
-                    select(Category)
-                    .where(Category.dataset_id == dataset_id)
-                    .order_by(Category.id.asc())
-                )).scalars().all()
-                return list(rows)
-        cats = _run_async(_load_cats())
-        index_to_cat = {i: c for i, c in enumerate(cats)}
-
-        # 3) 拼图片绝对路径 + 过滤存在
-        from app.services.storage_service import storage_service
-        abs_paths = []
-        valid_ids = []
-        for img_id, fp in items:
-            p = Path(fp)
-            if not p.is_absolute():
-                # v2.5.31 修复: 同上, base_dir (与 auto_annotate_detection_task 同步)
-                p = (Path(storage_service.base_dir).resolve() / fp).resolve()
-            if p.exists():
-                abs_paths.append(str(p))
-                valid_ids.append(img_id)
-
-        if not abs_paths:
-            return {"status": "SUCCESS", "total": 0, "auto_labeled": 0, "no_match": 0}
-
-        # 4) 加载 ultralytics 预训练权重
-        # ultralytics 会自动下载 yolov8n.pt 到 ~/.cache/ultralytics/
+        # ---- 2) 加载预训练权重 ----
         try:
             from ultralytics import YOLO
         except ImportError as e:
@@ -650,9 +431,9 @@ def auto_annotate_pretrained_task(
         except Exception as e:
             return {"status": "FAILURE", "error": f"加载预训练权重失败: {e}"}
 
-        # 5) 推理 (复用 predict_image_grouped, 与已训练模型走同一条路径)
+        # ---- 3) 推理 ----
         def _progress_cb(p, msg):
-            _set_task_state(self, "PROGRESS", {
+            TrainingLifecycleService.set_task_state(self, "PROGRESS", {
                 "progress": round(p, 2),
                 "msg": msg,
                 "total": len(abs_paths),
@@ -667,9 +448,15 @@ def auto_annotate_pretrained_task(
             device=device,
         )
 
-        # 6) 写 BBoxAnnotation
+        # ---- 4) 写 BBoxAnnotation (pretrained 模式带 model_name 审计) ----
+        from app.model.bbox_annotation import BBoxAnnotation
+        from app.model.annotation_log import AnnotationLog
+        from sqlalchemy import delete as sa_delete
+        from app.database import AsyncSessionLocal
+
         async def _write_results():
             async with AsyncSessionLocal() as db:
+                index_to_cat = {i: c for i, c in enumerate(cats)}
                 auto_labeled = 0
                 no_match = 0
                 for i, (img_id, p) in enumerate(zip(valid_ids, abs_paths)):
@@ -679,33 +466,22 @@ def auto_annotate_pretrained_task(
                         continue
                     if overwrite_existing:
                         await db.execute(
-                            delete(BBoxAnnotation).where(BBoxAnnotation.image_id == img_id)
+                            sa_delete(BBoxAnnotation).where(BBoxAnnotation.image_id == img_id)
                         )
                     for b in boxes:
                         cat = index_to_cat.get(b.get("class_index"))
                         if not cat:
                             continue
-                        # v2.5.15 P0-1 修复: BBoxAnnotation ORM 不存在 model_name 字段
-                        # 之前 model_name=model_name 会抛 AttributeError. 现改为:
-                        # - 移除 ORM 不存在的字段
-                        # - 把模型名写到 AnnotationLog.payload (审计可追溯)
-                        row = BBoxAnnotation(
+                        db.add(BBoxAnnotation(
                             image_id=img_id,
                             category_id=cat.id,
                             x_min=b["x_min"], y_min=b["y_min"],
                             x_max=b["x_max"], y_max=b["y_max"],
                             confidence=float(b.get("confidence", 0.0)),
-                            # v2.5.15 P0-1.1 修复: bbox_source 枚举仅 ai/human/human_corrected,
-                            # 之前误写 "pretrained" 会抛 LookupError. 改为 "ai" (AI 自动标注语义一致)
                             source="ai",
-                        )
-                        db.add(row)
-                    # v2.5.15 P0-2 修复: AnnotationLog.action 枚举已扩展
-                    # 旧: action="auto_annotate_pretrained" 会抛 ValueError 越界
-                    # 新: "auto_annotate_pretrained" 已在 annotation_log.py Enum 中注册
+                        ))
                     db.add(AnnotationLog(
-                        image_id=img_id,
-                        user_id=user_id,
+                        image_id=img_id, user_id=user_id,
                         action="auto_annotate_pretrained",
                         payload={"model": model_name, "n_boxes": len(boxes)},
                     ))
@@ -713,13 +489,13 @@ def auto_annotate_pretrained_task(
                 await db.commit()
                 return auto_labeled, no_match
 
-        _set_task_state(self, "PROGRESS", {
+        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": 0.0, "msg": f"写入 bbox (模型={model_name})...",
             "total": len(abs_paths),
         })
         auto_labeled, no_match = _run_async(_write_results())
 
-        _set_task_state(self, "SUCCESS", {
+        TrainingLifecycleService.set_task_state(self, "SUCCESS", {
             "progress": 1.0, "msg": "完成",
             "total": len(abs_paths),
             "auto_labeled": auto_labeled,
@@ -735,7 +511,7 @@ def auto_annotate_pretrained_task(
         }
 
     except Exception as e:
-        _set_task_state(self, "FAILURE", {
+        TrainingLifecycleService.set_task_state(self, "FAILURE", {
             "exc_type": type(e).__name__,
             "exc_message": str(e)[:200],
             "error": str(e)[:500],
