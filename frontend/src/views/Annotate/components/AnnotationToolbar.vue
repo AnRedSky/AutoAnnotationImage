@@ -163,7 +163,10 @@
               </el-option>
             </el-select>
           </el-tooltip>
-          <!-- 基础模型分支: 按任务类型显示对应预训练模型列表 -->
+          <!-- 基础模型分支: 按任务类型显示对应预训练模型列表
+               v2.5.47: 统一改为从 models prop 过滤, 替代原 detection 任务硬编码 DETECTION_MODELS
+               models 由父组件 Annotate/index.vue 在 onMounted 调 autoAnnotateApi.models() 拉取
+               与 /api/auto-annotate/models 单一权威源对齐, 包含 description / recommended 字段 -->
           <el-tooltip
             v-else-if="currentTaskTypeRaw === 'classification'"
             content="基础模型输出会被归一为「未知」, 请谨慎使用" placement="top"
@@ -174,12 +177,19 @@
               class="app-select" style="width: 260px;"
               :fit-input-width="false" popper-class="app-select-dropdown"
             >
-              <el-option v-for="m in models" :key="m.name" :label="`${m.name} (${m.params})`" :value="m.name">
-                <div style="display: flex; align-items: center; gap: 6px;">
+              <el-option
+                v-for="m in baseModelsByTask.classification" :key="m.name"
+                :value="m.name" :label="`${m.name} (${m.params || ''})`"
+              >
+                <div class="annotate-base-option">
+                  <el-tag v-if="m.recommended" size="small" type="success" effect="dark"
+                    style="font-size: 10px; line-height: 16px; height: 16px; padding: 0 4px;"
+                  >推荐</el-tag>
                   <el-tag v-if="m.framework" size="small" type="info" effect="plain">{{ m.framework }}</el-tag>
-                  <span>{{ m.name }}</span>
-                  <span style="color: #909399; font-size: 12px;">({{ m.params }})</span>
+                  <span class="annotate-base-option__name">{{ m.name }}</span>
+                  <span class="annotate-base-option__params">({{ m.params }})</span>
                 </div>
+                <div v-if="m.description" class="annotate-base-option__desc">适用: {{ m.description }}</div>
               </el-option>
             </el-select>
           </el-tooltip>
@@ -193,11 +203,24 @@
               placeholder="选择 YOLO 模型" class="app-select" style="width: 260px;"
               :fit-input-width="false" popper-class="app-select-dropdown"
             >
-              <el-option v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m" />
+              <el-option
+                v-for="m in baseModelsByTask.detection" :key="m.name"
+                :value="m.name" :label="`${m.name} (${m.params || ''})`"
+              >
+                <div class="annotate-base-option">
+                  <el-tag v-if="m.recommended" size="small" type="success" effect="dark"
+                    style="font-size: 10px; line-height: 16px; height: 16px; padding: 0 4px;"
+                  >推荐</el-tag>
+                  <el-tag v-if="m.framework" size="small" type="info" effect="plain">{{ m.framework }}</el-tag>
+                  <span class="annotate-base-option__name">{{ m.name }}</span>
+                  <span class="annotate-base-option__params">({{ m.params }})</span>
+                </div>
+                <div v-if="m.description" class="annotate-base-option__desc">适用: {{ m.description }}</div>
+              </el-option>
             </el-select>
           </el-tooltip>
-          <!-- v2.5.46: 分割预训练下拉 (torchvision COCO 21 类, 替换原 disabled 占位)
-               数据源: models prop (后端 /api/auto-annotate/models 同步追加 3 个 torchvision 项)
+          <!-- v2.5.46: 分割预训练下拉 (torchvision COCO 21 类)
+               v2.5.47: 同样改为从 baseModelsByTask.segmentation 过滤, 含 description
                由 useAutoAnnotate 同步调 /api/auto-annotate/run-segmentation-pretrained -->
           <el-tooltip
             v-else-if="currentTaskTypeRaw === 'segmentation'"
@@ -210,14 +233,18 @@
               :fit-input-width="false" popper-class="app-select-dropdown"
             >
               <el-option
-                v-for="m in models.filter((mm: any) => mm.task_type === 'segmentation')"
-                :key="m.name" :value="m.name" :label="`${m.name} (${m.params})`"
+                v-for="m in baseModelsByTask.segmentation" :key="m.name"
+                :value="m.name" :label="`${m.name} (${m.params || ''})`"
               >
-                <div style="display: flex; align-items: center; gap: 6px;">
+                <div class="annotate-base-option">
+                  <el-tag v-if="m.recommended" size="small" type="success" effect="dark"
+                    style="font-size: 10px; line-height: 16px; height: 16px; padding: 0 4px;"
+                  >推荐</el-tag>
                   <el-tag v-if="m.framework" size="small" type="info" effect="plain">{{ m.framework }}</el-tag>
-                  <span>{{ m.name }}</span>
-                  <span style="color: #909399; font-size: 12px;">({{ m.params }})</span>
+                  <span class="annotate-base-option__name">{{ m.name }}</span>
+                  <span class="annotate-base-option__params">({{ m.params }})</span>
                 </div>
+                <div v-if="m.description" class="annotate-base-option__desc">适用: {{ m.description }}</div>
               </el-option>
             </el-select>
           </el-tooltip>
@@ -263,7 +290,22 @@ import { computed } from 'vue'
 import type { PropType } from 'vue'
 import { MagicStick } from '@element-plus/icons-vue'
 
-const DETECTION_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
+/**
+ * v2.5.47: 移除原硬编码 DETECTION_MODELS, 改为从 models prop 过滤
+ * - 与 /api/auto-annotate/models 单一权威源对齐
+ * - 三个任务类型都通过 baseModelsByTask 取数, UI 行为一致
+ */
+const baseModelsByTask = computed<Record<string, any[]>>(() => {
+  const grouped: Record<string, any[]> = {
+    classification: [],
+    detection: [],
+    segmentation: [],
+  }
+  for (const m of (props.models as any[]) || []) {
+    if (m?.task_type && grouped[m.task_type]) grouped[m.task_type].push(m)
+  }
+  return grouped
+})
 
 /**
  * 任务类型筛选下拉选项 (v2.5.20 调整: 移除"全部"项)
@@ -347,5 +389,36 @@ const filteredDatasets = computed(() => {
 .stat-meta-sep {
   margin: 0 4px;
   color: #c0c4cc;
+}
+/* v2.5.47: 基础模型下拉项样式 (与 BaseModelSelect 保持视觉一致)
+   - 名称 + framework 标签 + 推荐标签 + params 同行
+   - 描述行 (适用: ...) 在下方单独一行, 长文本省略 */
+.annotate-base-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.annotate-base-option__name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.annotate-base-option__params {
+  color: #909399;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.annotate-base-option__desc {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #94a3b8;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

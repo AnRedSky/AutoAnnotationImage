@@ -33,26 +33,49 @@ interface EpochData {
 }
 
 // ============== 基础选项 ==============
-// 与后端 /api/auto-annotate/models 保持一致 (任务类型 + 名称)
-// - framework:  来源框架, 在 el-option 显示 (浅蓝标签)
-// - params:     参数量, 在 el-option 显示 (浅黄标签)
-// - taskTypes:  适用任务类型, 取自数据集 taskType 枚举, 由 BaseModelSelect 渲染彩色 chip
-//               (与 Datasets 页面 taskType 视觉一致)
-// - description: 适用场景说明, 在 el-option 底部显示一行小字, 选中后顶部 tooltip 可见
-// 当前 7 个 timm 模型都是 ImageNet 预训练的图像分类 backbone, 所以 taskTypes 全部为 ['classification'].
-// 保留数组结构以便未来扩展目标检测/分割模型.
-const BASE_MODELS: Array<{ name: string; framework: string; params?: string; taskTypes?: string[]; description?: string }> = [
-  { name: 'resnet18',              framework: 'timm', params: '11.7M', taskTypes: ['classification'], description: '轻量级残差网络, 训练快、显存占用低, 适合中小数据集快速实验或 CPU/低端 GPU 部署' },
-  { name: 'resnet50',              framework: 'timm', params: '25.6M', taskTypes: ['classification'], description: '经典深度残差网络, 特征表达力强, 适合中等规模数据集与追求高精度的训练场景' },
-  { name: 'efficientnet_b0',       framework: 'timm', params: '5.3M',  taskTypes: ['classification'], description: '复合缩放轻量网络, 速度与精度平衡, 适合移动端、实时推理或算力受限场景' },
-  { name: 'efficientnet_b3',       framework: 'timm', params: '12.0M', taskTypes: ['classification'], description: 'B0 的精度升级版, 中等规模数据下表现更稳, 适合精度-速度折中的工业分类任务' },
-  { name: 'mobilenetv3_large_100', framework: 'timm', params: '5.5M',  taskTypes: ['classification'], description: '移动端优化网络, 延迟极低, 适合边缘设备、嵌入式或 Web 前端推理部署' },
-  { name: 'convnext_tiny',         framework: 'timm', params: '28.6M', taskTypes: ['classification'], description: '现代化纯卷积架构, 精度可比 Transformer, 适合数据量充足、追求高精度的训练任务' },
-  // P1.2: 补 vit_small_patch16_224 — 与后端 /auto-annotate/models 对齐
-  // 后端 /models 一直列了这个, 但训练页之前遗漏, 用户在「标注工作台 → 基础模型」分支可选
-  // 但训练页无法选, 前后端不一致
-  { name: 'vit_small_patch16_224', framework: 'timm', params: '22.1M', taskTypes: ['classification'], description: '小型 Vision Transformer, 224 输入, 注意力机制捕获全局依赖, 适合中等规模数据集与精度敏感任务' },
-]
+// v2.5.47: 基础模型列表改为从后端 /api/auto-annotate/models 动态加载
+// - 单一权威源: 后端 list_available_models (auto_annotate.py:217)
+// - 训练页 + 标注工作台工具栏共用同一份数据
+// - 不再有静态 BASE_MODELS / BASE_MODELS_BY_TASK, 避免前后端不一致
+// - 加载失败时回退到 utils/taskType.ts 的 DEFAULT_BASE_MODEL (避免 UI 空白)
+// - 数据形状复用 BaseModelSelect 导出的 BaseModelOption (单一 schema, 与后端 /models 对齐)
+import { DEFAULT_BASE_MODEL } from '@/utils/taskType'
+import type { BaseModelOption } from './components/BaseModelSelect.vue'
+
+/** 全量基础模型 (从后端拉) */
+const baseModelsAll = ref<BaseModelOption[]>([])
+/** 加载状态, 用于骨架屏 / placeholder */
+const baseModelsLoading = ref(false)
+/** 按 task_type 过滤后的 base models (供训练下拉用) */
+const baseModelsByTask = computed<Record<string, BaseModelOption[]>>(() => {
+  const grouped: Record<string, BaseModelOption[]> = {
+    classification: [],
+    detection: [],
+    segmentation: [],
+  }
+  for (const m of baseModelsAll.value) {
+    if (m.task_type && grouped[m.task_type]) grouped[m.task_type].push(m)
+  }
+  return grouped
+})
+/** 当前 createFormTaskType 对应的候选列表 (空数组兜底) */
+const createFormBaseOptions = computed<BaseModelOption[]>(
+  () => baseModelsByTask.value[createFormTaskType.value] || []
+)
+/** 异步加载基础模型清单 */
+async function loadBaseModels() {
+  baseModelsLoading.value = true
+  try {
+    const r: any = await autoAnnotateApi.models()
+    const items: any[] = r?.models || r || []
+    baseModelsAll.value = items
+  } catch (e) {
+    console.warn('[Training] 加载基础模型列表失败, 回退到默认模型', e)
+    baseModelsAll.value = []
+  } finally {
+    baseModelsLoading.value = false
+  }
+}
 
 // ============== 表格多选 + 批量操作 ==============
 // selectedJobIds: 当前页选中的 job id 列表 (跨页不持久, 由 Element Plus 默认行为决定)
@@ -368,38 +391,26 @@ const createForm = ref({
   learning_rate: 0.0001,
 })
 
+// ============== S7 新增: 新建任务对话框的"任务类型"下拉选项 ==============
 // S7 新增: 当前选中数据集的 task_type, 用于按任务类型切换默认 base_model
 const createFormTaskType = ref<string>('classification')
-// S7 新增: 任务类型 -> base_model 候选列表 (UI 直接枚举, 避免每次请求后端)
-// - classification: timm ImageNet 7 个 (与 BASE_MODELS 同步, 见 P1.2 注释)
-// - detection:     yolov8n/s/m/l/x (ultralytics 标准 5 个, 与后端 detection.py:441 对齐)
-// - segmentation:  fcn_resnet50 / deeplabv3_resnet50 / deeplabv3_resnet101 (torchvision 3 个)
-const BASE_MODELS_BY_TASK: Record<string, string[]> = {
-  classification: BASE_MODELS.map((m) => m.name),
-  detection: ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x'],
-  // P1.1 修复: 补 fcn_resnet50 — 与后端 seg_train.py:_build_model 能力对齐
-  // 此前训练页只有 2 个, 后端 /auto-annotate/models 已列 3 个, 缺 1 个造成不一致
-  segmentation: ['fcn_resnet50', 'deeplabv3_resnet50', 'deeplabv3_resnet101'],
-}
-/** 当前 task_type 对应的 base_model 下拉选项 (空数组兜底) */
-const createFormBaseOptions = computed(
-  () => BASE_MODELS_BY_TASK[createFormTaskType.value] || BASE_MODELS_BY_TASK.classification
-)
-
-/**
- * v2.5.24: 新建任务对话框的"任务类型"下拉选项
- * - 固定排序: 图片分类 / 目标检测 / 图片分割
- * - 与 Annotate 工作台的 TASK_TYPE_FILTER_OPTIONS 保持一致
- */
+// - 固定排序: 图片分类 / 目标检测 / 图片分割
+// - 与 Annotate 工作台的 TASK_TYPE_FILTER_OPTIONS 保持一致
 const CREATE_TASK_TYPE_OPTIONS = [
   { value: 'classification', label: '图片分类' },
   { value: 'detection',      label: '目标检测' },
   { value: 'segmentation',   label: '图片分割' },
 ] as const
 
-/** 根据当前 task_type 重置 createForm.base_model 和 model_name */
+/**
+ * v2.5.47: 根据当前 task_type 重置 createForm.base_model 和 model_name
+ * - 优先使用 createFormBaseOptions 第一项 (后端最新数据)
+ * - 加载失败 / 该任务类型无候选时, 回退到 utils/taskType.ts DEFAULT_BASE_MODEL
+ *   (避免 UI 出现"undefined base_model"导致启动按钮 disabled)
+ */
 const resetCreateFormByTaskType = (taskType: string) => {
-  const newBase = getDefaultBaseModel(taskType)
+  const opts = baseModelsByTask.value[taskType] || []
+  const newBase = opts[0]?.name || getDefaultBaseModel(taskType)
   createForm.value.base_model = newBase
   createForm.value.model_name = genDefaultModelName(newBase)
 }
@@ -635,6 +646,14 @@ const editStartForm = ref({
   batch_size: 32,
   learning_rate: 0.0001,
 })
+/** v2.5.47: 编辑重提对话框的 task_type — 由原 job 推断, 用于过滤 base_models 候选 */
+const editStartTaskType = ref<string>('classification')
+/** v2.5.47: 编辑重提 base_models 候选 — 按 task_type 过滤, 找不到时回退到 classification */
+const editStartBaseOptions = computed<BaseModelOption[]>(
+  () => baseModelsByTask.value[editStartTaskType.value]
+      || baseModelsByTask.value.classification
+      || []
+)
 
 const openEditAndStartDialog = (row: any) => {
   editStartForm.value = {
@@ -647,6 +666,10 @@ const openEditAndStartDialog = (row: any) => {
     batch_size: row.batch_size,
     learning_rate: row.learning_rate,
   }
+  // v2.5.47: 由原 job 推断 task_type, 让 base_model 下拉只显示该类型可选项
+  // - row.task_type 来自后端 /training/jobs/{id} 接口 (TrainingJob.task_type 字段)
+  // - 推断失败时回退 classification, 避免下拉空白
+  editStartTaskType.value = (row.task_type as string) || 'classification'
   editStartDialogVisible.value = true
 }
 
@@ -1315,8 +1338,10 @@ const datasetNameOf = (id: number) => {
 
 // ============== 生命周期 ==============
 onMounted(async () => {
-  await loadDatasets()
-  await loadJobs()
+  // v2.5.47: 基础模型列表异步加载, 训练对话框渲染前完成
+  // - 与 loadDatasets / loadJobs 并行触发, 互不依赖
+  // - 失败不回滚整页, 训练下拉走 DEFAULT_BASE_MODEL 兜底
+  await Promise.all([loadDatasets(), loadJobs(), loadBaseModels()])
   startSilentRefresh()  // 静默兜底刷新
 })
 
@@ -1815,15 +1840,7 @@ const stopSilentRefresh = () => {
       <TrainingParamsForm
         :form="createForm"
         :datasets="filteredDatasets"
-        :base-models="createFormBaseOptions.map((name) => ({
-          name,
-          framework: createFormTaskType === 'classification' ? 'timm'
-                   : createFormTaskType === 'detection' ? 'ultralytics'
-                   : 'torchvision',
-          params: '',
-          taskTypes: [createFormTaskType],
-          description: '',
-        }))"
+        :base-models="createFormBaseOptions"
         @form-change="(p) => onParamsChange(createForm, p)"
       />
       <el-alert
@@ -1859,7 +1876,7 @@ const stopSilentRefresh = () => {
       <TrainingParamsForm
         :form="editStartForm"
         :datasets="DATASET_OPTIONS"
-        :base-models="BASE_MODELS"
+        :base-models="editStartBaseOptions"
         @form-change="(p) => onParamsChange(editStartForm, p)"
       />
       <template #footer>

@@ -29,21 +29,28 @@
         :label="m.name"
       >
         <div class="base-model-option">
-          <span class="base-model-option__name">{{ m.name }}</span>
-          <span class="base-model-option__meta">
-            <!-- 任务类型标签: 复用 taskType.ts 的元数据, 保证与 Datasets 页面视觉一致 -->
+          <span class="base-model-option__name">
+            {{ m.name }}
+            <!-- v2.5.47: 推荐标识 — 后端 recommended=True 时显示浅色高亮, 引导用户选论文 demo 默认 -->
             <el-tag
-              v-for="t in (m.taskTypes || [])"
-              :key="t"
+              v-if="m.recommended"
+              size="small" type="success" effect="dark"
+              style="margin-left: 6px; font-size: 10px; line-height: 16px; height: 16px; padding: 0 4px;"
+            >推荐</el-tag>
+          </span>
+          <span class="base-model-option__meta">
+            <!-- 任务类型 chip: 单一值, 与后端 /models task_type 字段对齐 -->
+            <el-tag
+              v-if="m.task_type"
               size="small"
-              :type="getTaskTypeMeta(t).type"
+              :type="getTaskTypeMeta(m.task_type).type"
               effect="plain"
               style="margin-left: 4px;"
             >
               <el-icon style="margin-right: 2px; vertical-align: -2px;">
-                <component :is="getTaskTypeMeta(t).icon" />
+                <component :is="getTaskTypeMeta(m.task_type).icon" />
               </el-icon>
-              {{ getTaskTypeMeta(t).label }}
+              {{ getTaskTypeMeta(m.task_type).label }}
             </el-tag>
             <el-tag
               v-if="m.framework"
@@ -75,22 +82,27 @@ import { computed } from 'vue'
 import { getTaskTypeMeta } from '@/utils/taskType'
 
 /**
- * 单个基础模型项的元数据
- * - name:        timm 模型名, 作为选中值
- * - framework:   来源框架 (timm / onnx / 用户自定义 等), 浅蓝标签显示
+ * 单个基础模型项的元数据 (v2.5.47: 与后端 /api/auto-annotate/models 对齐)
+ * - name:        模型名, 作为选中值
+ * - framework:   来源框架 (timm / ultralytics / torchvision 等), 浅蓝标签显示
  * - params:      参数量字符串 (如 "25.6M"), 浅黄标签显示
- * - taskTypes:   适用任务类型, 取自数据集 taskType 枚举 (classification / detection / segmentation),
- *                复用 utils/taskType 的元数据渲染彩色 chip, 与 Datasets 页面视觉一致.
- *                当前 BASE_MODELS 全是 timm 分类 backbone, 所以全为 ['classification'],
- *                但保留数组结构以便未来扩展目标检测/分割模型.
+ * - task_type:   适用任务类型 (单一值, 取自后端 /models 字段), 复用 utils/taskType 渲染彩色 chip
+ *                后端返回的 task_type 是字符串而非数组, 与此前 hand-crafted 列表的
+ *                taskTypes[] 不再兼容, 全部统一为单一字符串
  * - description: 适用场景描述, 显示在 el-option 底部, 选中后 el-select 顶部 tooltip 悬停可见
+ * - recommended: 论文 demo 推荐项 (后端 recommended=True), UI 浅绿"推荐"标签提示
+ * - imagenet_top1 / coco_mAP50 / coco_mIoU: 预训练指标, 论文实验用, 此处不在 UI 渲染
  */
 export interface BaseModelOption {
   name: string
   framework?: string
   params?: string
-  taskTypes?: string[]
+  task_type?: 'classification' | 'detection' | 'segmentation' | string
   description?: string
+  recommended?: boolean
+  imagenet_top1?: number
+  coco_mAP50?: number
+  coco_mIoU?: number
 }
 
 const props = withDefaults(defineProps<{
@@ -110,13 +122,13 @@ const selectedModel = computed<BaseModelOption | undefined>(() =>
  * el-select 顶部 tooltip 文本拼接
  * 格式: [任务类型] | [适用场景]
  * - 无 description 时降级为「基础模型, 输出会被归一为「未知」, 谨慎使用」(与 Annotate 一致)
- * - 任务类型用 utils/taskType 的中文 label, 多个用「/」分隔
+ * - 任务类型用 utils/taskType 的中文 label
  */
 const selectedTooltipText = computed<string>(() => {
   const m = selectedModel.value
   if (!m) return '基础模型, 输出会被归一为「未知」, 谨慎使用'
-  const tasks = (m.taskTypes || []).map((t) => getTaskTypeMeta(t).label).join(' / ')
-  const taskLine = tasks ? `任务类型: ${tasks}` : ''
+  const t = m.task_type ? getTaskTypeMeta(m.task_type).label : ''
+  const taskLine = t ? `任务类型: ${t}` : ''
   const descLine = m.description ? `适用: ${m.description}` : ''
   if (taskLine && descLine) return `${taskLine}\n${descLine}`
   return taskLine || descLine || '基础模型, 输出会被归一为「未知」, 谨慎使用'
