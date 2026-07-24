@@ -84,9 +84,15 @@
  * 3 个任务类型的指导文案定义
  * - 静态数据, 与后端 / 前端 state 解耦
  * - 任何一条文案修改只动本文件, 不影响业务逻辑
+ *
+ * v2.5.46 扩展: 每个任务的 section 进一步细化
+ * - 「置信度阈值」section: 解释 AI 预标注阈值的工作机制与调参建议
+ * - 「IoU 阈值」section (仅检测): 解释 NMS 中 IoU 的作用
+ * - 「本会话统计」section: 解释顶部 6 张统计卡的含义
+ * - 「工具模式」section (仅分割): 解释画刷/橡皮/查看模式差异
  */
 import { computed, nextTick, ref, watch } from 'vue'
-import { InfoFilled, Aim, Brush, View, List, Histogram, Key } from '@element-plus/icons-vue'
+import { InfoFilled, Aim, Brush, View, List, Histogram, Key, SetUp, DataLine, MagicStick, Crop } from '@element-plus/icons-vue'
 import { getTaskTypeMeta, type TaskTypeMeta } from '@/utils/taskType'
 
 interface GuideSection {
@@ -129,12 +135,33 @@ const classificationGuide: Guide = {
       ],
     },
     {
+      icon: MagicStick,
+      title: '置信度阈值',
+      lines: [
+        '决定一张图被 AI 自动落标的<strong>最低可信度</strong>',
+        '阈值越高, 越少图被自动标 (但漏标风险低)',
+        '阈值越低, 越多图被自动标 (但需要复核的多)',
+        '<strong>推荐值</strong>: <kbd>0.6</kbd> (冷启动 0.5, 训练后 0.7+)',
+        '调整后会<strong>实时影响</strong> AI 预标注结果, 配合测评功能验证',
+      ],
+    },
+    {
+      icon: DataLine,
+      title: '本会话统计',
+      lines: [
+        '顶部 6 张统计卡, 反映<strong>本工作会话</strong>的标注效率',
+        '本会话已标 = 确认 + 修正 (两类人工操作合计)',
+        '本会话耗时 = 累计标注用时 (含思考与画框时间)',
+        '估算 AI 节省 = 按 3 秒/张估算, 与累计耗时对比',
+      ],
+    },
+    {
       icon: InfoFilled,
       title: '注意事项',
       lines: [
         '置信度 <strong>≥ 0.8</strong> 时可直接确认',
         '候选均在项目类目外 (基础模型 ImageNet 输出) → 必须人工下拉选',
-        '所有时间成本自动累计到右侧「本次会话统计」',
+        '所有时间成本自动累计到顶部「本会话耗时」',
       ],
     },
   ],
@@ -171,12 +198,42 @@ const detectionGuide: Guide = {
       ],
     },
     {
+      icon: MagicStick,
+      title: '置信度阈值 (检测)',
+      lines: [
+        '控制 AI 自动框的<strong>最低置信度</strong>',
+        '每张图每个 bbox 都有独立置信度 (0~1)',
+        '落标逻辑: <strong>至少 1 个 bbox 置信度 ≥ 阈值</strong>且<strong>类目在项目内</strong>',
+        '推荐值 <kbd>0.4</kbd>~<kbd>0.5</kbd> (检测比分类更宽容, 低阈值配合高 IoU 可获召回)',
+      ],
+    },
+    {
+      icon: Crop,
+      title: 'IoU 阈值 (NMS)',
+      lines: [
+        '<strong>IoU</strong> = 两个框的交并比, 用于<strong>非极大值抑制 (NMS)</strong>',
+        'IoU 高 → 重复框被抑制得更狠, 留下<strong>数量更少但更准</strong>的框',
+        'IoU 低 → 重复框被抑制得少, 留下<strong>数量更多</strong>的框 (可能误检)',
+        '<strong>推荐值</strong>: <kbd>0.45</kbd> (YOLO 默认; 重叠目标用 <kbd>0.6</kbd>+)',
+        '仅 AI 自动预标注生效, 人工画框不受影响',
+      ],
+    },
+    {
       icon: List,
       title: '智能建议',
       lines: [
         '<strong>智能建议</strong>: 来自后端 v2.2 跨图统计, 自动推荐本图可能的目标',
         '<strong>跨图复制</strong>: 复制同数据集其它图的 bbox 位置作为参考',
         '不满意建议 → 点「忽略建议」, 自行标注',
+      ],
+    },
+    {
+      icon: DataLine,
+      title: '本会话统计',
+      lines: [
+        '顶部 6 张统计卡, 反映<strong>本工作会话</strong>的标注效率',
+        '本会话已标 = 确认 + 修正的<strong>图数</strong> (不是 bbox 数)',
+        '本会话耗时 = 累计标注用时 (画框 + 调整 + 保存)',
       ],
     },
     {
@@ -199,15 +256,25 @@ const segmentationGuide: Guide = {
   subtitle: '像素级区域分割 + 类别标注',
   sections: [
     {
-      icon: Brush,
+      icon: Aim,
       title: '工作流程',
       lines: [
-        '① 选择工具<strong>模式</strong> (画刷/橡皮/查看)',
+        '① 选择<strong>工具模式</strong> (画刷/橡皮/查看)',
         '② 选择<strong>画刷类别</strong> (要标注的目标类别)',
         '③ 调整<strong>笔刷大小</strong> (2~40px)',
         '④ 在目标区域<strong>按住鼠标涂抹</strong>, 释放停止',
         '⑤ 误涂区域切到<strong>橡皮</strong>擦除像素',
         '⑥ 满意后点<kbd>保存</kbd>提交 PNG mask',
+      ],
+    },
+    {
+      icon: SetUp,
+      title: '工具模式',
+      lines: [
+        '<strong>画刷 (B)</strong>: 在目标区域<strong>写入</strong>当前类别的像素',
+        '<strong>橡皮 (E)</strong>: 擦除<strong>任意类别</strong>的像素, 恢复为背景 (0)',
+        '<strong>查看 (V)</strong>: <strong>只读</strong>模式, 可拖动画布/缩放, 不修改像素',
+        '模式切换保留笔刷大小设置, 避免重复调参',
       ],
     },
     {
@@ -221,12 +288,31 @@ const segmentationGuide: Guide = {
       ],
     },
     {
+      icon: MagicStick,
+      title: '置信度阈值 (分割)',
+      lines: [
+        '分割任务的置信度 = 像素维 softmax 的<strong>最大值</strong>',
+        '落标逻辑: <strong>max_softmax ≥ 阈值</strong>即自动标为 ai_labeled',
+        '但即使未达阈值, mask 仍会写入供人工精修, 避免重复推理',
+        '<strong>推荐值</strong>: <kbd>0.5</kbd>~<kbd>0.7</kbd> (分割边界模糊, 阈值不宜过高)',
+      ],
+    },
+    {
       icon: Histogram,
       title: '像素与图层',
       lines: [
         'mask 存为<strong>单通道 PNG</strong>, 像素值 = 类别 ID',
         '前端按画刷类别动态染色 (与右侧调色板一致)',
         '<strong>未保存</strong> 状态下, 离开页面会<strong>自动保存</strong>',
+      ],
+    },
+    {
+      icon: DataLine,
+      title: '本会话统计',
+      lines: [
+        '顶部 6 张统计卡, 反映<strong>本工作会话</strong>的标注效率',
+        '本会话已标 = 确认 + 修正的<strong>图数</strong> (mask 完整保存即算)',
+        '本会话耗时 = 累计涂抹 + 精修 + 保存用时',
       ],
     },
     {

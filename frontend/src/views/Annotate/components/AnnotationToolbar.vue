@@ -196,16 +196,40 @@
               <el-option v-for="m in DETECTION_MODELS" :key="m" :value="m" :label="m" />
             </el-select>
           </el-tooltip>
+          <!-- v2.5.46: 分割预训练下拉 (torchvision COCO 21 类, 替换原 disabled 占位)
+               数据源: models prop (后端 /api/auto-annotate/models 同步追加 3 个 torchvision 项)
+               由 useAutoAnnotate 同步调 /api/auto-annotate/run-segmentation-pretrained -->
+          <el-tooltip
+            v-else-if="currentTaskTypeRaw === 'segmentation'"
+            content="torchvision 预训练 (COCO 21 类), 输出仅与项目类目重合时落标" placement="top"
+          >
+            <el-select
+              :model-value="segmentationModelName"
+              @update:model-value="(v: string) => emit('segmentation-model-change', v)"
+              placeholder="选择 torchvision 分割模型" class="app-select" style="width: 260px;"
+              :fit-input-width="false" popper-class="app-select-dropdown"
+            >
+              <el-option
+                v-for="m in models.filter((mm: any) => mm.task_type === 'segmentation')"
+                :key="m.name" :value="m.name" :label="`${m.name} (${m.params})`"
+              >
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <el-tag v-if="m.framework" size="small" type="info" effect="plain">{{ m.framework }}</el-tag>
+                  <span>{{ m.name }}</span>
+                  <span style="color: #909399; font-size: 12px;">({{ m.params }})</span>
+                </div>
+              </el-option>
+            </el-select>
+          </el-tooltip>
           <el-tooltip
             v-else
-            content="分割任务暂未提供预训练模型自动标注, 请训练项目 fine-tune 模型" placement="top"
+            content="未知任务类型, 请刷新页面" placement="top"
           >
             <el-select
               :model-value="null"
               disabled
-              placeholder="暂无可用预训练分割模型"
+              placeholder="未知任务"
               class="app-select" style="width: 260px;"
-              :fit-input-width="false" popper-class="app-select-dropdown"
             />
           </el-tooltip>
         </el-form-item>
@@ -262,6 +286,8 @@ const props = defineProps({
   threshold: { type: Number, required: true },
   iouThreshold: { type: Number, required: true },
   detectionModelName: { type: String, required: true },
+  /** v2.5.46: 分割预训练模型名 (torchvision COCO 21 类) */
+  segmentationModelName: { type: String, required: true },
   models: { type: Array as PropType<{ id?: number; name: string; base_model?: string; accuracy?: number; framework?: string; params?: string }[]>, required: true },
   finetuneModels: { type: Array as PropType<{ id?: number; name: string; base_model?: string; accuracy?: number; framework?: string; params?: string }[]>, required: true },
   selectedModelId: { type: Number as PropType<number | null>, default: null },
@@ -289,6 +315,8 @@ const emit = defineEmits<{
   (e: 'threshold-change', v: number): void
   (e: 'iou-threshold-change', v: number): void
   (e: 'detection-model-change', v: string): void
+  /** v2.5.46: 分割预训练模型变更 */
+  (e: 'segmentation-model-change', v: string): void
   (e: 'selected-model-change', v: number | null): void
   (e: 'model-name-change', v: string): void
   (e: 'use-finetune-change', v: boolean): void
