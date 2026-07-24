@@ -7,6 +7,11 @@ Segmentation API: Mask 标注 CRUD + 训练/自动标注 (v2.0.0 图像分割)
 - GET    /api/segmentation/masks/{image_id}          拉取单图 mask (二进制流 + 元数据)
 - DELETE /api/segmentation/masks/{mask_id}           删除
 - POST   /api/segmentation/masks/replace             单图 mask 全量替换
+- POST   /api/segmentation/train                    启动分割训练 (Celery)
+- POST   /api/segmentation/auto-annotate            启动自动分割标注 (Celery)
+- GET    /api/segmentation/jobs/{job_id}/progress   老接口 (int job_id)
+- GET    /api/segmentation/progress/{task_id}       v2.5.35 新增 (Celery UUID, REST)
+- GET    /api/segmentation/progress/stream/{task_id} v2.5.35 新增 (Celery UUID, SSE)
 
 约定:
 - mask 物理存储: PNG 索引图 (P-mode, L-mode 也可), 像素值 = 类别索引
@@ -14,17 +19,25 @@ Segmentation API: Mask 标注 CRUD + 训练/自动标注 (v2.0.0 图像分割)
 - mask_path 相对 UPLOAD_DIR, 写入 storage_service
 - 仅 segmentation 数据集允许操作
 - 一张图唯一一条 mask (UNIQUE image_id)
+
+v2.5.35 关键修复:
+- 前端 segmentationApi.progress 调 /api/segmentation/progress/{taskId} (Celery UUID),
+  老接口只支持 int job_id → 永远 404. 新增与前端路径对齐的端点.
+- auto_annotate_segmentation_task 不写 TrainingJob, 进度端点必须支持
+  「DB 没记录就回退到 Celery result.info」路径.
 """
 import io
+import json
+import asyncio
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_user_optional_for_query
 from app.core.celery_utils import check_celery_available as _check_celery_available
 from app.models.user import User
 from app.models.image import Image
@@ -459,3 +472,182 @@ async def get_segmentation_job_progress(
         "duration_seconds": job.duration_seconds,
         "model_version_id": job.model_version_id,
     }
+
+
+# ============== v2.5.35 新增: 与前端 segmentationApi 路径对齐的进度端点 ==============
+# 前端 segmentationApi.progress 调 GET /api/segmentation/progress/{taskId} (Celery UUID).
+# 老的 /jobs/{job_id}/progress 端点保留 (int TrainingJob id), 但前端轮询走新端点.
+
+async def _resolve_segmentation_task_progress(task_id: str) -> dict:
+    """统一解析 Celery task_id -> 进度 dict, 同时覆盖训练 + 自动标注两种来源.
+
+    优先级:
+    1. TrainingJob 表 (训练任务走的是 _create_job 路径, celery_task_id 是主键索引列)
+    2. Celery AsyncResult (auto_annotate_segmentation_task 不写 TrainingJob, 只走 update_state)
+    """
+    from celery.result import AsyncResult
+    from app.database import AsyncSessionLocal
+
+    db_row = None
+    try:
+        async with AsyncSessionLocal() as db:
+            db_row = (await db.execute(
+                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+            )).scalar_one_or_none()
+    except Exception:
+        db_row = None
+
+    celery_state = "PENDING"
+    celery_info: dict = {}
+    celery_result_payload = None
+    try:
+        result = AsyncResult(task_id)
+        try:
+            celery_state = result.state
+        except Exception:
+            celery_state = "PENDING"
+        try:
+            raw = result.info
+            if isinstance(raw, dict):
+                celery_info = raw
+        except Exception:
+            celery_info = {}
+        try:
+            if celery_state == "SUCCESS":
+                celery_result_payload = result.result
+        except Exception:
+            celery_result_payload = None
+    except Exception:
+        pass
+
+    if db_row is not None:
+        state = db_row.state or celery_state
+        progress = float(db_row.progress) if db_row.progress is not None else float(celery_info.get("progress", 0))
+        message = db_row.message or celery_info.get("msg") or celery_info.get("info") or ""
+        if db_row.error and not message:
+            message = db_row.error[:200]
+        return {
+            "task_id": task_id,
+            "state": state,
+            "progress": round(progress, 2),
+            "message": message,
+            "current_epoch": getattr(db_row, "current_epoch", None),
+            "total_epochs": db_row.epochs,
+            "started_at": db_row.started_at.isoformat() if db_row.started_at else None,
+            "finished_at": db_row.finished_at.isoformat() if db_row.finished_at else None,
+            "duration_seconds": db_row.duration_seconds,
+            "data_total": db_row.data_total,
+            "data_train": db_row.data_train,
+            "data_val": db_row.data_val,
+            "num_classes": db_row.num_classes,
+            "class_names": db_row.class_names,
+            "model_version_id": db_row.model_version_id,
+            "job_id": db_row.id,
+            "source": "db",
+        }
+
+    return {
+        "task_id": task_id,
+        "state": celery_state,
+        "progress": round(float(celery_info.get("progress", 0)), 2),
+        "message": celery_info.get("msg") or celery_info.get("info") or "",
+        "current_epoch": celery_info.get("current_epoch") or celery_info.get("epoch"),
+        "total_epochs": celery_info.get("total_epochs"),
+        "result": celery_result_payload if isinstance(celery_result_payload, dict) else None,
+        "source": "celery" if celery_state != "PENDING" else "unknown",
+    }
+
+
+@router.get("/progress/{task_id}")
+async def get_segmentation_progress(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    拉取 segmentation 任务进度 (REST 轮询)
+
+    v2.5.35 新增: 与前端 segmentationApi.progress 路径对齐
+    """
+    return await _resolve_segmentation_task_progress(task_id)
+
+
+@router.get("/progress/stream/{task_id}")
+async def stream_segmentation_progress(
+    task_id: str,
+    request: Request,
+    token: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_user_optional_for_query),
+):
+    """
+    SSE 实时推送 segmentation 任务进度 (v2.5.35 新增)
+    """
+    if current_user is None:
+        raise HTTPException(401, "未授权: 需要有效的 access_token (query ?token= 或 Authorization header)")
+
+    SSE_SEG_POLL_INTERVAL = 1.0
+
+    async def event_gen():
+        last_signature: Optional[tuple] = None
+        try:
+            yield f": connected task_id={task_id}\n\n"
+        except Exception:
+            return
+
+        while True:
+            try:
+                if await request.is_disconnected():
+                    break
+            except Exception:
+                break
+
+            try:
+                data = await _resolve_segmentation_task_progress(task_id)
+            except Exception as e:
+                data = {
+                    "task_id": task_id,
+                    "state": "FAILURE",
+                    "progress": 0.0,
+                    "message": f"进度查询失败: {type(e).__name__}: {str(e)[:200]}",
+                }
+
+            payload = {
+                "task_id": data["task_id"],
+                "state": data["state"],
+                "progress": data["progress"],
+                "message": data["message"],
+            }
+            for k in ("current_epoch", "total_epochs",
+                      "data_total", "data_train", "data_val",
+                      "num_classes", "class_names", "model_version_id",
+                      "started_at", "finished_at", "duration_seconds", "source"):
+                v = data.get(k)
+                if v is not None:
+                    payload[k] = v
+            if data.get("result") and isinstance(data["result"], dict):
+                for k in ("status", "total", "auto_labeled", "no_match"):
+                    if k in data["result"]:
+                        payload.setdefault(k, data["result"][k])
+
+            signature = (payload["state"], round(payload["progress"], 1), payload["message"])
+            if signature != last_signature:
+                yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                last_signature = signature
+
+            if payload["state"] in ("SUCCESS", "FAILURE", "REVOKED"):
+                try:
+                    yield "event: end\ndata: {}\n\n"
+                except Exception:
+                    pass
+                break
+
+            await asyncio.sleep(SSE_SEG_POLL_INTERVAL)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

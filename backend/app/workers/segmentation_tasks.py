@@ -35,6 +35,13 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
 from app.config import settings
 
+# ---- v2.5.29: ultralytics 路径强制覆盖 (与 detection_tasks.py / tasks.py 一致) ----
+# 分割训练本身不用 YOLO, 但 ai_service 加载 timm 模型时若误用 ultralytics 也会
+# 受影响; 统一在 worker 启动时锁路径, 避免 ultralytics 把 yolov8*.pt 落到 cwd.
+from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+configure_ultralytics()
+migrate_legacy_yolo_weights()
+
 
 def _set_task_state(self, state: str, meta: dict):
     if state == "FAILURE" and "exc_type" not in meta:
