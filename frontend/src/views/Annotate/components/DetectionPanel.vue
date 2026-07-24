@@ -191,17 +191,25 @@
          · 之前: 用户在「清空全部」后 bboxList.length=0, 保存按钮被禁用,
          ·       无法把"删除所有 bbox"的 dirty 状态提交到后端, 旧标注仍在 DB
          · 现在: dirty 即可点保存, saveDetectionBBoxes 会先调 clearBBoxes
-         ·       再以空列表循环 0 次, 实际语义为「从数据库删除全部标注」 -->
+         ·       再以空列表循环 0 次, 实际语义为「从数据库删除全部标注」
+         v2.5.39: 彻底移除 disabled 视觉态, 按钮始终看起来可点
+         · 之前: !detDirty 时按钮灰显, 用户反馈「禁止点击」语义不友好
+         · 现在: 始终保持 primary 高亮, 点击时由 handleSaveClick 自行判断:
+         ·       - dirty=true → 正常走 saveDetectionBBoxes 流程
+         ·       - dirty=false → ElMessage.info 提示「当前无修改, 无需保存」,
+         ·         不会向后端发送任何请求 (避免误删后端已保存的 bbox)
+         ·       - annotatorSaving=true → 仍 disabled, 防重复提交
+         · 文本动态: bboxList=0 时显示「保存 (清空全部)」, 明确告知语义 -->
     <div class="op-section">
       <div class="op-section-title">5. 提交</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
         <el-button
           type="primary"
           :icon="Check"
-          :disabled="!detDirty || annotatorSaving"
+          :disabled="annotatorSaving"
           :loading="annotatorSaving"
           style="flex: 1;"
-          @click="emit('save')"
+          @click="handleSaveClick"
         >{{ bboxList.length === 0 ? '保存 (清空全部)' : `保存 (${bboxList.length})` }}</el-button>
       </div>
     </div>
@@ -289,6 +297,26 @@ function onTargetCategoryChange(catId: number | null) {
   emit('target-category-change', catId)
   // 同步给子组件 (直接更新 ref.value, 但 ref 是父组件传入的)
   // 父组件通过监听 emit 后调用子组件方法
+}
+
+/**
+ * v2.5.39: 保存按钮的智能点击包装
+ * - 取代原先 `:disabled="!detDirty || annotatorSaving"` 的双重禁用
+ * - 目的: 让保存按钮始终保持 primary 高亮态 (用户不再看到「禁止点击」的灰显),
+ *         但通过点击时的 dirty 判断避免无修改时点保存会误删后端 bbox
+ * - 行为:
+ *   1) annotatorSaving=true: 由 :disabled 控制, 此函数不会被触发
+ *   2) detDirty=true: 正常 emit('save'), 走 saveDetectionBBoxes 流程
+ *      (含 bboxList=0 时的「清空全部」语义)
+ *   3) detDirty=false: 提示「当前无修改, 无需保存」, 不发任何请求
+ *      (防止 parent 的 saveDetectionBBoxes 先调 clearBBoxes 误删后端已有标注)
+ */
+function handleSaveClick() {
+  if (!props.detDirty) {
+    ElMessage.info('当前无修改, 无需保存')
+    return
+  }
+  emit('save')
 }
 </script>
 
