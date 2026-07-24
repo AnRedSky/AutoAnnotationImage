@@ -62,7 +62,7 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     - 写入 TrainingJob 任务历史
     """
     from app.ml.train import run_training, TrainingPaused
-    from app.services import TrainingLifecycleService
+    from app.services import TrainingLifecycleService, TrainingDataService
 
     task_id = self.request.id
     started_at = datetime.utcnow()
@@ -142,6 +142,7 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         pass
 
     try:
+        # v3.0.0 Phase 5: 注入 TrainingDataService 解耦 ML ↔ DB
         result = run_training(
             dataset_id=dataset_id,
             base_model=base_model,
@@ -153,6 +154,8 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             epoch_callback=epoch_cb,
             pause_check=pause_check,
             pretrained_model_path=pretrained_model_path,
+            data_loader=TrainingDataService.load_classification_samples_sync,
+            model_saver=TrainingDataService.save_classification_model_version_sync,
         )
 
         # ---- 2) TrainingJob SUCCESS (委托 Service) ----

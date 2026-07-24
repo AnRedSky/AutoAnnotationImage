@@ -54,6 +54,7 @@ from app.services.auth_service import AuthService
 from app.services.auto_annotate_service import AutoAnnotateService, AutoAnnotateResult, ASYNC_THRESHOLD
 # v3.0.0 Phase 5 新增
 from app.services.training_lifecycle_service import TrainingLifecycleService
+from app.services.training_data_service import TrainingDataService
 
 __all__ = [
     # 工具服务

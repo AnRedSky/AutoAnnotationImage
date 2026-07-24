@@ -15,7 +15,7 @@ from torchvision import transforms
 from PIL import Image
 
 from app.config import settings
-from app.core.celery_utils import run_async_in_worker as _run_async
+# v3.0.0 Phase 5: ML 模块不再直接 import app.core.celery_utils (DB IO 已委托给 service)
 
 
 def collect_device_info() -> Dict[str, Any]:
@@ -140,6 +140,8 @@ def run_training(
     warmup_epochs: int = 1,
     pause_check: Optional[Callable[[], bool]] = None,
     pretrained_model_path: Optional[str] = None,
+    data_loader: Optional[Callable[[int], Dict]] = None,
+    model_saver: Optional[Callable[..., int]] = None,
 ) -> Dict:
     """
     完整训练流程 (同步, 在 Celery worker 中执行)
@@ -159,12 +161,21 @@ def run_training(
             - None (默认): 从 timm ImageNet 预训练权重开始 (从头微调)
             - 已有路径: 加载该 .pth 的 state_dict 作为模型起点 (增量训练, fine-tune 旧模型)
             - 详见 _load_model_state 方法
+        data_loader: 可选, 训练数据加载回调 (v3.0.0 Phase 5 新增)
+            - 签名: (dataset_id: int) -> Dict[samples, label_name_to_idx, num_classes, ...]
+            - 默认: 内部 DB IO (向后兼容, 走 app.models)
+            - 推荐: 注入 TrainingDataService.load_classification_samples_sync
+        model_saver: 可选, ModelVersion 保存回调 (v3.0.0 Phase 5 新增)
+            - 签名: (**kwargs) -> int (ModelVersion.id)
+            - 默认: 内部 DB IO (向后兼容)
+            - 推荐: 注入 TrainingDataService.save_classification_model_version_sync
     """
-    from app.database import AsyncSessionLocal
-    from app.models.image import Image
-    from app.models.category import Category
-    from app.models.model_version import ModelVersion
-    from sqlalchemy import select
+    # v3.0.0 Phase 5: 注入数据加载 / 模型保存回调 (ML 解耦)
+    # 若调用方未提供, 用默认实现 (内部走 app.models/app.database, 向后兼容)
+    if data_loader is None:
+        data_loader = _default_classification_data_loader
+    if model_saver is None:
+        model_saver = _default_classification_model_saver
 
     # ---- 核心: 自动选择最佳训练设备 (优先 GPU, 其次 MPS, 兜底 CPU) ----
     # 1) 采集设备硬件信息 (device_name / cuda / 显存 / CPU 核数 / RAM)
@@ -183,84 +194,16 @@ def run_training(
         except Exception:
             pass
 
-    async def _load_data():
-        async with AsyncSessionLocal() as db:
-            # 加载已确认标注的图片
-            # 可训练状态:
-            #   - human_confirmed / human_corrected: 人工确认/修正 (生产主流程)
-            #   - ai_labeled: AI 自动标注 (演示/快速验证场景, 用户主动接受 AI 标签即可训练)
-            #
-            # 用 LEFT JOIN 兼容 final_label_id=NULL 的 "孤儿" ai_labeled 图 (老数据, 当年
-            # auto-label 还没写 final_label_id 字段), 走 ai_prediction.top1 回查 Category
-            # 并 in-place 回填 final_label_id. 这样训练不会因为一两条历史脏数据而失败.
-            stmt = (
-                select(Image, Category)
-                .outerjoin(Category, Image.final_label_id == Category.id)
-                .where(
-                    Image.dataset_id == dataset_id,
-                    Image.status.in_(["human_confirmed", "human_corrected", "ai_labeled"]),
-                )
-            )
-            results = (await db.execute(stmt)).all()
-            categories = {
-                c.id: c.name
-                for c in (await db.execute(
-                    select(Category).where(Category.dataset_id == dataset_id)
-                )).scalars().all()
-            }
-
-            # 收集需要回填 final_label_id 的 ai_labeled 孤儿图, 一次写回
-            orphans_to_backfill: list[tuple[int, int]] = []  # (image_id, category_id)
-            for img, cat in results:
-                if cat is None and img.status == "ai_labeled" and img.ai_prediction:
-                    top1 = (img.ai_prediction or {}).get("top1")
-                    if top1 and top1 in categories.values():
-                        cat_id = next(
-                            cid for cid, cname in categories.items() if cname == top1
-                        )
-                        orphans_to_backfill.append((img.id, cat_id))
-            if orphans_to_backfill:
-                from app.models.image import Image as _Image
-                for img_id, cat_id in orphans_to_backfill:
-                    img_row = await db.get(_Image, img_id)
-                    if img_row and img_row.final_label_id is None:
-                        img_row.final_label_id = cat_id
-                try:
-                    await db.commit()
-                except Exception:
-                    await db.rollback()
-        return results, categories
-
-    image_label_pairs, categories = _run_async(_load_data())
-    # 训练最低门槛: 至少 2 张已标注图片 (冷启动兜底 — 用户拿到第一个 fine-tune 模型即可
-    # 再回过头来用此模型做预标注扩充数据). 显式提示差几张 + 哪几种状态被纳入统计,
-    # 让用户知道下一步该做什么 (人工标注 / 跑 AI 预标注 / 确认 AI 标签).
-    n = len(image_label_pairs)
-    if n < 2:
-        raise ValueError(
-            f"已标注图片不足: 当前 {n} 张 (需 ≥2). "
-            f"状态纳入: human_confirmed / human_corrected / ai_labeled. "
-            f"建议: 1) 在标注工作台手工标注几张, 或 2) 启动 AI 预标注 (会基于 ImageNet 基础模型回退). "
-            f"数据集中在数 AI 预标注后请到标注工作台点击「确认」将状态从 ai_labeled 升级到 human_confirmed."
-        )
-
-    # 构建 (path, label_idx) 列表
-    # - 过滤掉 LEFT JOIN 后 cat is None 的孤儿图 (回填失败的 ai_labeled, ai_prediction.top1
-    #   不在项目类目内, 或 ai_prediction 本身就为空)
-    # - 过滤掉磁盘文件丢失的图
-    label_name_to_idx = {name: i for i, name in enumerate(sorted(set(categories.values())))}
-    samples = []
-    skipped_orphan = 0
-    skipped_missing = 0
-    for img, cat in image_label_pairs:
-        if cat is None:
-            skipped_orphan += 1
-            continue
-        full_path = settings.UPLOAD_DIR / img.storage_path
-        if not full_path.exists():
-            skipped_missing += 1
-            continue
-        samples.append((str(full_path), label_name_to_idx[cat.name]))
+    # ---- v3.0.0 Phase 5: 数据加载委托给注入的 data_loader ----
+    # 默认实现 (_default_classification_data_loader) 内部走 app.models
+    # 推荐由 Worker 注入 TrainingDataService.load_classification_samples_sync
+    data = data_loader(dataset_id)
+    samples = data["samples"]
+    label_name_to_idx = data["label_name_to_idx"]
+    num_classes = data["num_classes"]
+    skipped_orphan = data.get("skipped_orphan", 0)
+    skipped_missing = data.get("skipped_missing", 0)
+    n = data.get("total_before_filter", len(samples) + skipped_orphan + skipped_missing)
     # 若回填/过滤后样本不够, 重新检查
     if len(samples) < 2:
         raise ValueError(
@@ -483,29 +426,19 @@ def run_training(
 
     # 持久化到数据库 (创建 ModelVersion 记录, is_active 默认为 False)
     # 激活操作由前端通过 POST /api/models/{id}/activate 触发, 保证互斥
-    async def _save_model_version():
-        async with AsyncSessionLocal() as db:
-            from app.models.model_version import ModelVersion
-            mv = ModelVersion(
-                name=model_name,
-                base_model=base_model,
-                dataset_id=dataset_id,
-                num_classes=num_classes,
-                file_path=str(model_path),
-                accuracy=best_acc,
-                precision=report.get("macro avg", {}).get("precision", 0),
-                recall=report.get("macro avg", {}).get("recall", 0),
-                f1_score=report.get("macro avg", {}).get("f1-score", 0),
-                training_log=history,
-                confusion_matrix=cm.tolist() if hasattr(cm, "tolist") else cm,
-                is_active=False,  # 不再自动激活, 需通过 API 显式激活
-            )
-            db.add(mv)
-            await db.commit()
-            await db.refresh(mv)
-            return mv.id
-
-    new_model_version_id = _run_async(_save_model_version())
+    # v3.0.0 Phase 5: 委托给注入的 model_saver
+    new_model_version_id = model_saver(
+        name=model_name,
+        base_model=base_model,
+        dataset_id=dataset_id,
+        num_classes=num_classes,
+        file_path=str(model_path),
+        accuracy=best_acc,
+        report=report,
+        history=history,
+        confusion_matrix=cm,
+        device_info=final_device_info,
+    )
 
     # 关键: 转换 numpy → python 原生类型, 否则 Celery 序列化 result 时
     # 会报 "Object of type ndarray is not JSON serializable", 把已成功
@@ -538,3 +471,23 @@ def run_training(
         "device_type": str(device_info.get("device_type", "cpu")),
         "device_info": final_device_info,
     }
+
+
+# ============== 默认 data_loader / model_saver 实现 (v3.0.0 Phase 5) ==============
+# 当 run_training 调用方未注入回调时, 用这两个默认实现 (内部走 app.models/app.database).
+# 推荐 Worker 注入 TrainingDataService 的实现 (解耦 ML ↔ DB).
+
+def _default_classification_data_loader(dataset_id: int) -> Dict:
+    """默认分类数据加载 (向后兼容, 内部走 app.models)
+
+    v3.0.0 Phase 5 重构: 等价于 TrainingDataService.load_classification_samples,
+    保留为默认 fallback, 让 ML 模块在未注入回调时仍可独立运行.
+    """
+    from app.services.training_data_service import TrainingDataService
+    return TrainingDataService.load_classification_samples_sync(dataset_id)
+
+
+def _default_classification_model_saver(**kwargs) -> int:
+    """默认 ModelVersion 保存 (向后兼容, 内部走 app.models)"""
+    from app.services.training_data_service import TrainingDataService
+    return TrainingDataService.save_classification_model_version_sync(**kwargs)
