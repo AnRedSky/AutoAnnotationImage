@@ -29,6 +29,10 @@ v2.5.35 关键修复:
 - auto_annotate_detection_task 不写 TrainingJob, 因此 progress 端点
   必须支持"DB 没记录就回退到 Celery result.info"路径.
 - 强制单激活不变量: 同 dataset 激活时, 把其他 is_active=True 置 False.
+
+v3.0.0 Phase 4 重构:
+- replace_image_bboxes: 业务下沉到 DetectionService.replace_bboxes (-32 行)
+- clear_image_bboxes: 业务下沉到 DetectionService.clear_bboxes (-2 行)
 """
 import json
 import asyncio
@@ -55,6 +59,8 @@ from app.schemas.detection import (
 )
 from app.schemas.enums import TaskType, AnnotationSource
 from app.services.bbox_service import validate_normalized_bbox
+# v3.0.0 Phase 4: 业务编排下沉到 Service
+from app.services import DetectionService
 
 router = APIRouter()
 
@@ -162,9 +168,9 @@ async def replace_image_bboxes(
     current_user: User = Depends(get_current_user),
 ):
     """
-    单图 BBox 全量替换 (核心交互: 人工确认 / 修正 AI 预标注)
+    单图 BBox 全量替换 (核心交互: 人工确认 / 修正 AI 预标注) - v3.0.0 Phase 4 thin wrapper
 
-    语义:
+    业务规则 (全部在 Service):
     - DELETE 该 image_id 下所有现有 BBox
     - INSERT items 中所有 BBox (annotated_by = current_user)
     - 一次 commit, 事务内完成
@@ -173,9 +179,8 @@ async def replace_image_bboxes(
     """
     img = await _ensure_detection_image(image_id, db)
 
-    # 1) 校验所有 category_id
+    # 校验坐标 (Service 校验 category 归属)
     for it in items:
-        await _validate_category(it.category_id, img.dataset_id, db)
         try:
             validate_normalized_bbox(
                 it.x_min, it.y_min, it.x_max, it.y_max,
@@ -183,31 +188,12 @@ async def replace_image_bboxes(
         except ValueError as e:
             raise HTTPException(400, f"坐标非法: {e}")
 
-    # 2) 删除原有 bbox
-    existing = (await db.execute(
-        select(BBoxAnnotation).where(BBoxAnnotation.image_id == image_id)
-    )).scalars().all()
-    for old in existing:
-        await db.delete(old)
+    # 委托 Service (v3.0.0 Phase 4)
+    await DetectionService.replace_bboxes(
+        db, img, [it.model_dump() for it in items], user_id=current_user.id,
+    )
 
-    # 3) 写入新 bbox
-    new_boxes: List[BBoxAnnotation] = []
-    for it in items:
-        src = it.source or AnnotationSource.HUMAN.value
-        bb = BBoxAnnotation(
-            image_id=image_id,
-            category_id=it.category_id,
-            x_min=it.x_min, y_min=it.y_min,
-            x_max=it.x_max, y_max=it.y_max,
-            confidence=it.confidence,
-            source=src,
-            annotated_by=current_user.id,
-        )
-        db.add(bb)
-        new_boxes.append(bb)
-    await db.commit()
-
-    # 4) 重新拉取 (拿到 id / 时间戳)
+    # 重新拉取 (拿到 id / 时间戳)
     rows = (await db.execute(
         select(BBoxAnnotation)
         .where(BBoxAnnotation.image_id == image_id)
@@ -241,16 +227,13 @@ async def clear_image_bboxes(
     current_user: User = Depends(get_current_user),
 ):
     """
-    清空单图全部 BBox 标注
+    清空单图全部 BBox 标注 (v3.0.0 Phase 4: thin wrapper, 业务下沉到 DetectionService.clear_bboxes)
     - 配合前端 DetectionAnnotator 的「重画」流程: 先 clear 旧的, 再 save 新的
     - 必须声明在 /annotations/{bbox_id} 之前, 避免 FastAPI 把 'clear' 解析成 bbox_id
     """
     img = await _ensure_detection_image(image_id, db)
-    result = await db.execute(
-        delete(BBoxAnnotation).where(BBoxAnnotation.image_id == image_id)
-    )
-    await db.commit()
-    return {"image_id": image_id, "cleared": result.rowcount, "success": True}
+    cleared = await DetectionService.clear_bboxes(db, img)
+    return {"image_id": image_id, "cleared": cleared, "success": True}
 
 
 @router.delete("/annotations/{bbox_id}")

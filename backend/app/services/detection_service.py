@@ -237,5 +237,91 @@ class DetectionService:
             return list(result.scalars().all())
         return await list_bbox_by_image(db, image_id)
 
+    # ============== 全量替换 / 清空 (v3.0.0 Phase 4 新增) ==============
+
+    @staticmethod
+    async def replace_bboxes(
+        db: AsyncSession,
+        image: "Image",
+        items: List[Dict[str, Any]],
+        *,
+        user_id: int,
+        commit: bool = True,
+    ) -> List[BBoxAnnotation]:
+        """单图 BBox 全量替换 (v3.0.0 Phase 4: 业务下沉)
+
+        业务规则:
+        1. 删除 image 下所有现有 BBox
+        2. 校验所有 category_id 归属
+        3. 写入新 BBox (annotated_by = user_id)
+        4. 一次 commit, 事务内完成
+        """
+        # 1) 校验 category
+        from app.model.category import Category
+        for it in items:
+            cat_id = it.get("category_id")
+            if cat_id is not None:
+                cat = await db.get(Category, cat_id)
+                if not cat:
+                    raise HTTPException(400, f"Category id={cat_id} not found")
+                if cat.dataset_id != image.dataset_id:
+                    raise HTTPException(
+                        400,
+                        f"Category id={cat_id} 不属于 dataset id={image.dataset_id}",
+                    )
+
+        # 2) 删旧 bbox
+        existing = (await db.execute(
+            select(BBoxAnnotation).where(BBoxAnnotation.image_id == image.id)
+        )).scalars().all()
+        for old in existing:
+            await db.delete(old)
+        if existing:
+            await db.flush()
+
+        # 3) 写新 bbox
+        from app.schemas.enums import AnnotationSource
+        new_boxes: List[BBoxAnnotation] = []
+        for it in items:
+            src = it.get("source") or AnnotationSource.HUMAN.value
+            bb = BBoxAnnotation(
+                image_id=image.id,
+                category_id=it.get("category_id"),
+                x_min=float(it["x_min"]),
+                y_min=float(it["y_min"]),
+                x_max=float(it["x_max"]),
+                y_max=float(it["y_max"]),
+                confidence=it.get("confidence"),
+                source=src,
+                annotated_by=user_id,
+            )
+            db.add(bb)
+            new_boxes.append(bb)
+
+        if commit:
+            await db.commit()
+            for r in new_boxes:
+                await db.refresh(r)
+        return new_boxes
+
+    @staticmethod
+    async def clear_bboxes(
+        db: AsyncSession,
+        image: "Image",
+        *,
+        commit: bool = True,
+    ) -> int:
+        """清空单图全部 BBox (v3.0.0 Phase 4: 业务下沉)
+
+        配合前端 DetectionAnnotator 的「重画」流程: 先 clear 旧的, 再 save 新的
+        """
+        from sqlalchemy import delete as sa_delete
+        result = await db.execute(
+            sa_delete(BBoxAnnotation).where(BBoxAnnotation.image_id == image.id)
+        )
+        if commit:
+            await db.commit()
+        return int(result.rowcount or 0)
+
 
 __all__ = ["DetectionService"]
