@@ -33,13 +33,13 @@ interface EpochData {
 }
 
 // ============== 基础选项 ==============
-// 与后端 /api/auto-annotate/models 保持一致的子集
+// 与后端 /api/auto-annotate/models 保持一致 (任务类型 + 名称)
 // - framework:  来源框架, 在 el-option 显示 (浅蓝标签)
 // - params:     参数量, 在 el-option 显示 (浅黄标签)
 // - taskTypes:  适用任务类型, 取自数据集 taskType 枚举, 由 BaseModelSelect 渲染彩色 chip
 //               (与 Datasets 页面 taskType 视觉一致)
 // - description: 适用场景说明, 在 el-option 底部显示一行小字, 选中后顶部 tooltip 可见
-// 当前 6 个 timm 模型都是 ImageNet 预训练的图像分类 backbone, 所以 taskTypes 全部为 ['classification'].
+// 当前 7 个 timm 模型都是 ImageNet 预训练的图像分类 backbone, 所以 taskTypes 全部为 ['classification'].
 // 保留数组结构以便未来扩展目标检测/分割模型.
 const BASE_MODELS: Array<{ name: string; framework: string; params?: string; taskTypes?: string[]; description?: string }> = [
   { name: 'resnet18',              framework: 'timm', params: '11.7M', taskTypes: ['classification'], description: '轻量级残差网络, 训练快、显存占用低, 适合中小数据集快速实验或 CPU/低端 GPU 部署' },
@@ -48,6 +48,10 @@ const BASE_MODELS: Array<{ name: string; framework: string; params?: string; tas
   { name: 'efficientnet_b3',       framework: 'timm', params: '12.0M', taskTypes: ['classification'], description: 'B0 的精度升级版, 中等规模数据下表现更稳, 适合精度-速度折中的工业分类任务' },
   { name: 'mobilenetv3_large_100', framework: 'timm', params: '5.5M',  taskTypes: ['classification'], description: '移动端优化网络, 延迟极低, 适合边缘设备、嵌入式或 Web 前端推理部署' },
   { name: 'convnext_tiny',         framework: 'timm', params: '28.6M', taskTypes: ['classification'], description: '现代化纯卷积架构, 精度可比 Transformer, 适合数据量充足、追求高精度的训练任务' },
+  // P1.2: 补 vit_small_patch16_224 — 与后端 /auto-annotate/models 对齐
+  // 后端 /models 一直列了这个, 但训练页之前遗漏, 用户在「标注工作台 → 基础模型」分支可选
+  // 但训练页无法选, 前后端不一致
+  { name: 'vit_small_patch16_224', framework: 'timm', params: '22.1M', taskTypes: ['classification'], description: '小型 Vision Transformer, 224 输入, 注意力机制捕获全局依赖, 适合中等规模数据集与精度敏感任务' },
 ]
 
 // ============== 表格多选 + 批量操作 ==============
@@ -367,13 +371,15 @@ const createForm = ref({
 // S7 新增: 当前选中数据集的 task_type, 用于按任务类型切换默认 base_model
 const createFormTaskType = ref<string>('classification')
 // S7 新增: 任务类型 -> base_model 候选列表 (UI 直接枚举, 避免每次请求后端)
-// - classification: timm ImageNet 6 个
-// - detection:     yolov8n/s/m/l/x (ultralytics 标准)
-// - segmentation:  deeplabv3_resnet50 / deeplabv3_resnet101 (torchvision)
+// - classification: timm ImageNet 7 个 (与 BASE_MODELS 同步, 见 P1.2 注释)
+// - detection:     yolov8n/s/m/l/x (ultralytics 标准 5 个, 与后端 detection.py:441 对齐)
+// - segmentation:  fcn_resnet50 / deeplabv3_resnet50 / deeplabv3_resnet101 (torchvision 3 个)
 const BASE_MODELS_BY_TASK: Record<string, string[]> = {
   classification: BASE_MODELS.map((m) => m.name),
   detection: ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x'],
-  segmentation: ['deeplabv3_resnet50', 'deeplabv3_resnet101'],
+  // P1.1 修复: 补 fcn_resnet50 — 与后端 seg_train.py:_build_model 能力对齐
+  // 此前训练页只有 2 个, 后端 /auto-annotate/models 已列 3 个, 缺 1 个造成不一致
+  segmentation: ['fcn_resnet50', 'deeplabv3_resnet50', 'deeplabv3_resnet101'],
 }
 /** 当前 task_type 对应的 base_model 下拉选项 (空数组兜底) */
 const createFormBaseOptions = computed(
