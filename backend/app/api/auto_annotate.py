@@ -216,24 +216,46 @@ async def get_task_status(
 @router.get("/models")
 async def list_available_models(current_user: User = Depends(get_current_user)):
     """
-    列出系统支持的 timm 模型（论文核心实验用）
-    framework: 模型来源框架（统一为 timm，便于前端展示标注）
+    列出系统支持的基础预训练模型 (论文核心实验用)
 
-    v2.5.46 新增: 追加 torchvision 预训练分割模型 (COCO 21 类), 用于标注工作台
-    「基础模型」分支 (AnnotationToolbar segmentation + useFinetune=OFF)。
-    前端按 task_type 字段过滤显示。
+    按 task_type 字段分组:
+    - classification: timm ImageNet 预训练 (整图级)
+    - detection:     ultralytics YOLOv8 COCO 80 类 (目标级)
+    - segmentation:  torchvision COCO 21 类 (像素级)
+
+    架构说明:
+    - 三个后端目录 (train.py / yolo_train.py / seg_train.py) 各自负责对应 task_type 的训练与推理
+    - 该接口是「单一权威」: 标注工作台基础模型下拉 + 训练页参考都从这拉
+    - 前端按 task_type 字段过滤显示, 避免出现"任务类型不匹配的基础模型"
+    - task_type 必填, 不允许 null (缺省 classification)
+    - recommended=True 是论文 demo 默认推荐项 (1-3 个)
     """
     return {
         "models": [
+            # ----- classification: timm ImageNet -----
             {"name": "resnet50",              "params": "25.6M", "imagenet_top1": 76.1, "framework": "timm",       "task_type": "classification", "recommended": True},
             {"name": "efficientnet_b0",       "params": "5.3M",  "imagenet_top1": 77.1, "framework": "timm",       "task_type": "classification", "recommended": True},
             {"name": "convnext_tiny",         "params": "28.6M", "imagenet_top1": 82.1, "framework": "timm",       "task_type": "classification", "recommended": True},
-            {"name": "mobilenetv3_small",     "params": "2.5M",  "imagenet_top1": 67.5, "framework": "timm",       "task_type": "classification", "recommended": False},
+            # P0.1: 命名对齐 — 训练页 Training/index.vue 用的是 mobilenetv3_large_100
+            # (top1 ≈ 75.0, 与 mobilenetv3_small 67.5 差距明显, large_100 更具代表性)
+            {"name": "mobilenetv3_large_100", "params": "5.5M",  "imagenet_top1": 75.0, "framework": "timm",       "task_type": "classification", "recommended": False},
             {"name": "vit_small_patch16_224", "params": "22.1M", "imagenet_top1": 78.7, "framework": "timm",       "task_type": "classification", "recommended": False},
-            # v2.5.46: 分割预训练 (COCO 21 类, weights='DEFAULT')
-            {"name": "fcn_resnet50",          "params": "32.9M",                                "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
-            {"name": "deeplabv3_resnet50",    "params": "39.6M",                                "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
-            {"name": "deeplabv3_resnet101",   "params": "58.7M",                                "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
+            # ----- P0.2: detection 补充 5 个 YOLO 预训练 (COCO 80 类) -----
+            # 修复: 检测任务「基础模型」分支下拉空白的根本原因
+            # - 前端 Annotate 工作台 models.filter(m => m.task_type === 'detection') 拿不到任何选项
+            # - 后端 detection.py:441 pattern='^yolov8[nsmxl]$' 早已支持这 5 个
+            # - 现在通过该接口暴露, 与 classification / segmentation 对称
+            # - params 取 ultralytics 官方公布值, 推荐 nano / small
+            {"name": "yolov8n", "params": "3.2M",  "coco_mAP50": 37.3, "framework": "ultralytics", "task_type": "detection",     "recommended": True},
+            {"name": "yolov8s", "params": "11.2M", "coco_mAP50": 44.9, "framework": "ultralytics", "task_type": "detection",     "recommended": True},
+            {"name": "yolov8m", "params": "25.9M", "coco_mAP50": 50.2, "framework": "ultralytics", "task_type": "detection",     "recommended": False},
+            {"name": "yolov8l", "params": "43.7M", "coco_mAP50": 52.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False},
+            {"name": "yolov8x", "params": "68.2M", "coco_mAP50": 53.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False},
+            # ----- segmentation: torchvision COCO 21 类 -----
+            # P1.1 同步: Training/index.vue segmentation 候选需要补 fcn_resnet50
+            {"name": "fcn_resnet50",          "params": "32.9M", "coco_mIoU": 60.5, "framework": "torchvision", "task_type": "segmentation",  "recommended": False},
+            {"name": "deeplabv3_resnet50",    "params": "39.6M", "coco_mIoU": 66.4, "framework": "torchvision", "task_type": "segmentation",  "recommended": True},
+            {"name": "deeplabv3_resnet101",   "params": "58.7M", "coco_mIoU": 67.4, "framework": "torchvision", "task_type": "segmentation",  "recommended": True},
         ]
     }
 
