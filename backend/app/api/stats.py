@@ -220,11 +220,14 @@ async def annotation_timeline(
 
 @router.get("/annotator-efficiency")
 async def annotator_efficiency(
+    task_type: Optional[str] = Query(default=None, description="按任务类型过滤: classification/detection/segmentation"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     标注员效率排行（Top 10）
+    - task_type: 可选, 传入时仅统计对应任务类型数据集下的标注记录
+                (走 Image -> Dataset 关联, 避免历史脏数据影响)
     """
     stmt = (
         select(
@@ -234,7 +237,14 @@ async def annotator_efficiency(
             func.coalesce(func.sum(AnnotationLog.time_spent_ms), 0).label("total_ms"),
         )
         .join(User, User.id == AnnotationLog.user_id)
-        .group_by(AnnotationLog.user_id, User.username)
+    )
+    if task_type:
+        # v2.5.x: 仪表盘按任务类型筛选, 通过 Image -> Dataset.task_type 过滤
+        stmt = stmt.join(Image, Image.id == AnnotationLog.image_id).join(
+            Dataset, Dataset.id == Image.dataset_id
+        ).where(Dataset.task_type == task_type)
+    stmt = (
+        stmt.group_by(AnnotationLog.user_id, User.username)
         .order_by(func.count(AnnotationLog.id).desc())
         .limit(10)
     )

@@ -13,6 +13,39 @@ const overview = ref<any>({})
 const datasets = ref<any[]>([])
 const datasetId = ref<number | null>(null)
 
+/** 任务类型筛选 (与标注工作台 AnnotationToolbar 对齐)
+ *  - 固定排序: 图片分类 / 目标检测 / 图片分割 (3 项, 不含"全部")
+ *  - 默认值: classification (持久化于 localStorage)
+ *  - 联动: 切换后 filteredDatasets 重算, 若当前 datasetId 不在范围内则切到第一项 */
+const TASK_TYPE_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'classification', label: '图片分类' },
+  { value: 'detection',      label: '目标检测' },
+  { value: 'segmentation',   label: '图片分割' },
+]
+const TASK_TYPE_STORAGE_KEY = 'dashboard_task_type_filter'
+
+/** 从 localStorage 读取任务类型筛选, 失败回退默认 classification */
+const loadTaskTypeFromStorage = (): string => {
+  try {
+    const stored = localStorage.getItem(TASK_TYPE_STORAGE_KEY)
+    if (stored && TASK_TYPE_FILTER_OPTIONS.some((o) => o.value === stored)) {
+      return stored
+    }
+  } catch (e) {
+    /* localStorage 不可用 (隐私模式等) 时静默回退 */
+  }
+  return 'classification'
+}
+
+const taskTypeFilter = ref<string>(loadTaskTypeFromStorage())
+
+/** 按 taskTypeFilter 过滤后的数据集列表 (与标注工作台 filteredDatasets 一致) */
+const filteredDatasets = computed(() => {
+  const f = taskTypeFilter.value
+  if (!f) return datasets.value
+  return datasets.value.filter((d) => (d.task_type || 'classification') === f)
+})
+
 /** 时间感知的问候语 + 图标, 让顶部 hero 更有"日常感" */
 const greeting = computed(() => {
   const h = new Date().getHours()
@@ -47,16 +80,42 @@ const loadOverview = async () => {
     const ds: any = await datasetApi.list()
     const list = ds?.items || ds || []
     datasets.value = list
-    if (list.length > 0 && !datasetId.value) datasetId.value = list[0].id
-    const eff: any = await statsApi.annotatorEfficiency()
-    efficiency.value = eff
+    // 优先沿用当前 taskTypeFilter 范围内的数据集; 否则取该任务类型第一项; 都没有则 null
+    if (list.length > 0) {
+      const f = taskTypeFilter.value
+      const matched = list.filter((d: any) => (d.task_type || 'classification') === f)
+      if (matched.length > 0) {
+        if (!datasetId.value || !matched.some((d: any) => d.id === datasetId.value)) {
+          datasetId.value = matched[0].id
+        }
+      } else {
+        // 当前任务类型下无数据集, 置空
+        datasetId.value = null
+      }
+    }
+    await loadEfficiency()
   } catch (e) {
     console.error('概览加载失败', e)
   }
 }
 
+const loadEfficiency = async () => {
+  try {
+    const eff: any = await statsApi.annotatorEfficiency({ task_type: taskTypeFilter.value })
+    efficiency.value = eff
+  } catch (e) {
+    console.error('标注员效率加载失败', e)
+  }
+}
+
 const loadDatasetStats = async () => {
-  if (!datasetId.value) return
+  if (!datasetId.value) {
+    // 当前任务类型下无数据集, 清空图表数据避免脏数据
+    datasetStats.value = null
+    confidence.value = null
+    timeline.value = null
+    return
+  }
   try {
     const ds: any = await statsApi.dataset(datasetId.value)
     datasetStats.value = ds
@@ -69,6 +128,18 @@ const loadDatasetStats = async () => {
   }
 }
 
+/** 任务类型切换处理:
+ *  - 切换后, 若当前 datasetId 不在新筛选范围, 切到范围内第一项 (或 null)
+ *  - datasetId 与 taskTypeFilter 联动由下方 watch 触发数据重载 */
+const onTaskTypeFilterChange = (v: string) => {
+  taskTypeFilter.value = v
+  const list = filteredDatasets.value
+  const currentInList = list.some((d) => d.id === datasetId.value)
+  if (!currentInList) {
+    datasetId.value = list.length > 0 ? list[0].id : null
+  }
+}
+
 onMounted(async () => {
   await loadOverview()
   await nextTick()
@@ -78,6 +149,16 @@ onMounted(async () => {
 })
 
 watch(datasetId, () => { loadDatasetStats() })
+/** 任务类型切换:
+ *  - localStorage 持久化 (供刷新/导航后恢复)
+ *  - 重新拉取标注员效率 (按新 task_type 过滤)
+ *  - datasetId 的重选由 onTaskTypeFilterChange 同步处理 */
+watch(taskTypeFilter, async (newVal) => {
+  try {
+    localStorage.setItem(TASK_TYPE_STORAGE_KEY, newVal)
+  } catch (e) { /* 静默 */ }
+  await loadEfficiency()
+})
 watch(datasetStats, () => updateStatusChart(), { deep: true })
 watch(confidence, () => updateConfidenceChart(), { deep: true })
 watch(timeline, () => updateTimelineChart(), { deep: true })
@@ -320,24 +401,62 @@ const updateEfficiencyChart = () => {
       </el-col>
     </el-row>
 
-    <!-- 数据集选择 -->
+    <!-- 数据集 + 任务类型筛选 (与标注工作台 AnnotationToolbar 对齐)
+         - 任务类型默认 "图片分类" (持久化于 localStorage)
+         - 数据集列表按当前任务类型过滤; 切换后联动 datasetId 重选 -->
     <el-card class="selector-card" style="margin-top: 16px;">
       <template #header>
         <div class="card-header">
-          <span>选择数据集</span>
+          <span>数据视图</span>
           <el-tag v-if="datasetId" size="small" effect="plain" type="info">
-            当前: {{ datasets.find((d: any) => d.id === datasetId)?.name || datasetId }}
+            当前数据集: {{ datasets.find((d: any) => d.id === datasetId)?.name || datasetId }}
           </el-tag>
         </div>
       </template>
-      <el-select v-model="datasetId" placeholder="请选择" style="width: 280px;" filterable>
-        <el-option
-          v-for="d in datasets"
-          :key="d.id"
-          :label="d.name"
-          :value="d.id"
-        />
-      </el-select>
+      <el-form inline class="filter-form">
+        <el-form-item label="任务类型">
+          <el-select
+            :model-value="taskTypeFilter"
+            @update:model-value="onTaskTypeFilterChange"
+            class="app-select"
+            style="width: 160px;"
+          >
+            <el-option
+              v-for="opt in TASK_TYPE_FILTER_OPTIONS"
+              :key="opt.value"
+              :value="opt.value"
+              :label="opt.label"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="数据集">
+          <el-select
+            v-model="datasetId"
+            placeholder="请选择"
+            class="app-select"
+            filterable
+            :disabled="filteredDatasets.length === 0"
+            style="min-width: 220px;"
+          >
+            <el-option
+              v-for="d in filteredDatasets"
+              :key="d.id"
+              :label="d.name"
+              :value="d.id"
+            />
+            <template #empty>
+              <div style="padding: 8px 12px; color: #909399; font-size: 12px;">
+                当前任务类型下没有数据集, 请切换任务类型或新建数据集
+              </div>
+            </template>
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <span class="filter-hint">
+            共 {{ filteredDatasets.length }} 个{{ taskTypeFilter === 'classification' ? '分类' : taskTypeFilter === 'detection' ? '检测' : '分割' }}数据集
+          </span>
+        </el-form-item>
+      </el-form>
     </el-card>
 
     <!-- 4 个图表 -->
@@ -443,6 +562,51 @@ const updateEfficiencyChart = () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* 筛选表单: 横向 flex, 移动端自动换行 */
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  row-gap: 8px;
+}
+.filter-form :deep(.el-form-item) {
+  margin-bottom: 0;
+  margin-right: 0;
+}
+.filter-hint {
+  color: var(--text-placeholder);
+  font-size: 12px;
+  line-height: 32px;
+  white-space: nowrap;
+}
+
+/* 平板/小屏: 筛选控件允许换行, 提示文字下移 */
+@media (max-width: 768px) {
+  .filter-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-form :deep(.el-form-item) {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-form :deep(.el-form-item__label) {
+    text-align: left;
+    padding: 0 0 4px 0;
+    line-height: 1.4;
+  }
+  .filter-form :deep(.el-select) {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  .filter-hint {
+    line-height: 1.4;
+    padding: 4px 0;
+  }
 }
 
 .chart-card {

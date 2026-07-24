@@ -355,7 +355,8 @@ export const statsApi = {
   confidence: (datasetId: number) => http.get(`/stats/confidence/${datasetId}`),
   timeline: (datasetId: number, days = 7) =>
     http.get(`/stats/timeline/${datasetId}`, { params: { days } }),
-  annotatorEfficiency: () => http.get('/stats/annotator-efficiency')
+  annotatorEfficiency: (params?: { task_type?: string }) =>
+    http.get('/stats/annotator-efficiency', { params })
 }
 
 // ============== v2.0.0 S3+: 目标检测 ==============

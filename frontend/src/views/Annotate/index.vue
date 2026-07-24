@@ -51,7 +51,22 @@ const datasets = ref<any[]>([])
 // v2.5.20: 任务类型筛选, 默认 'classification' (图片分类)
 // - 排序固定: 'classification' / 'detection' / 'segmentation' (3 项, 不含"全部")
 // - 切换筛选时, 若当前 datasetId 不在新筛选范围内, 自动切到第一个匹配项
-const taskTypeFilter = ref<string>('classification')
+// - v2.5.x: 持久化于 localStorage, 与仪表盘 Dashboard 的持久化策略对齐
+//   (点击侧边栏「标注工作台」进入页面时, 上次选择的任务类型会被还原, 默认「图片分类」)
+const TASK_TYPE_VALUES = ['classification', 'detection', 'segmentation'] as const
+const ANNOTATE_TASK_TYPE_STORAGE_KEY = 'annotate_task_type_filter'
+const loadTaskTypeFromStorage = (): string => {
+  try {
+    const stored = localStorage.getItem(ANNOTATE_TASK_TYPE_STORAGE_KEY)
+    if (stored && (TASK_TYPE_VALUES as readonly string[]).includes(stored)) {
+      return stored
+    }
+  } catch (e) {
+    /* localStorage 不可用 (隐私模式等) 时静默回退 */
+  }
+  return 'classification'
+}
+const taskTypeFilter = ref<string>(loadTaskTypeFromStorage())
 const datasetId = ref<number | null>(null)
 const categories = ref<any[]>([])
 const stats = ref<any>(null)
@@ -151,11 +166,18 @@ onMounted(async () => {
     if (route.params?.datasetId) {
       datasetId.value = Number(route.params.datasetId)
     } else if (datasets.value.length > 0) {
-      datasetId.value = datasets.value[0].id
+      // 优先沿用持久化的 taskTypeFilter 范围内的数据集; 否则取该任务类型第一项; 都没有则用列表第一项
+      const f = taskTypeFilter.value
+      const matched = datasets.value.filter((d: any) => (d.task_type || 'classification') === f)
+      if (matched.length > 0) {
+        datasetId.value = matched[0].id
+      } else {
+        datasetId.value = datasets.value[0].id
+      }
     }
     // v2.5.19: 初始化 taskTypeFilter, 跟当前 datasetId 的 task_type 保持一致
     // - 避免出现"选了 detection 数据集, 但筛选框停在 all"的割裂感
-    // - 用户后续可手动切换筛选
+    // - 用户后续可手动切换筛选 (切换后会写回 localStorage)
     syncTaskTypeFilterFromDataset()
     // 加载 base models (timm) + 项目 fine-tune models
     const ms: any = await autoAnnotateApi.models()
@@ -227,6 +249,15 @@ const refreshFinetuneModels = async () => {
     selectedModelId.value = null
   }
 }
+
+/** 任务类型筛选变化时持久化到 localStorage (与 Dashboard 行为一致)
+ *  - 侧边栏「标注工作台」进入页面时, 会从 localStorage 还原上次选择
+ *  - 用户主动切换筛选后, 新值即时落盘, 供下次进入页面恢复 */
+watch(taskTypeFilter, (newVal) => {
+  try {
+    localStorage.setItem(ANNOTATE_TASK_TYPE_STORAGE_KEY, newVal)
+  } catch (e) { /* localStorage 不可用时静默 */ }
+})
 
 watch(datasetId, async (v) => {
   if (!v) return
