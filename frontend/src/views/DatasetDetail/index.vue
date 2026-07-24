@@ -10,7 +10,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft, Refresh, Delete, Download, Lightning, Search, Picture, Document, UploadFilled, RefreshLeft, View, Grid, List,
-  CircleCheck, CircleClose, Clock, MagicStick, CollectionTag, Check, Minus, InfoFilled, DataAnalysis, EditPen,
+  CircleCheck, CircleClose, CollectionTag, Check, Minus, InfoFilled, DataAnalysis, EditPen,
   WarningFilled, Promotion
 } from '@element-plus/icons-vue'
 import {
@@ -36,6 +36,10 @@ const statusFilter = ref<string>('all')   // 'all' = 全部 (element-plus el-sel
 const keyword = ref('')
 const loading = ref(false)
 const stats = ref<any>(null)
+// v2.5.49: 数据集类目列表 (供「类别数」卡 + hover 各类进度详情)
+// - 来源: datasetApi.categories(v) 返回 {items: [{id, name, color, sample_count, human_labeled_count, ai_labeled_count, ...}]}
+// - 与 Annotate 页面同源, 保证两个页面的「类别数」hover 详情口径一致
+const categories = ref<any[]>([])
 const selectedIds = ref<number[]>([])
 // 修复: v-model 必须是 Boolean, 不能复用 number 类型的 imageId
 // 拆成 viewerOpen (boolean) + viewerImageId (number | null) 两个状态
@@ -68,7 +72,9 @@ async function load() {
   if (!datasetId.value) return
   loading.value = true
   try {
-    const [d, list, s, actResp]: any[] = await Promise.all([
+    // v2.5.49: 并行拉取 categories (供「类别数」卡 hover 详情)
+    // - 与原有 4 路请求合并为 5 路 Promise.all, 仍是 1 次 RTT
+    const [d, list, s, actResp, catsResp]: any[] = await Promise.all([
       datasetApi.get(datasetId.value),
       imageApi.list(datasetId.value, {
         // 'all' 翻译成 undefined (不传 status 参数, 后端返所有)
@@ -79,12 +85,16 @@ async function load() {
       statsApi.dataset(datasetId.value).catch(() => null),
       // 与 Annotate 一致: 拿当前数据集的激活模型, 用于 tooltip 提示
       modelApi.getActive(datasetId.value).catch(() => ({ model: null })),
+      // v2.5.49: 类目列表 (含实时 sample_count / human_labeled_count / ai_labeled_count)
+      datasetApi.categories(datasetId.value).catch(() => null),
     ])
     dataset.value = d
     images.value = list?.items || []
     total.value = list?.total || 0
     stats.value = s
     activeModel.value = actResp?.model || actResp?.items?.[0] || null
+    const c: any = catsResp
+    categories.value = c?.items || c || []
 
     // 模型下拉列表: 与标注工作台 (Annotate.vue) 完全对齐
     // - 仅显示本数据集**已激活**的 fine-tune 模型
@@ -687,16 +697,33 @@ watch(() => route.params.id, resetPage)
       </div>
     </div>
 
-    <!-- 统计卡 (单行 x 6 列, 紧凑展示: 图片总数 / 已人工标注 / AI 已标 / 平均耗时 / AI 节省时间 / 类别数)
-         内部 padding/icon/字号 全部下调, 避免 6 列下中文换行; 卡片等高由 .ds-stats :deep(.el-col) 拉伸 -->
+    <!-- 统计卡 (单行 x 4 列, 紧凑展示: 图片总数 / 已人工标注 / AI 已标 / 类别数)
+         内部 padding/icon/字号 全部下调, 避免 4 列下中文换行; 卡片等高由 .ds-stats :deep(.el-col) 拉伸
+
+         v2.5.49: 移除 2 个低价值指标 ——
+         · 平均耗时:
+           1) 检测/分割场景下后端写 time_spent_ms=0 (image.py:286, auto_annotate.py:162,421),
+              3 种任务类型里只有 classification 写真实耗时, 跨任务口径不一致
+           2) 即使分类场景, confirm + correct 都算进分母, "修正" 行为污染人均速度
+           3) 标注员效率排行已在后端 /api/stats/annotator-efficiency 提供, 详情页无需重复展示
+         · AI 节省时间:
+           1) 公式 = total_processed * 8s（硬编码 baseline, stats.py:31） - 实际秒数
+              8s 拍脑袋, 不可验证; 与 Annotate 工作台已移除的「估算 AI 节省工作量」同源
+           2) 跨三任务同样无解释力, 移除后由类目级 hover 详情 (各类 human/ai 已标) 替代
+
+         v2.5.49: 「类别数」卡升级 ——
+         - 仍显示 dataset.category_count
+         - hover 弹 el-tooltip, 内含类目进度表 (类目 + 总样本 + 已人工 + AI 已标)
+         - 与 Annotate 工作台 hover 视觉一致, 两页面同源
+         - 0 类时禁用 tooltip, 显示「-」+ 提示「数据集未配置类目」 -->
     <el-row v-if="stats" :gutter="12" class="ds-stats">
-      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
+      <el-col :xs="12" :sm="12" :md="6" :lg="6" :xl="6">
         <el-card shadow="hover" class="stat-card stat-card--blue">
           <div class="stat-icon"><el-icon><Picture /></el-icon></div>
           <el-statistic title="图片总数" :value="dataset?.image_count || 0" />
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
+      <el-col :xs="12" :sm="12" :md="6" :lg="6" :xl="6">
         <el-card shadow="hover" class="stat-card stat-card--green">
           <div class="stat-icon"><el-icon><CircleCheck /></el-icon></div>
           <el-statistic title="已人工标注"
@@ -707,7 +734,7 @@ watch(() => route.params.id, resetPage)
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
+      <el-col :xs="12" :sm="12" :md="6" :lg="6" :xl="6">
         <el-card shadow="hover" class="stat-card stat-card--orange">
           <div class="stat-icon"><el-icon><Lightning /></el-icon></div>
           <el-statistic title="AI 已标"
@@ -719,30 +746,56 @@ watch(() => route.params.id, resetPage)
           </div>
         </el-card>
       </el-col>
-      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
-        <el-card shadow="hover" class="stat-card stat-card--purple">
-          <div class="stat-icon"><el-icon><Clock /></el-icon></div>
-          <el-statistic title="平均耗时"
-            :value="stats.annotation?.avg_seconds_per_image || 0"
-            suffix="秒/张" />
-        </el-card>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
-        <el-card shadow="hover" class="stat-card stat-card--warm">
-          <div class="stat-icon"><el-icon><MagicStick /></el-icon></div>
-          <el-statistic title="AI 节省时间"
-            :value="stats.annotation?.estimated_saved_seconds || 0"
-            suffix="秒" />
-          <div class="stat-meta">
-            按 3 秒/张估算
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="4" :lg="4" :xl="4">
-        <el-card shadow="hover" class="stat-card stat-card--cyan">
-          <div class="stat-icon"><el-icon><CollectionTag /></el-icon></div>
-          <el-statistic title="类别数" :value="dataset?.category_count || 0" />
-        </el-card>
+      <!-- v2.5.49: 类别数卡 — 显示总类数, hover 看每类详情
+           - el-tooltip 触发 hover 弹出详细面板
+           - 面板内: 类目名 + 3 列计数 (总样本 / 已人工 / AI 已标)
+           - 数据来源: datasetApi.categories 已在 load() 拉到 categories.value
+           - 空态: 0 个类目时显示「-」 + tooltip 提示「数据集未配置类目」 -->
+      <el-col :xs="12" :sm="12" :md="6" :lg="6" :xl="6">
+        <el-tooltip
+          placement="top"
+          :disabled="categories.length === 0"
+          :show-after="200"
+        >
+          <template #content>
+            <div v-if="categories.length === 0" style="padding: 4px 8px;">
+              当前数据集未配置类目
+            </div>
+            <div v-else class="category-tooltip">
+              <div class="category-tooltip__header">各类目已标进度</div>
+              <table class="category-tooltip__table">
+                <thead>
+                  <tr>
+                    <th class="ct-name">类目</th>
+                    <th class="ct-num">总样本</th>
+                    <th class="ct-num">已人工</th>
+                    <th class="ct-num">AI 已标</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in categories" :key="c.id">
+                    <td class="ct-name">
+                      <span class="ct-dot" :style="{ background: c.color || '#00a3e0' }"></span>
+                      {{ c.name }}
+                    </td>
+                    <td class="ct-num">{{ c.sample_count ?? 0 }}</td>
+                    <td class="ct-num ct-human">{{ c.human_labeled_count ?? 0 }}</td>
+                    <td class="ct-num ct-ai">{{ c.ai_labeled_count ?? 0 }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <el-card shadow="hover" class="stat-card stat-card--cyan stat-card--clickable">
+            <div class="stat-icon"><el-icon><CollectionTag /></el-icon></div>
+            <el-statistic :title="categories.length === 0 ? '类别数' : `类别数 (共 ${categories.length} 类)`"
+              :value="categories.length || (dataset?.category_count || 0)" />
+            <div v-if="categories.length > 0" class="stat-meta stat-meta--hint">
+              <el-icon style="vertical-align: -2px; margin-right: 2px;"><InfoFilled /></el-icon>
+              悬停查看各类进度
+            </div>
+          </el-card>
+        </el-tooltip>
       </el-col>
     </el-row>
 
@@ -1301,14 +1354,13 @@ watch(() => route.params.id, resetPage)
 .stat-card--blue::before   { background: var(--gradient-brand); }
 .stat-card--green::before  { background: var(--gradient-success); }
 .stat-card--orange::before { background: var(--gradient-warm); }
-.stat-card--warm::before   { background: var(--gradient-warm); }
-.stat-card--purple::before { background: linear-gradient(135deg, #722ed1 0%, #531dab 100%); }
 .stat-card--cyan::before   { background: linear-gradient(135deg, #00a3e0 0%, #00c48c 100%); }
+/* v2.5.49 移除: .stat-card--warm / .stat-card--purple 渐变定义 (对应卡片已删除) */
 
 .stat-card :deep(.el-card__body) {
   padding: 14px 16px;
   position: relative;
-  /* 覆盖 theme.css 的 min-height: 116px, 1 行 6 列卡片更紧凑 */
+  /* 覆盖 theme.css 的 min-height: 116px, 1 行 4 列卡片更紧凑 (卡片更宽, 字号可保持) */
   min-height: 92px;
   /* 让卡片在同 row 内等高: 撑满父级 (theme.css 已设 .stat-card height: 100%) */
   display: flex;
@@ -1354,17 +1406,32 @@ watch(() => route.params.id, resetPage)
 .stat-card--blue   .stat-icon { background: rgba(79, 124, 255, 0.1);  color: #4f7cff; }
 .stat-card--green  .stat-icon { background: rgba(0, 196, 140, 0.1);  color: #00c48c; }
 .stat-card--orange .stat-icon { background: rgba(255, 138, 76, 0.1);  color: #ff8a4c; }
-.stat-card--warm   .stat-icon { background: rgba(255, 138, 76, 0.1);  color: #ff8a4c; }
-.stat-card--purple .stat-icon { background: rgba(114, 46, 209, 0.1);  color: #722ed1; }
 .stat-card--cyan   .stat-icon { background: rgba(0, 163, 224, 0.1);   color: #00a3e0; }
+/* v2.5.49 移除: .stat-card--warm / .stat-card--purple 图标色 (对应卡片已删除) */
 .stat-meta {
   color: var(--text-placeholder);
   margin-top: 4px;
   font-size: 11.5px;
   padding-right: 40px;
-  /* 6 列窄卡片下, meta 文案过长可优雅换行, 避免撑破卡片 */
+  /* 4 列卡片下, meta 文案过长可优雅换行, 避免撑破卡片 */
   line-height: 1.4;
   word-break: break-all;
+}
+/* v2.5.49: 「类别数」卡的「悬停查看」提示 (放在 stat-meta 下面, 青色引导色) */
+.stat-meta--hint {
+  color: #00a3e0;
+  font-size: 11px;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+/* v2.5.49: 「类别数」卡 hover 状态 (区别于普通卡, 提示用户可悬停) */
+.stat-card--clickable {
+  cursor: help;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stat-card--clickable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 163, 224, 0.15);
 }
 
 /* ===========================================================
@@ -1829,5 +1896,61 @@ watch(() => route.params.id, resetPage)
   background: #fff;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-soft);
+}
+</style>
+
+<!-- v2.5.49: 「类别数」卡 hover 弹出的类目进度表全局样式
+     - popper 由 element-plus append 到 body, scoped 不可达, 必须用全局 style
+     - 与 Annotate 工作台同源, 保证两页面的 hover 详情视觉一致 -->
+<style>
+.category-tooltip {
+  font-size: 12px;
+  line-height: 1.5;
+  min-width: 240px;
+}
+.category-tooltip__header {
+  font-weight: 600;
+  color: #303133;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #ebeef5;
+  margin-bottom: 6px;
+}
+.category-tooltip__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.category-tooltip__table th,
+.category-tooltip__table td {
+  padding: 4px 6px;
+  text-align: left;
+}
+.category-tooltip__table th {
+  color: #909399;
+  font-weight: 500;
+  font-size: 11px;
+  border-bottom: 1px solid #ebeef5;
+}
+.category-tooltip__table .ct-name {
+  min-width: 90px;
+}
+.category-tooltip__table .ct-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  width: 56px;
+}
+.category-tooltip__table .ct-human {
+  color: #67c23a;
+  font-weight: 600;
+}
+.category-tooltip__table .ct-ai {
+  color: #909399;
+}
+.category-tooltip__table .ct-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 </style>
