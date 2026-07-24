@@ -9,6 +9,12 @@ Services Package
 - ImageService: 图片业务编排 (标注 / 状态 / AI 候选)
 - DatasetService: 数据集业务编排 (含级联删除)
 - ModelService: 模型版本业务编排 (含激活/失活)
+- DetectionService: 目标检测业务编排 (BBox AI/人工)
+- SegmentationService: 分割业务编排 (mask AI/人工)
+- AnnotationService: 标注统一入口 (派发 3 任务)
+- UserService: 用户业务编排
+- StatsService: 统计业务
+- AuthService: 认证业务
 
 **工具服务 (Phase 1 已有)**:
 - ai_service: timm 模型加载/推理
@@ -29,12 +35,19 @@ from app.services.bbox_service import (
     bbox_to_yolo_line,
     yolo_line_to_bbox,
 )
-# v3.0.0 Phase 3 业务编排服务
+# v3.0.0 Phase 3 业务编排服务 (5 核心)
 from app.services.job_state_service import JobStateService, JobStateSnapshot
 from app.services.training_service import TrainingService
 from app.services.image_service import ImageService
 from app.services.dataset_service import DatasetService
 from app.services.model_service import ModelService
+# v3.0.0 Phase 3 补充 (6 个扩展)
+from app.services.detection_service import DetectionService
+from app.services.segmentation_service import SegmentationService
+from app.services.annotation_service import AnnotationService
+from app.services.user_service import UserService
+from app.services.stats_service import StatsService
+from app.services.auth_service import AuthService
 
 __all__ = [
     # 工具服务
@@ -50,10 +63,17 @@ __all__ = [
     "bbox_from_dict",
     "bbox_to_yolo_line",
     "yolo_line_to_bbox",
-    # 业务编排服务
+    # 业务编排服务 (5 核心)
     "JobStateService", "JobStateSnapshot",
     "TrainingService",
     "ImageService",
     "DatasetService",
     "ModelService",
+    # 业务编排服务 (6 扩展)
+    "DetectionService",
+    "SegmentationService",
+    "AnnotationService",
+    "UserService",
+    "StatsService",
+    "AuthService",
 ]
