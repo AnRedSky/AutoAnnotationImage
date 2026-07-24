@@ -37,6 +37,16 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
 from app.config import settings
 
+# ---- v2.5.29: ultralytics 路径强制覆盖 ----
+# 之前: ultralytics 读 $YOLO_CONFIG_DIR/settings.yaml 找 weights_dir, 用户全局
+#       yaml 里指向不存在的 ComfyUI 路径, ultralytics 回退到 cwd 下载 yolov8*.pt,
+#       导致 backend/ 根目录出现 yolov8n.pt / yolov8s.pt / yolov8x.pt 等几个大文件.
+# 现在: 显式设置 YOLO_CONFIG_DIR + 覆盖 settings.weights_dir / runs_dir / datasets_dir
+#       三个字段到 PRETRAINED_CACHE_DIR/ultralytics/ 下, 启动即生效.
+from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+configure_ultralytics()
+migrate_legacy_yolo_weights()  # 把 backend/ 残留 yolov8*.pt 迁到 cache
+
 
 def _set_task_state(self, state: str, meta: dict):
     """统一的 Celery update_state, 失败/退出元数据自动加 exc_type (Celery 硬要求)"""
@@ -156,8 +166,9 @@ def train_detection_task(
             "total_epochs": total_epochs,
             **metrics,
         })
+        progress_pct = round(current_epoch / max(total_epochs, 1) * 100, 2)
         meta = {
-            "progress": round(current_epoch / max(total_epochs, 1) * 100, 2),
+            "progress": progress_pct,
             "msg": f"训练 epoch {current_epoch}/{total_epochs}",
             "total_epochs": total_epochs,
             "current_epoch": current_epoch,
@@ -167,6 +178,39 @@ def train_detection_task(
         if sticky_meta:
             meta.update(sticky_meta)
         _set_task_state(self, "PROGRESS", meta)
+
+        # ---- v2.5.29 修复: 实时同步 history 曲线到 Redis (前端 5s 轮询 /training/history 拿) ----
+        # 之前: 仅在 _finish_job 成功路径写 DB, 训练过程中 /history 端点返回空,
+        #       前端详情页"训练曲线"始终 "暂无历史曲线", 即便训练成功实时阶段也看不到.
+        # 现在: 跟 segmentation_tasks.py / tasks.py (classification) 一致, 每个
+        #       epoch 推 Redis + 写 DB, 前端 5s 轮询实时显示, 即便 worker 中途崩了
+        #       DB 也保留到最新一帧, 用户重启可看历史曲线.
+        if history_buffer:
+            try:
+                from app.workers.tasks import _update_training_history
+                _update_training_history(self.request.id, list(history_buffer))
+            except Exception as e:
+                # Redis 不可达不阻塞训练, 走 DB 兜底
+                print(f"[warn] det history -> redis failed: {type(e).__name__}: {e}")
+
+            # 同步持久化到 TrainingJob.history (Redis 失效兜底 + 训练后历史保留)
+            async def _update_job_history():
+                from app.database import AsyncSessionLocal
+                from app.models.training_job import TrainingJob
+                async with AsyncSessionLocal() as db:
+                    j = await db.get(TrainingJob, job_id)
+                    if not j:
+                        return
+                    j.progress = progress_pct
+                    j.message = f"训练 epoch {current_epoch}/{total_epochs}"
+                    j.current_epoch = current_epoch
+                    j.history = list(history_buffer)
+                    await db.commit()
+            try:
+                _run_async(_update_job_history())
+            except Exception as e:
+                # 写库失败不影响训练主流程, 仅记日志
+                print(f"[warn] det _update_job_history failed: {type(e).__name__}: {e}")
 
     workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
     try:

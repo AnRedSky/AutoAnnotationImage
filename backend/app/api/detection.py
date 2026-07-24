@@ -2,32 +2,44 @@
 Detection API: BBox 标注 CRUD + 训练/自动标注 (v2.0.0 目标检测)
 ==================================================================
 
-端点 (8 个):
-- POST   /api/detection/annotations/save           单条 BBox 保存
+端点 (10 个):
+- POST   /api/detection/annotations/save             单条 BBox 保存
 - POST   /api/detection/annotations/replace         单图 BBox 全量替换
 - GET    /api/detection/annotations/{image_id}      拉取单图全部 bbox
 - DELETE /api/detection/annotations/{bbox_id}       单条删除
 - POST   /api/detection/annotations/batch           批量入库 (S3 占位)
 - POST   /api/detection/train                       启动 YOLOv8 训练 (Celery)
 - POST   /api/detection/auto-annotate               启动自动标注 (Celery)
-- GET    /api/detection/jobs/{job_id}/progress      拉取训练/标注进度 (轮询/SSE)
+- GET    /api/detection/jobs/{job_id}/progress      拉取 TrainingJob 进度 (老接口, int job_id)
+- GET    /api/detection/jobs/{job_id}/stream        SSE 推 TrainingJob 进度 (老接口)
+- GET    /api/detection/progress/{task_id}          REST 轮询 (v2.5.35 新增, task_id = Celery UUID)
+- GET    /api/detection/progress/stream/{task_id}   SSE 推送 (v2.5.35 新增, 与前端 detectionApi 对齐)
+- GET    /api/detection/models/{id}/activate        激活 detection 模型 (单激活不变量)
 
 约束:
 - bbox 坐标统一存归一化 0-1 (与 YOLO txt 一致, 详见 bbox_service)
 - 仅 detection 数据集允许操作 (Image.task_type == "detection")
 - category_id 必须属于同一 dataset
 - 物理删除由 Image CASCADE 自动级联 (S1 已在 ORM 配置)
+
+v2.5.35 关键修复:
+- 前端 detectionApi.progress 调 /api/detection/progress/{taskId} (Celery UUID),
+  但后端原本只有 /api/detection/jobs/{job_id}/progress (int TrainingJob id),
+  导致前端轮询永远 404. 新增与前端路径对齐的端点.
+- auto_annotate_detection_task 不写 TrainingJob, 因此 progress 端点
+  必须支持"DB 没记录就回退到 Celery result.info"路径.
+- 强制单激活不变量: 同 dataset 激活时, 把其他 is_active=True 置 False.
 """
 import json
 import asyncio
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
 from app.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_user_optional_for_query
 from app.core.celery_utils import check_celery_available as _check_celery_available
 from app.models.user import User
 from app.models.image import Image
@@ -599,6 +611,215 @@ async def stream_job_progress(
     )
 
 
+# ============== v2.5.35 新增: 与前端 detectionApi 路径对齐的进度端点 ==============
+# 前端 detectionApi.progress 调 GET /api/detection/progress/{taskId} (Celery UUID),
+# detectionApi.streamProgress 调 GET /api/detection/progress/stream/{taskId}.
+# 老的 /jobs/{job_id}/progress 端点保留, 但前端轮询已经走新端点.
+
+async def _resolve_detection_task_progress(task_id: str) -> dict:
+    """统一解析 Celery task_id -> 进度 dict, 同时覆盖训练 + 自动标注两种来源.
+
+    优先级:
+    1. TrainingJob 表 (训练任务走的是 _create_job 路径, celery_task_id 是主键索引列)
+    2. Celery AsyncResult (auto_annotate_detection_task 不写 TrainingJob, 只走 update_state)
+
+    返回字段:
+      { task_id, state, progress, message, source: 'db'|'celery'|'unknown',
+        total (auto_annotate 终态下的 total/auto_labeled/no_match), result (Celery 终态返回值) }
+    """
+    from celery.result import AsyncResult
+    from app.database import AsyncSessionLocal
+
+    db_row = None
+    try:
+        async with AsyncSessionLocal() as db:
+            db_row = (await db.execute(
+                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+            )).scalar_one_or_none()
+    except Exception:
+        db_row = None
+
+    # 拉 Celery result (auto_annotate 也走这里)
+    celery_state = "PENDING"
+    celery_info: dict = {}
+    celery_result_payload = None
+    try:
+        result = AsyncResult(task_id)
+        try:
+            celery_state = result.state
+        except Exception:
+            celery_state = "PENDING"
+        try:
+            raw = result.info
+            if isinstance(raw, dict):
+                celery_info = raw
+        except Exception:
+            celery_info = {}
+        # 终态返回值 (SUCCESS 时 result.info 是 task return dict, FAILURE 时是 exc_info)
+        try:
+            if celery_state == "SUCCESS":
+                celery_result_payload = result.result
+        except Exception:
+            celery_result_payload = None
+    except Exception:
+        pass
+
+    if db_row is not None:
+        # DB 有记录 (训练任务), 用 DB 状态做权威
+        state = db_row.state or celery_state
+        progress = float(db_row.progress) if db_row.progress is not None else float(celery_info.get("progress", 0))
+        message = db_row.message or celery_info.get("msg") or celery_info.get("info") or ""
+        if db_row.error and not message:
+            message = db_row.error[:200]
+        return {
+            "task_id": task_id,
+            "state": state,
+            "progress": round(progress, 2),
+            "message": message,
+            "current_epoch": getattr(db_row, "current_epoch", None),
+            "total_epochs": db_row.epochs,
+            "started_at": db_row.started_at.isoformat() if db_row.started_at else None,
+            "finished_at": db_row.finished_at.isoformat() if db_row.finished_at else None,
+            "duration_seconds": db_row.duration_seconds,
+            "data_total": db_row.data_total,
+            "data_train": db_row.data_train,
+            "data_val": db_row.data_val,
+            "num_classes": db_row.num_classes,
+            "class_names": db_row.class_names,
+            "model_version_id": db_row.model_version_id,
+            "job_id": db_row.id,
+            "source": "db",
+        }
+
+    # DB 没记录 (auto_annotate 任务), 用 Celery state + info
+    return {
+        "task_id": task_id,
+        "state": celery_state,
+        "progress": round(float(celery_info.get("progress", 0)), 2),
+        "message": celery_info.get("msg") or celery_info.get("info") or "",
+        "current_epoch": celery_info.get("current_epoch") or celery_info.get("epoch"),
+        "total_epochs": celery_info.get("total_epochs"),
+        # auto_annotate 终态返回 {status, total, auto_labeled, no_match}
+        "total": celery_info.get("total") or (celery_result_payload.get("total") if isinstance(celery_result_payload, dict) else None),
+        "auto_labeled": celery_info.get("auto_labeled") or (celery_result_payload.get("auto_labeled") if isinstance(celery_result_payload, dict) else None),
+        "no_match": celery_info.get("no_match") or (celery_result_payload.get("no_match") if isinstance(celery_result_payload, dict) else None),
+        "result": celery_result_payload if isinstance(celery_result_payload, dict) else None,
+        "source": "celery" if celery_state != "PENDING" else "unknown",
+    }
+
+
+@router.get("/progress/{task_id}")
+async def get_detection_progress(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    拉取 detection 任务进度 (REST 轮询)
+
+    v2.5.35 新增: 与前端 detectionApi.progress 路径对齐
+    - task_id 是 Celery UUID (不是 int TrainingJob id)
+    - 同时覆盖 train_detection_task (DB 有 TrainingJob) 和
+      auto_annotate_detection_task / auto_annotate_pretrained_task (仅 Celery state)
+    """
+    return await _resolve_detection_task_progress(task_id)
+
+
+@router.get("/progress/stream/{task_id}")
+async def stream_detection_progress(
+    task_id: str,
+    request: Request,
+    token: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_user_optional_for_query),
+):
+    """
+    SSE 实时推送 detection 任务进度 (v2.5.35 新增, 与前端 detectionApi.streamProgress 对齐)
+
+    - 每 1s 拉一次 _resolve_detection_task_progress
+    - 仅在 (state, progress, message) 签名变化时推送, 避免静默期洪水
+    - 终态推完最后一帧后服务端主动结束流
+    - 客户端断开通过 request.is_disconnected() 立即退出
+    - 鉴权: query ?token=xxx 优先 (EventSource 无法设 header), header 兜底
+    """
+    if current_user is None:
+        raise HTTPException(401, "未授权: 需要有效的 access_token (query ?token= 或 Authorization header)")
+
+    SSE_DET_POLL_INTERVAL = 1.0
+
+    async def event_gen():
+        last_signature: Optional[tuple] = None
+        # 首帧
+        try:
+            yield f": connected task_id={task_id}\n\n"
+        except Exception:
+            return
+
+        while True:
+            # 客户端断开检测
+            try:
+                if await request.is_disconnected():
+                    break
+            except Exception:
+                break
+
+            try:
+                data = await _resolve_detection_task_progress(task_id)
+            except Exception as e:
+                # 出错也不中断流, 给前端一个可读的 error 帧
+                data = {
+                    "task_id": task_id,
+                    "state": "FAILURE",
+                    "progress": 0.0,
+                    "message": f"进度查询失败: {type(e).__name__}: {str(e)[:200]}",
+                }
+
+            # 仅透传关键字段, 减少 payload
+            payload = {
+                "task_id": data["task_id"],
+                "state": data["state"],
+                "progress": data["progress"],
+                "message": data["message"],
+            }
+            # 透传 auto_annotate 终态统计
+            for k in ("total", "auto_labeled", "no_match",
+                      "current_epoch", "total_epochs",
+                      "data_total", "data_train", "data_val",
+                      "num_classes", "class_names", "model_version_id",
+                      "started_at", "finished_at", "duration_seconds", "source"):
+                v = data.get(k)
+                if v is not None:
+                    payload[k] = v
+            # 透传 Celery 终态返回值 (SUCCESS 时是 task return dict)
+            if data.get("result") and isinstance(data["result"], dict):
+                for k in ("total", "auto_labeled", "no_match", "status"):
+                    if k in data["result"]:
+                        payload.setdefault(k, data["result"][k])
+
+            signature = (payload["state"], round(payload["progress"], 1), payload["message"])
+            if signature != last_signature:
+                yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                last_signature = signature
+
+            # 终态结束
+            if payload["state"] in ("SUCCESS", "FAILURE", "REVOKED"):
+                try:
+                    yield "event: end\ndata: {}\n\n"
+                except Exception:
+                    pass
+                break
+
+            await asyncio.sleep(SSE_DET_POLL_INTERVAL)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ============== S4 模型激活 (detection 专用别名) ==============
 #
 # 沿用 v1.0.0 model.py 的 with_for_update() 行锁模式 (允许多激活并存).
@@ -624,7 +845,7 @@ async def activate_detection_model(
     """
     激活 detection 模型 (语义化入口)
     - 校验 mv.task_type == "detection"
-    - 行锁后置 is_active = True, 幂等
+    - v2.5.35: 单激活不变量 — 同 dataset 其他 active 全部置 False
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
@@ -638,6 +859,16 @@ async def activate_detection_model(
 
     try:
         await _lock_dataset_models(db, target.dataset_id)
+        # v2.5.35: 强制单激活 — 同 dataset 其他 active 全部置 False
+        siblings = (await db.execute(
+            select(ModelVersion).where(
+                ModelVersion.dataset_id == target.dataset_id,
+                ModelVersion.is_active == True,  # noqa: E712
+                ModelVersion.id != target.id,
+            )
+        )).scalars().all()
+        for sib in siblings:
+            sib.is_active = False
         target.is_active = True
         await db.commit()
     except Exception as e:
@@ -650,6 +881,7 @@ async def activate_detection_model(
         "task_type": target.task_type,
         "dataset_id": target.dataset_id,
         "is_active": target.is_active,
+        "deactivated_siblings": [s.id for s in siblings],
     }
 
 

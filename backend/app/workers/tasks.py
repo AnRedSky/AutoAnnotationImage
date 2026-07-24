@@ -43,6 +43,13 @@ except Exception:
 
 from app.config import settings
 
+# ---- v2.5.29: ultralytics 路径强制覆盖 (与 detection_tasks.py 一致) ----
+# 即便 classification 训练不用 YOLO, 但 ai_service 加载 timm 模型时若误用 ultralytics
+# 也会受影响; 统一在 worker 启动时锁路径, 避免 ultralytics 把 yolov8*.pt 落到 cwd.
+from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+configure_ultralytics()
+migrate_legacy_yolo_weights()
+
 
 def _update_training_history(task_id: str, history: list):
     """训练历史曲线写入 Redis, 前端可轮询 /training/history/{task_id} 获取"""
