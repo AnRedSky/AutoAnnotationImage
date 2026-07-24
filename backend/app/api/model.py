@@ -126,6 +126,9 @@ async def list_models(
                 "id": m.id,
                 "name": m.name,
                 "base_model": m.base_model,
+                # v2.5.24: 前端按 task_type 过滤 finetune models
+                # (同一 dataset 可能多 task_type 模型并存, 不加这个字段前端无法分辨)
+                "task_type": m.task_type,
                 "dataset_id": m.dataset_id,
                 "dataset_name": ds_map.get(m.dataset_id) if m.dataset_id else None,
                 # v2.5.16: 任务类型 (classification/detection/segmentation)
