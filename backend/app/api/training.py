@@ -2,6 +2,11 @@
 Training API: Start / Query Training Task
 ========================================
 异步训练任务, 通过 Celery 调度
+
+**v3.0.0 Phase 3 重构**:
+- start_training: 业务下沉到 TrainingService.start_training (138 行 → 30 行)
+- get_progress: 状态查询走 JobStateService.get_snapshot (60 行 → 12 行)
+- 业务逻辑 (task_type 分发 / broker 校验 / 预创建行 / 失败回滚) 全部在 Service
 """
 import asyncio
 import json
@@ -17,11 +22,13 @@ from app.workers.tasks import train_model_task
 from app.core.deps import get_current_user, get_user_optional_for_query
 from app.core.redis_client import redis_client
 from app.database import get_db
-from app.models.user import User
-from app.models.dataset import Dataset
-from app.models.training_job import TrainingJob
+from app.model.user import User
+from app.model.dataset import Dataset
+from app.model.training_job import TrainingJob
 from app.schemas.training import TrainStartResponse, TrainStatusResponse, TrainingJobOut, TrainingJobList, TrainingJobActionResult, TrainingJobUpdate, TrainingJobLogAppend, TrainingJobLogOut
 from app.config import settings
+# v3.0.0 Phase 3: 业务编排下沉到 Service
+from app.services import TrainingService, JobStateService
 
 router = APIRouter()
 
@@ -127,156 +134,36 @@ async def start_training(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    启动异步训练任务
+    启动异步训练任务 (v3.0.0 Phase 3: thin wrapper, 业务下沉到 TrainingService)
+
     - 提交到 Celery worker
     - 返回 task_id 供前端轮询
-
-    model_name 兜底: 若前端没传/传了空, 自动按 {base_model}_v1_{ts} 生成
-    格式与前端 TrainingParamsForm.genAutoName / Training.vue.genDefaultModelName 一致
+    - model_name 兜底 / broker 校验 / 预创建行 / 失败回滚 全部在 TrainingService
 
     pretrained_model_path: 增量训练 (再训练) 时, 传入 .pth 文件路径作为模型起点
     - 空字符串 (默认): 从头微调 (timm ImageNet 预训练权重)
     - 已有路径: 加载该 .pth 的 state_dict (fine-tune 旧模型)
-
-    v2.5.15 P0-4 改造: def → async def
-    - 旧: FastAPI 用 threadpool 跑同步路由, 内部再用 _run_async 嵌套 event loop
-      在高并发下会触发 "RuntimeError: Event loop is closed" 等不稳定问题
-    - 新: async def 直接 await DB 操作, 与 start_existing_training_job 模式一致
-    - socket.create_connection 用 asyncio.to_thread 包一下, 避免阻塞 event loop
-
-    v2.5.16: 按 dataset.task_type 分发到对应 Celery 任务
-    (classification/detection/segmentation), 修复检测/分割数据集无法训练的问题.
     """
-    # ---- 校验数据集并取 task_type ----
-    ds = await db.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(404, f"Dataset id={dataset_id} not found")
-    task_type = (ds.task_type or "classification").lower()
-
-    # model_name 兜底: 前端为空时, 自动生成
-    if not model_name or not model_name.strip():
-        ts = int(datetime.utcnow().timestamp()) % 10000000000
-        model_name = f"{base_model}_v1_{ts}"
-
-    # 预检: Redis broker 是否可用? 避免 .delay() 长时间阻塞
-    # v2.5.15: 用 asyncio.to_thread 包装同步 socket, 避免阻塞 event loop
-    import socket
-    broker_host = settings.REDIS_HOST
-    broker_port = settings.REDIS_PORT
-    try:
-        await asyncio.to_thread(_check_broker, broker_host, broker_port)
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Celery broker (Redis) at {broker_host}:{broker_port} unavailable: {e}. Please start Redis and the Celery worker."
-        )
-
-    # ---- 关键: 预创建 TrainingJob 行 (state=PENDING), 消除竞态 ----
-    # 之前只在 worker 启动时才 INSERT, 导致前端提交后立刻 GET /jobs 查不到.
-    #
-    # 本实现:
-    # 1. 客户端预生成 UUID (Celery task_id 标准格式), 用这个 ID 同时:
-    #    a) 预创建 TrainingJob 行, celery_task_id = 这个 UUID
-    #    b) 调用 .apply_async(task_id=...) 强制 Celery 用这个 ID 入队
-    # 2. worker 启动后 _create_job() 用 celery_task_id 查找, 一定能命中
-    #    (因为预创建行在 API 调用前就写好, 且 ID 是同一份)
-    # 3. worker 找到后 UPDATE state=PROGRESS 即可, 不会重复 INSERT
-    #
-    # 这样前端提交后 GET /jobs 立即能查到新任务 (state=PENDING),
-    # worker 启动后该行自动切到 PROGRESS.
-    from sqlalchemy.dialects.mysql import insert as mysql_insert
-    from app.database import AsyncSessionLocal
-    from app.models.training_job import TrainingJob
-    import uuid
-
-    # 预生成 task_id, 格式与 Celery 一致 (32 位 hex 字符串)
-    celery_task_id = uuid.uuid4().hex
-
-    async def _create_pending_job() -> int:
-        """v2.5.15 P0-4: async def, 直接 await, 不嵌套 _run_async"""
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                mysql_insert(TrainingJob).values(
-                    celery_task_id=celery_task_id,
-                    user_id=current_user.id,
-                    dataset_id=dataset_id,
-                    base_model=base_model,
-                    model_name=model_name,
-                    task_type=task_type,  # 写入任务类型, 前端列表/详情据此渲染曲线
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    learning_rate=learning_rate,
-                    state="PENDING",
-                    progress=0.0,
-                    message="等待 worker 启动...",
-                    created_at=datetime.utcnow(),  # 入库时间, 区别于 started_at (worker 接手)
-                    started_at=None,                 # PENDING 阶段不预设, 等 worker 接手
-                    finished_at=None,
-                )
-            )
-            await db.commit()
-            # 直接用 inserted_primary_key 拿 id (并发安全)
-            pk = result.inserted_primary_key
-            return pk[0] if pk else None
-
-    job_id = await _create_pending_job()
-
-    try:
-        # 用 .apply_async(task_id=...) 强制 Celery 用我们预生成的 ID 入队
-        # 这样 worker 端的 task_id 一定等于预创建行里的 celery_task_id
-        # 按 task_type 分发到对应任务 (classification/detection/segmentation)
-        task = _apply_training_task(
-            task_type,
-            _build_task_kwargs(
-                task_type,
-                dataset_id=dataset_id,
-                user_id=current_user.id,
-                base_model=base_model,
-                model_name=model_name,
-                epochs=epochs,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
-                pretrained_model_path=pretrained_model_path,
-            ),
-            task_id=celery_task_id,  # 强制使用预生成的 ID
-        )
-    except Exception as e:
-        # 入队失败, 回滚预创建的行, 避免脏数据
-        async def _rollback_pending() -> None:
-            """v2.5.15 P0-4: async def + await"""
-            from sqlalchemy import delete
-            async with AsyncSessionLocal() as db:
-                await db.execute(
-                    delete(TrainingJob).where(TrainingJob.id == job_id)
-                )
-                await db.commit()
-        try:
-            await _rollback_pending()
-        except Exception:
-            pass  # 兜底失败也无所谓, 留条脏数据后续清理
-        err_msg = str(e)[:200]
-        if any(k in err_msg.lower() for k in ["connection", "refused", "redis", "broker", "timeout"]):
-            raise HTTPException(
-                status_code=503,
-                detail=f"Celery broker unavailable: {err_msg}. Please start Redis and the Celery worker."
-            )
-        raise HTTPException(500, f"Failed to submit training task: {err_msg}")
-
-    # task.id 应等于我们预生成的 celery_task_id
-    assert task.id == celery_task_id, f"Celery task id mismatch: {task.id} != {celery_task_id}"
-
-    return TrainStartResponse(
-        task_id=task.id,
-        celery_task_id=task.id,
-        job_id=job_id,  # 预创建行的 id, 前端 loadJobs 立即能看到
-        state="PENDING",
-        message="Training task submitted",
+    result = await TrainingService.start_training(
+        db,
+        user_id=current_user.id,
+        dataset_id=dataset_id,
+        base_model=base_model,
+        model_name=model_name,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        pretrained_model_path=pretrained_model_path,
     )
+    return TrainStartResponse(**result)
 
 
 def _check_broker(host: str, port: int) -> None:
     """v2.5.15 P0-4: 同步的 broker TCP 探测, 由 asyncio.to_thread 调用
     提到模块顶层, 方便测试单独覆盖
+
+    v3.0.0 Phase 3: 实际逻辑已下沉到 TrainingService.start_training
+    保留此处仅为向后兼容 / 旧调用方, 可在 Phase 4 清理时删除
     """
     import socket
     s = socket.create_connection((host, port), timeout=2.0)
@@ -293,83 +180,20 @@ async def get_progress(
 ):
     """查询训练进度 (前端轮询, 每 2 秒一次) - 鉴权可选
 
-    注意: Celery SUCCESS 状态不带 meta (只有 result dict), 所以 progress/msg
-    会为空. 这里在终端态回退查 DB, 拿到 TrainingJob.progress 和 message,
-    确保前端看到 100% 而不是 0%.
-
-    实现: 用 async def + Depends(get_db) 直接在主 uvicorn loop 上跑 DB 查询.
-    避免 sync 路由 + run_coroutine_threadsafe 的 threadpool 桥接不稳定问题.
+    **v3.0.0 Phase 3 重构**: 状态合并逻辑下沉到 JobStateService.get_snapshot
+    (Celery + DB 合并 / 终态回退 / 4 处真相源统一) 都在 service 层
     """
-    from celery.result import AsyncResult
-
-    state = "PENDING"
-    info: dict = {}
-    try:
-        result = AsyncResult(task_id)
-        try:
-            state = result.state
-        except Exception:
-            state = "PENDING"
-        try:
-            raw_info = result.info
-            if isinstance(raw_info, dict):
-                info = raw_info
-        except Exception:
-            info = {}
-    except Exception:
-        state = "PENDING"
-        info = {}
-
-    # 终端态 + Celery result 缺 progress/msg → 回退 DB
-    # 注意: Celery SUCCESS 状态下, result.info 是 task 返回值 (dict 包含 status/result/job_id)
-    # 而不是 meta. 所以即使 info 非空, 也不一定有 progress 字段
-    db_progress = None
-    db_msg = None
-    db_total_epochs = None
-    db_current_epoch = None
-    # v2.5.28: 拉 started_at / finished_at (DB 权威), 返回给 REST 客户端
-    db_started_at = None
-    db_finished_at = None
-    if state in ("SUCCESS", "FAILURE", "REVOKED") and "progress" not in info:
-        try:
-            row = (await db.execute(
-                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
-            )).scalar_one_or_none()
-            if row is not None:
-                db_progress = row.progress
-                db_msg = row.message
-                if row.error and not db_msg:
-                    db_msg = row.error[:200]
-                db_total_epochs = row.epochs
-                if isinstance(row.history, list) and row.history:
-                    db_current_epoch = row.history[-1].get("epoch")
-                db_started_at = row.started_at
-                db_finished_at = row.finished_at
-        except Exception:
-            pass
-    # v2.5.28: 非终态也读一下 started_at (PENDING 阶段为 None, worker 接手后写入)
-    if db_started_at is None and state != "PENDING":
-        try:
-            row2 = (await db.execute(
-                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
-            )).scalar_one_or_none()
-            if row2 is not None:
-                db_started_at = row2.started_at
-                if state in ("SUCCESS", "FAILURE", "REVOKED"):
-                    db_finished_at = row2.finished_at
-        except Exception:
-            pass
-
+    snap = await JobStateService.get_snapshot(task_id, db)
     return TrainStatusResponse(
         task_id=task_id,
-        state=state,
-        progress=float(db_progress if db_progress is not None else info.get("progress", 0)),
-        current_epoch=info.get("epoch") or db_current_epoch,
-        total_epochs=info.get("total_epochs") or db_total_epochs,
-        message=(db_msg if db_msg is not None else info.get("msg", "")) or "",
+        state=snap.state,
+        progress=snap.progress,
+        current_epoch=snap.current_epoch,
+        total_epochs=snap.total_epochs,
+        message=snap.message or "",
         history=None,
-        started_at=db_started_at,
-        finished_at=db_finished_at,
+        started_at=snap.started_at,
+        finished_at=snap.finished_at,
     )
 
 
