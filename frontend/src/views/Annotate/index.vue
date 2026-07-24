@@ -36,6 +36,8 @@ import AnnotationToolbar from './components/AnnotationToolbar.vue'
 import AnnotationCanvas from './components/AnnotationCanvas.vue'
 // v2.5.9 新增: 标注工作台左侧"操作指导"侧栏
 import AnnotationGuideSidebar from './components/AnnotationGuideSidebar.vue'
+// v2.5.44 新增: 顶部"返回数据集详情"按钮 (跳转回 /datasets/:id)
+import { ArrowLeft, Grid } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -246,8 +248,55 @@ watch(datasetId, async (v) => {
   const r: any = actResp
   activeModel.value = r?.items?.[0] || r?.model || null
   await refreshFinetuneModels()
+  // v2.5.44: 优先消费 URL 上的 ?imageId= query (来自数据集详情页"去标注"按钮)
+  // - 存在则调 loadSpecificImage, 跳过 loadNext, 工作台首张图即用户勾选的「待标注」图
+  // - 加载成功后清掉 query, 避免后续 dataset 切换时再次误用
+  // - 加载失败 (例如该 imageId 不属于当前 dataset / 已被删除) 回退到 loadNext
+  const targetImageId = Number(route.query.imageId)
+  if (targetImageId && !Number.isNaN(targetImageId)) {
+    const ok = await loadSpecificImage(targetImageId)
+    if (ok) {
+      // 清除 query, 避免后续 watch(datasetId) 再次触发同一 imageId 加载
+      router.replace({ query: {} })
+      return
+    }
+  }
   loadNext()
 })
+
+/**
+ * v2.5.44: 加载指定的 imageId 作为当前图
+ * - 用于支持「数据集详情页勾选 N 张图, 点击去标注, 工作台默认显示选中区域第一张待标注图」
+ * - 实现: 调 imageApi.detail 拉详情, 推入 historyIds 头, cursor=0
+ *   之后用户点「下一张」会从后端拉新图 (排除 historyIds), 流转顺畅
+ * - 返回值: true=成功, false=失败 (后端报错 / 数据不合法)
+ *   失败时 caller 决定回退策略 (目前是回退到 loadNext)
+ */
+const loadSpecificImage = async (imageId: number): Promise<boolean> => {
+  if (!datasetId.value) return false
+  loading.value = true
+  try {
+    const detail: any = await imageApi.detail(imageId)
+    // 基础校验: 详情必须属于当前 dataset, 否则视为失败 (避免跨 dataset 误显示)
+    if (detail?.dataset_id && Number(detail.dataset_id) !== Number(datasetId.value)) {
+      ElMessage.warning('指定的图片不属于当前数据集, 已回退到默认加载')
+      return false
+    }
+    // 推入 history 栈头, cursor=0
+    historyIds.value = [imageId]
+    historyCursor.value = 0
+    fillImage(detail)
+    return true
+  } catch (e: any) {
+    ElMessage.error(
+      '加载指定图片失败, 已回退到默认加载: ' +
+      (e?.response?.data?.detail || e?.message)
+    )
+    return false
+  } finally {
+    loading.value = false
+  }
+}
 
 // ============== computed ==============
 const pendingCount = computed(() => {
@@ -295,6 +344,17 @@ const allUnknown = computed(() => {
 })
 // 上一张按钮是否可用
 const canGoPrev = computed(() => historyCursor.value > 0)
+// v2.5.44 新增: 当前数据集名称 (顶部返回按钮旁展示, 增强上下文)
+const currentDatasetName = computed(() => {
+  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
+  return ds?.name || ''
+})
+// v2.5.44 新增: 返回按钮 — 跳转到当前数据集的详情页 (/datasets/:id)
+// - 仅在 datasetId 存在时启用, 避免空态时跳到不存在的路由
+// - 与右侧 viewDataset 行为一致, 但放在顶部更醒目
+function goBackToDataset() {
+  if (datasetId.value) router.push(`/datasets/${datasetId.value}`)
+}
 
 async function refreshStats() {
   if (!datasetId.value) return
@@ -511,6 +571,27 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
 
 <template>
   <div>
+    <!-- v2.5.44 新增: 顶部"返回数据集详情"按钮 + 当前数据集名
+         - 之前: 只能通过右侧 DetectionPanel/ClassificationPanel/SegmentationPanel
+                 底部的"去数据集详情浏览全部图片"链接返回, 路径深, 用户反馈不便
+         - 现在: 顶部第一行即可一键返回, 同时展示当前数据集名作为上下文锚点
+         - 设计原则: 按钮用 plain + 小尺寸, 避免与下方主要操作 (AI 预标注/保存) 视觉争抢
+         - datasetId 为空时按钮禁用, 避免跳到不存在的 /datasets/null 路由 -->
+    <div class="annotate-topbar">
+      <el-button
+        size="small" plain :icon="ArrowLeft"
+        :disabled="!datasetId"
+        @click="goBackToDataset"
+      >返回数据集详情</el-button>
+      <span v-if="currentDatasetName" class="annotate-topbar-title">
+        <el-icon style="vertical-align: -2px;"><Grid /></el-icon>
+        {{ currentDatasetName }}
+      </span>
+      <span v-else class="annotate-topbar-title annotate-topbar-title--empty">
+        未选择数据集
+      </span>
+    </div>
+
     <!-- 应用训练好的模型引导 -->
     <el-alert
       v-if="activeModel"
@@ -682,7 +763,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           :history-ids="historyIds"
           :image="image"
           :det-open-popover-idx="detOpenPopoverIdx"
-          @save="detAnnotRef?.save?.()"
+          @save="() => saveDetectionBBoxes(bboxList)"
           @apply-copy-suggestions="applyCopySuggestions"
           @ignore-copy-suggestions="ignoreCopySuggestions"
           @prev="loadPrev"
@@ -743,5 +824,31 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* v2.5.44: 顶部"返回按钮 + 数据集名"行
+   - 独立一行, 与下方 el-alert 之间保留 12px 间距 (el-alert 自带 margin-bottom: 12px)
+   - 返回按钮用 plain + small, 不与主要操作按钮争抢视觉权重
+   - 右侧数据集名用细体 + 浅灰, 作为上下文标识, 不喧宾夺主 */
+.annotate-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;       /* 紧贴下方 el-alert, 让 el-alert 的 12px 自然撑开间距 */
+  min-height: 32px;          /* 避免数据集名为空时整行塌缩 */
+}
+.annotate-topbar-title {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  letter-spacing: 0.3px;
+}
+.annotate-topbar-title--empty {
+  color: #c0c4cc;
+  font-style: italic;
+  font-weight: 400;
 }
 </style>

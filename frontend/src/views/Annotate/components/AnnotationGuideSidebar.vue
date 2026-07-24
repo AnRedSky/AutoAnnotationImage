@@ -156,7 +156,7 @@ const detectionGuide: Guide = {
         '③ 拖 bbox 角点<strong>缩放</strong>, 拖 body<strong>平移</strong>',
         '④ 点 bbox 标签<strong>改类别</strong> (弹下拉)',
         '⑤ 点 × 按钮<strong>删除</strong> (需确认)',
-        '⑥ 满意后点<kbd>保存 (N)</kbd>提交到后端',
+        '⑥ 满意后点<kbd>保存</kbd>提交到后端 (新增/删除/修改/全清空均用此按钮)',
       ],
     },
     {

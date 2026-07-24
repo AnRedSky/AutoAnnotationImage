@@ -1,21 +1,30 @@
 /**
  * useAutoAnnotate.ts
  * ===================================================
- * AI 预标注 composable (v2.5.7 拆分自 Annotate.vue)
+ * AI 预标注 composable (v2.5.7 拆分自 Annotate.vue; v2.5.36 接入 SSE 实时进度)
  *
  * 职责:
- * - 分类任务的 AI 预标注 (走 fine-tune / ImageNet 预训练)
- * - 检测任务的 AI 预标注 (走 fine-tune / 预训练 yolov8n/s/m/l/x)
- * - 分割任务的 AI 预标注 (仅走 fine-tune; 分割暂无预训练模型自动标注接口)
+ * - 分类任务的 AI 预标注 (走 fine-tune / ImageNet 预训练, 同步接口)
+ * - 检测任务的 AI 预标注 (走 fine-tune / 预训练 yolov8n/s/m/l/x, Celery 异步 + SSE)
+ * - 分割任务的 AI 预标注 (仅走 fine-tune; Celery 异步 + SSE)
  * - 严格模式: 默认走 fine-tune, 走基础模型前弹窗警告
+ *
+ * v2.5.36 改造:
+ * - detection/segmentation 走 Celery, 入队后订阅 detectionApi.streamProgress /
+ *   segmentationApi.streamProgress, 实时显示进度百分比 + message
+ * - 终态 (SUCCESS/FAILURE/REVOKED) 自动调用 refreshStats() + loadNext()
+ * - autoLabelProgress / autoLabelProgressMessage 暴露给父组件, 用于顶部 toast
+ *   / Notification 实时展示
+ * - 切页 / 重复点击会自动取消旧的 SSE 连接, 防止僵尸流
  *
  * 依赖:
  * - 入参: datasetId, threshold, iouThreshold, useFinetune, selectedModelId,
  *         modelName, detectionModelName, finetuneModels, activeModel
  * - 副作用: refreshStats (父组件定义), loadNext (父组件定义)
- * - 输出: autoLabeling (loading 状态)
+ * - 输出: autoLabeling (loading 状态), autoLabelProgress (0-100),
+ *         autoLabelProgressMessage (最近一次进度消息)
  */
-import { ref, type Ref } from 'vue'
+import { ref, onUnmounted, type Ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { autoAnnotateApi, detectionApi, modelApi, segmentationApi } from '@/api'
 
@@ -40,6 +49,155 @@ export function useAutoAnnotate(options: {
 
   /** AI 预标注中 (loading 态) */
   const autoLabeling = ref(false)
+  /**
+   * 实时进度 (0-100), 父组件可绑定到 toolbar / progress 提示上
+   * - 入队前/结束后归零
+   * - SSE 每帧更新
+   */
+  const autoLabelProgress = ref(0)
+  /** 最近一帧的 message, 父组件可绑定显示 */
+  const autoLabelProgressMessage = ref('')
+  /** 当前任务 ID, 用于 cancel + 调试 */
+  const autoLabelTaskId = ref<string | null>(null)
+
+  /**
+   * 当前活动的 SSE 取消器 — 切页/重复点击时主动 cancel, 防止僵尸流
+   * (createSSEStream 返回的是一个 () => void, 调用即 abort fetch + ReadableStream)
+   */
+  let activeStreamCancel: (() => void) | null = null
+  const cancelActiveStream = () => {
+    if (activeStreamCancel) {
+      try { activeStreamCancel() } catch { /* noop */ }
+      activeStreamCancel = null
+    }
+  }
+  // 组件卸载时自动 cancel
+  onUnmounted(() => {
+    cancelActiveStream()
+  })
+
+  /**
+   * 订阅 SSE 实时进度 — 通用入口, 供 detection / segmentation 复用
+   * @param apiCall 'detection' | 'segmentation' — 决定走哪个 api.streamProgress
+   * @param taskId Celery task_id
+   * @param modelLabel 用于 ElMessage / 终态统计的「模型侧标签」(e.g. yolov8n / fine-tune)
+   */
+  const subscribeAutoLabelProgress = (
+    apiCall: 'detection' | 'segmentation',
+    taskId: string,
+    modelLabel: string,
+  ) => {
+    cancelActiveStream()
+    autoLabelTaskId.value = taskId
+    autoLabelProgress.value = 0
+    autoLabelProgressMessage.value = '已入队, 等待 worker 启动...'
+
+    const streamApi = apiCall === 'detection'
+      ? detectionApi.streamProgress
+      : segmentationApi.streamProgress
+
+    activeStreamCancel = streamApi(taskId, {
+      onMessage: (data: any) => {
+        const state = data?.state || 'PENDING'
+        const progress = Number(data?.progress || 0)
+        const message = data?.message || ''
+        autoLabelProgress.value = Math.max(0, Math.min(100, progress))
+        if (message) autoLabelProgressMessage.value = message
+
+        // 终态 (SUCCESS/FAILURE/REVOKED): 关流 + 收尾
+        if (state === 'SUCCESS' || state === 'FAILURE' || state === 'REVOKED') {
+          cancelActiveStream()
+          autoLabeling.value = false
+          handleAutoLabelTerminal(state, modelLabel, data)
+        }
+      },
+      onComplete: () => {
+        // 服务端正常 end 事件 → 关流 + 兜底收尾
+        // (SUCCESS 帧 onMessage 已处理过, 这里只兜底 FAILURE/REVOKED 等非 SUCCESS 终态)
+        cancelActiveStream()
+        if (autoLabeling.value) {
+          autoLabeling.value = false
+          // 兜底拉一次 REST 进度, 避免漏掉消息
+          void fetchFinalProgressFallback(apiCall, taskId, modelLabel)
+        }
+      },
+      onError: (err: Error) => {
+        // 网络异常 / 后端崩: cancel + 弹错误 + 兜底拉一次 REST
+        cancelActiveStream()
+        autoLabeling.value = false
+        ElMessage.warning(
+          `AI 预标注进度推送中断: ${err.message}; 尝试拉取终态...`
+        )
+        void fetchFinalProgressFallback(apiCall, taskId, modelLabel)
+      },
+    })
+  }
+
+  /**
+   * SSE 异常兜底: 拉一次 REST 进度, 拿到终态就刷 stats + loadNext
+   * - SSE 在 onComplete / onError 触发后调用
+   * - 后端 _resolve_*_task_progress 始终返回最新 state, 即使是终态
+   */
+  const fetchFinalProgressFallback = async (
+    apiCall: 'detection' | 'segmentation',
+    taskId: string,
+    modelLabel: string,
+  ) => {
+    try {
+      const data: any = apiCall === 'detection'
+        ? await detectionApi.progress(taskId)
+        : await segmentationApi.progress(taskId)
+      handleAutoLabelTerminal(data?.state || 'UNKNOWN', modelLabel, data)
+    } catch (e: any) {
+      // 拉不到就算了, 至少 refreshStats 让用户看到最新统计
+      try { await refreshStats() } catch { /* noop */ }
+    }
+  }
+
+  /**
+   * 终态收尾: 弹消息 + refreshStats + loadNext
+   * @param state 'SUCCESS' | 'FAILURE' | 'REVOKED' | 其他
+   * @param modelLabel 用于 ElMessage 的模型名 (e.g. yolov8n / fine-tune#42)
+   * @param payload 后端返回的完整进度 dict
+   */
+  const handleAutoLabelTerminal = async (
+    state: string,
+    modelLabel: string,
+    payload: any,
+  ) => {
+    // 终态统计
+    const total = payload?.total ?? payload?.result?.total
+    const autoLabeled = payload?.auto_labeled ?? payload?.result?.auto_labeled
+    const noMatch = payload?.no_match ?? payload?.result?.no_match
+
+    if (state === 'SUCCESS') {
+      if (typeof total === 'number' && typeof autoLabeled === 'number') {
+        const nm = typeof noMatch === 'number' ? `, 无匹配 ${noMatch} 张` : ''
+        ElMessage.success(
+          `[${modelLabel}] AI 预标注完成: 共 ${total} 张, 自动标注 ${autoLabeled} 张${nm}`,
+        )
+      } else {
+        ElMessage.success(`[${modelLabel}] AI 预标注完成`)
+      }
+    } else if (state === 'FAILURE') {
+      const errMsg = payload?.message || payload?.result?.error || '未知错误'
+      ElMessage.error(`[${modelLabel}] AI 预标注失败: ${errMsg}`)
+    } else if (state === 'REVOKED') {
+      ElMessage.warning(`[${modelLabel}] AI 预标注已取消`)
+    } else {
+      // 兜底: 状态非终态但流断了, 当作未完成处理
+      return
+    }
+
+    // 终态统一: 刷新统计 + 加载下一张, 让用户立刻看到 AI 标注结果
+    try { await refreshStats() } catch { /* noop */ }
+    try { await loadNext() } catch { /* noop */ }
+
+    // 重置进度 ref
+    autoLabelProgress.value = 0
+    autoLabelProgressMessage.value = ''
+    autoLabelTaskId.value = null
+  }
 
   /**
    * 启动按钮 dispatcher: 按当前 dataset task_type 分派
@@ -63,7 +221,7 @@ export function useAutoAnnotate(options: {
   }
 
   /**
-   * 分类任务 AI 预标注
+   * 分类任务 AI 预标注 (同步接口, 无 SSE)
    */
   const runAutoAnnotate = async () => {
     if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
@@ -145,6 +303,7 @@ export function useAutoAnnotate(options: {
 
   /**
    * 检测任务 AI 预标注 (走 fine-tune 或预训练 yolov8*)
+   * v2.5.36 改造: 入队后订阅 detectionApi.streamProgress, 终态自动 refreshStats + loadNext
    */
   const runDetectionAutoAnnotate = async () => {
     if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
@@ -171,6 +330,7 @@ export function useAutoAnnotate(options: {
     autoLabeling.value = true
     try {
       let resp: any
+      let modelLabel: string
       if (useFinetune.value) {
         resp = await detectionApi.startAutoAnnotate({
           dataset_id: datasetId.value,
@@ -178,6 +338,20 @@ export function useAutoAnnotate(options: {
           conf_threshold: threshold.value,
           iou_threshold: iouThreshold.value,
         })
+        // 选中的 fine-tune 模型名 (找不到就回退到 id)
+        const selected = finetuneModels.value.find((m) => m.id === selectedModelId.value)
+        const name = selected?.name || resp.model_name || resp.base_model || `model#${selectedModelId.value}`
+        modelLabel = `Fine-tune ${name}`
+        // 预训练分支用 matched/unmatched 诊断, fine-tune 直接走 SSE
+        if (!resp?.task_id) {
+          // 后端没返回 task_id, 视为同步完成 (老接口兜底)
+          ElMessage.warning('后端未返回 task_id, 无法订阅实时进度')
+          return
+        }
+        // 简短回执 + 启动 SSE
+        ElMessage.info(`[${modelLabel}] ${resp.message || '任务已入队, 等待 worker 启动...'}`)
+        subscribeAutoLabelProgress('detection', resp.task_id, modelLabel)
+        return
       } else {
         resp = await detectionApi.startAutoAnnotatePretrained({
           dataset_id: datasetId.value,
@@ -185,7 +359,14 @@ export function useAutoAnnotate(options: {
           conf_threshold: threshold.value,
           iou_threshold: iouThreshold.value,
         })
+        modelLabel = `预训练 ${detectionModelName.value}`
+        if (!resp?.task_id) {
+          ElMessage.warning('后端未返回 task_id, 无法订阅实时进度')
+          return
+        }
       }
+
+      // 下面是预训练分支的诊断 (v2.5.32/33/34)
       const matched = resp.matched_coco_classes || []
       const unmatched = resp.unmatched_categories || []
       const datasetCats = resp.dataset_categories || []
@@ -193,16 +374,7 @@ export function useAutoAnnotate(options: {
       // 端点特有的 (detection.py:483-486), fine-tune 端点 (detection.py:410-414) 不返回这些字段.
       // 之前不管 useFinetune 走哪条路径, 都会无脑读这三个字段, 当 fine-tune 返回 undefined 时
       // datasetCats 会 fall back 到 [], 错误地走"数据集无类目"分支, 误导用户.
-      // 修复: 三支诊断只在预训练分支生效; fine-tune 分支直接用后端 message.
-      if (useFinetune.value) {
-        // v2.5.34: fine-tune 模式 — 简单回执后端 message, 不做 COCO 诊断
-        ElMessage.info(
-          `[Fine-tune ${selectedModelId.value || '?'}] ${resp.message || '任务已入队, 等待 worker 启动...'}`
-        )
-        return
-      }
-      // v2.5.32: 0 匹配时, 弹详细诊断, 告诉用户具体哪些类目没命中 COCO,
-      // 并建议改用 fine-tune 模型 (而不是用「未匹配任何 COCO 类」一句话敷衍)
+      // 修复: 三支诊断只在预训练分支生效; fine-tune 分支直接订阅 SSE, 不做 COCO 诊断.
       if (matched.length === 0 && datasetCats.length > 0) {
         const catList = datasetCats.join('、')
         const unmatchedList = unmatched.length > 0
@@ -236,9 +408,11 @@ export function useAutoAnnotate(options: {
         )
         // info 提示简短回执
         ElMessage.info(
-          `[预训练 ${detectionModelName.value}] 任务已入队 (task_id: ${resp.task_id || '?'}), ` +
+          `[${modelLabel}] 任务已入队 (task_id: ${resp.task_id || '?'}), ` +
           `但与本数据集 ${datasetCats.length} 个类目均无 COCO 交集, 不会产生标注。`
         )
+        // 仍订阅 SSE, 让用户能看到 worker 在跑 (空跑也算跑), 终态会显示 total=0
+        subscribeAutoLabelProgress('detection', resp.task_id, modelLabel)
       } else if (datasetCats.length === 0) {
         // v2.5.33: 数据集无类目 — 这是 0 匹配的真凶, 之前会被笼统地归为「未匹配任何 COCO 类」
         // 实际是: 数据集根本没类目, 谈不上匹配 COCO. 弹窗引导用户先去「数据集管理」添加类目
@@ -267,8 +441,10 @@ export function useAutoAnnotate(options: {
         )
         // info 简短回执
         ElMessage.info(
-          `[预训练 ${detectionModelName.value}] 任务已入队, 但数据集无类目, worker 不会写入任何标注。`
+          `[${modelLabel}] 任务已入队, 但数据集无类目, worker 不会写入任何标注。`
         )
+        // 仍订阅 SSE, 让用户能看到 worker 跑 (0 标注) + 终态显示 total/auto_labeled
+        subscribeAutoLabelProgress('detection', resp.task_id, modelLabel)
       } else {
         // v2.5.33: matched.length > 0 (部分匹配) — 显示匹配 + 未匹配统计
         // 之前只会显示匹配列表, 用户不知道剩下的类目为什么没匹配
@@ -276,15 +452,17 @@ export function useAutoAnnotate(options: {
           ? `, ${unmatched.length} 个未匹配 (${unmatched.slice(0, 5).join('、')}${unmatched.length > 5 ? '...' : ''})`
           : ''
         ElMessage.info(
-          `[预训练 ${detectionModelName.value}] 任务已入队, 等待 Celery worker 启动... ` +
+          `[${modelLabel}] 任务已入队, 等待 Celery worker 启动... ` +
           `匹配 COCO 类 ${matched.length}/${datasetCats.length}: ${matched.join(', ')}${unmatchedHint}`
         )
+        // v2.5.36: 订阅 SSE 实时进度
+        subscribeAutoLabelProgress('detection', resp.task_id, modelLabel)
       }
     } catch (e: any) {
       ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
-    } finally {
       autoLabeling.value = false
     }
+    // 注意: autoLabeling 在 SSE 终态 / onComplete / onError 时统一收尾, 这里不 finally 改回
   }
 
   /**
@@ -292,6 +470,7 @@ export function useAutoAnnotate(options: {
    * - 与分类/检测对齐: useFinetune 关闭时弹 warning 阻止, 引导用户切回项目模型
    * - 走后端 POST /api/segmentation/auto-annotate?model_version_id=N&dataset_id=D
    *   (后端 worker: auto_annotate_segmentation_task → predict_to_mask_image → 写 SegmentationMask source=ai)
+   * - v2.5.36: 入队后订阅 segmentationApi.streamProgress
    */
   const runSegmentationAutoAnnotate = async () => {
     if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
@@ -318,23 +497,34 @@ export function useAutoAnnotate(options: {
         model_version_id: selectedModelId.value,
       })
       // 后端返回 { task_id, state, message }
+      const selected = finetuneModels.value.find((m) => m.id === selectedModelId.value)
+      const modelName = selected?.name || selected?.base_model || `model#${selectedModelId.value}`
+      const modelLabel = `分割 Fine-tune ${modelName}`
       const taskMsg = resp?.task_id
         ? `任务 ID: ${resp.task_id}`
         : (resp?.message || '已入队')
-      ElMessage.success(
-        `[分割 Fine-tune] 任务已入队, 等待 Celery worker 启动... ${taskMsg}`
-      )
-      // 任务异步执行, 前端不阻塞等待完成; 仅刷新 stats 让用户看到 mask 数量变化
-      await refreshStats()
+      ElMessage.success(`[${modelLabel}] 任务已入队, 等待 Celery worker 启动... ${taskMsg}`)
+
+      if (!resp?.task_id) {
+        // 后端没返回 task_id, 兜底走老的同步刷新
+        await refreshStats()
+        autoLabeling.value = false
+        return
+      }
+      // v2.5.36: 订阅 SSE 实时进度
+      subscribeAutoLabelProgress('segmentation', resp.task_id, modelLabel)
     } catch (e: any) {
       ElMessage.error('AI 预标注失败: ' + (e?.response?.data?.detail || e?.message))
-    } finally {
       autoLabeling.value = false
     }
+    // 注意: autoLabeling 在 SSE 终态 / onComplete / onError 时统一收尾, 这里不 finally 改回
   }
 
   return {
     autoLabeling,
+    autoLabelProgress,
+    autoLabelProgressMessage,
+    autoLabelTaskId,
     onStartAutoLabelClick,
     runAutoAnnotate,
     runDetectionAutoAnnotate,

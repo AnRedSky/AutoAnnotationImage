@@ -88,6 +88,13 @@ export function useDetectionAnnotate(options: {
   const detOpenPopoverIdx = ref<number | null>(null)
 
   // 加载某图的已有 bbox ------------------------------------------------
+  // v2.5.42: 跟踪「上次加载/保存成功」时的 bbox 列表, 作为 save 短路基准
+  // - 不依赖子组件 emit dirty-change 的链式时序, 由 composable 内部独立维护
+  // - loadDetectionAnnotations 完成后立即同步
+  // - saveDetectionBBoxes 成功后立即同步
+  // - 切换图片时由父组件调用 fillImage 重置 (下文)
+  const lastSavedBboxes = ref<BBox[]>([])
+
   const loadDetectionAnnotations = async (imageId: number) => {
     try {
       const r: any = await detectionApi.listBBoxes(imageId)
@@ -99,8 +106,33 @@ export function useDetectionAnnotate(options: {
         category_id: b.category_id,
         confidence: b.confidence,
       }))
+      // v2.5.42: 同步 lastSavedBboxes (本次加载即为「上次保存」状态)
+      lastSavedBboxes.value = JSON.parse(JSON.stringify(bboxList.value))
     } catch {
       bboxList.value = []
+      lastSavedBboxes.value = []
+    }
+    // v2.5.43: 加载完成后同步子组件的 dirty 状态, 修复「切图后 dirty 误判」问题
+    // 根因:
+    //   fillImage 执行顺序是 1) image.value = item  2) bboxList.value = []  3) loadDetectionAnnotations
+    //   步骤 1 触发 DetectionAnnotator 的 imageUrl watch → resetInitial,
+    //         此时 props.modelValue 已被父组件置为 [], 所以 initial 锁定为 '[]'
+    //   步骤 3 完成后, bboxList = [loaded bboxes], modelValue 变为 [loaded bboxes],
+    //         但 initial 仍是 '[]', 导致 dirty = '[loaded bboxes]' !== '[]' = true (错误!)
+    // 后果:
+    //   1) 保存按钮呈现 dirty 高亮态, 用户困惑
+    //   2) autoSaveBeforeSwitch (上一张/下一张) 会触发 saveDetectionBBoxes
+    //   3) 用户若在加载完成的极短瞬间点「保存」, bboxList 可能还是 [],
+    //      而 lastSavedBboxes 是上一次的 [B1,B2], 会触发 clearBBoxes 清空后端
+    // 修复:
+    //   load 完成后显式调 detAnnotRef.resetInitial, 把 initial 同步为当前 modelValue,
+    //   dirty 保持 false, 撤销/重做栈同步清空, 切图后无法 undo 回到旧图状态
+    //   await nextTick 确保 bboxList 的 prop 已传到子组件, 再调 resetInitial 才能拿到正确 modelValue
+    await nextTick()
+    try {
+      detAnnotRef.value?.resetInitial?.()
+    } catch {
+      // resetInitial 失败不应阻塞 load 的整体流程
     }
   }
 
@@ -134,8 +166,29 @@ export function useDetectionAnnotate(options: {
   }
 
   // 保存 bbox 列表 ----------------------------------------------------
+  /**
+   * v2.5.42: saveDetectionBBoxes 重构, 完全摆脱对 detDirty 的依赖
+   * - 之前: 父组件 DetectionPanel @save 直接链式调 detAnnotRef.save() → 触发 onSave() 再次 emit
+   *   整套链路任何环节时序异常 (如子组件 dirty-watch 与父 ref 同步慢) 都会导致「点保存无反应」
+   * - 现在: 父组件 @save 直接传 bboxList 进来, 跳过链式 emit
+   * - 安全: 函数内部用 composable 内部维护的 lastSavedBboxes (与后端当前状态一致) 做短路基准
+   *   - 与 bboxes 字符串一致 → 跳过网络请求 (用户没改)
+   *   - 与 bboxes 字符串不一致 → 正常保存 (不论 detDirty 状态如何)
+   * - 兜底: 即便 detDirty 时序异常 (例如子组件 emit 丢失) 也不会导致「点保存无反应」,
+   *   因为 bboxes 直接来自父组件 bboxList, 反映用户最新画布状态
+   * - 兼容旧行为: 「清空全部」场景下 bboxes=[] 与 lastSavedBboxes=[bbox1, ...] 不一致, 正常执行 clearBBoxes
+   */
   const saveDetectionBBoxes = async (bboxes: any[]) => {
     if (!image.value?.id) return
+    // v2.5.42: 短路 — 仅当 bboxes 与后端当前状态完全一致时跳过
+    // - 不依赖 detDirty (避免链式时序问题)
+    // - 字符串比较容差: 字段顺序不影响 JSON.stringify 结果 (只要 bboxes 是同一组对象)
+    const incoming = JSON.stringify(bboxes || [])
+    const lastSaved = JSON.stringify(lastSavedBboxes.value || [])
+    if (incoming === lastSaved) {
+      // 静默 no-op: 用户没改, 也不弹消息 (避免打断操作流)
+      return
+    }
     annotatorSaving.value = true
     try {
       // 1) 清空旧 bbox
@@ -156,6 +209,9 @@ export function useDetectionAnnotate(options: {
       } else {
         ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
       }
+      // v2.5.42: 同步 lastSavedBboxes (本次保存即为「新的上次保存」状态)
+      // 注意: 先同步再 loadDetectionAnnotations, 因为 load 会重置它一次, 但保持顺序让逻辑清晰
+      lastSavedBboxes.value = JSON.parse(JSON.stringify(bboxes || []))
       await loadDetectionAnnotations(image.value.id)
       // 等待 bboxList 更新传到子组件后, 重置 initial -> dirty=false
       await nextTick()

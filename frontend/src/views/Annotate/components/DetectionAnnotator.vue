@@ -275,8 +275,12 @@ function undoAll() {
  *
  * v2.5.38: 弹窗文案调整 — 明确告知用户「清空」后还需要点「保存」才能
  *   真正从后端删除已标注的 bbox, 避免「以为已经清掉」但实际后端仍有数据。
- *   - 本函数只清本地草稿, 标记 dirty=true, 配合「保存 (0)」按钮提交后端
+ *   - 本函数只清本地草稿, 标记 dirty=true, 配合「保存」按钮提交后端
  *   - 「清空」本身不会向后端发送任何请求
+ *
+ * v2.5.41: 弹窗文案适配统一「保存」按钮
+ * - 之前: 提示「需点「保存 (0)」才能从数据库删除」
+ * - 现在: 按钮文字已统一为「保存」, 同步去掉 "(0)" 后缀, 避免和新版按钮不一致
  */
 async function clearAllWithConfirm() {
   if (!props.modelValue || props.modelValue.length === 0) {
@@ -288,7 +292,7 @@ async function clearAllWithConfirm() {
       [
         `确定清空全部 ${props.modelValue.length} 个标注?`,
         '',
-        '「清空」仅清空本地草稿, 需点「保存 (0)」才会真正从数据库删除。',
+        '「清空」仅清空本地草稿, 需点「保存」才会真正从数据库删除。',
         '若误操作, 可点击「撤销本次修改」恢复到清空前状态。',
       ].join('\n'),
       '清空确认',
@@ -303,7 +307,7 @@ async function clearAllWithConfirm() {
     emit('update:modelValue', [])
     selectedIndex.value = null
     draw()
-    ElMessage.success('本地草稿已清空, 请点「保存 (0)」删除数据库中的标注')
+    ElMessage.success('本地草稿已清空, 请点「保存」删除数据库中的标注')
   } catch {
     // 用户取消弹窗, 不做任何处理
   }

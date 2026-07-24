@@ -467,6 +467,21 @@ export const segmentationApi = {
   // ---- 进度 ----
   progress: (taskId: string) => http.get(`/segmentation/progress/${taskId}`),
   history: (taskId: string) => http.get(`/segmentation/history/${taskId}`),
+  // ---- SSE 实时进度 (v2.5.36: 与 detectionApi.streamProgress 对齐) ----
+  streamProgress: (
+    taskId: string,
+    callbacks: {
+      onMessage: (data: any) => void
+      onComplete?: () => void
+      onError?: (err: Error) => void
+    }
+  ): (() => void) => {
+    const baseURL = (http.defaults.baseURL as string) || ''
+    const token = localStorage.getItem('token') || ''
+    const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+    const url = `${baseURL}/segmentation/progress/stream/${taskId}${qs}`
+    return createSSEStream(url, callbacks)
+  },
   // ---- 模型版本管理 ----
   listModels: (params?: { dataset_id?: number; task_type?: string }) =>
     http.get('/segmentation/models/', { params: params || {} }),

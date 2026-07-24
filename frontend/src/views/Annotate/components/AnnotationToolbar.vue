@@ -236,6 +236,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { PropType } from 'vue'
 import { MagicStick } from '@element-plus/icons-vue'
 
 const DETECTION_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
@@ -245,40 +246,41 @@ const DETECTION_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
  * - 固定排序: 图片分类 / 目标检测 / 图片分割
  * - 与 utils/taskType.ts 的 TASK_TYPE_OPTIONS 保持一致
  */
-const TASK_TYPE_FILTER_OPTIONS = [
+const TASK_TYPE_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: 'classification', label: '图片分类' },
   { value: 'detection',      label: '目标检测' },
   { value: 'segmentation',   label: '图片分割' },
-] as const
+]
 
-interface Dataset { id: number; name: string; task_type?: string }
-interface Model { id?: number; name: string; base_model?: string; accuracy?: number; framework?: string; params?: string }
-
-const props = defineProps<{
-  datasets: Dataset[]
-  datasetId: number | null
+const props = defineProps({
+  datasets: { type: Array as PropType<{ id: number; name: string; task_type?: string }[]>, required: true },
+  datasetId: { type: Number as PropType<number | null>, default: null },
   /** v2.5.19: 任务类型筛选值, 'classification' / 'detection' / 'segmentation' */
-  taskTypeFilter: string
-  currentTaskTypeRaw: string
-  modelName: string
-  threshold: number
-  iouThreshold: number
-  detectionModelName: string
-  models: Model[]
-  finetuneModels: Model[]
-  selectedModelId: number | null
-  activeModel: Model | null
-  useFinetune: boolean
-  stats: any
-  pendingCount: number
-  aiLabeledCount: number
+  taskTypeFilter: { type: String, required: true },
+  currentTaskTypeRaw: { type: String, required: true },
+  modelName: { type: String, required: true },
+  threshold: { type: Number, required: true },
+  iouThreshold: { type: Number, required: true },
+  detectionModelName: { type: String, required: true },
+  models: { type: Array as PropType<{ id?: number; name: string; base_model?: string; accuracy?: number; framework?: string; params?: string }[]>, required: true },
+  finetuneModels: { type: Array as PropType<{ id?: number; name: string; base_model?: string; accuracy?: number; framework?: string; params?: string }[]>, required: true },
+  selectedModelId: { type: Number as PropType<number | null>, default: null },
+  activeModel: { type: Object as PropType<{ id?: number; name: string; base_model?: string; accuracy?: number; framework?: string; params?: string } | null>, default: null },
+  useFinetune: { type: Boolean, required: true },
+  stats: { type: Object as PropType<any>, default: null },
+  pendingCount: { type: Number, required: true },
+  aiLabeledCount: { type: Number, required: true },
   /** v2.5.15: 已确认人工标注数 (status_counts.human_confirmed) */
-  humanConfirmedCount: number
+  humanConfirmedCount: { type: Number, required: true },
   /** v2.5.15: 已修正人工标注数 (status_counts.human_corrected) */
-  humanCorrectedCount: number
-  sessionStats: { confirmed: number; corrected: number; total_time_ms: number }
-  autoLabeling: boolean
-}>()
+  humanCorrectedCount: { type: Number, required: true },
+  sessionStats: { type: Object as PropType<{ confirmed: number; corrected: number; total_time_ms: number }>, required: true },
+  autoLabeling: { type: Boolean, required: true },
+  /** v2.5.36: AI 预标注实时进度 (0-100) */
+  autoLabelProgress: { type: Number, default: 0 },
+  /** v2.5.36: AI 预标注最近一帧 message */
+  autoLabelProgressMessage: { type: String, default: '' },
+})
 
 const emit = defineEmits<{
   (e: 'dataset-change', v: number): void

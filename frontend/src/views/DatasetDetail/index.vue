@@ -246,6 +246,21 @@ const selectedFinetuneModel = computed(
  */
 const hasFinetuneModel = computed(() => finetuneModels.value.length > 0)
 
+/**
+ * v2.5.45: 当前数据集的任务类型判定
+ * - 用于条件渲染「测评」按钮等任务类型相关操作
+ * - dataset.value 可能在 load 完成前为 null, 默认值走 'classification' 保持向后兼容
+ */
+const currentDatasetTaskType = computed(
+  () => (dataset.value?.task_type as string) || 'classification'
+)
+/**
+ * v2.5.45: 是否目标检测任务
+ * - true 时: 隐藏「测评」按钮 (详见测评按钮处的 v-if + 注释)
+ * - 分类/分割任务保持原有行为
+ */
+const isDetectionTask = computed(() => currentDatasetTaskType.value === 'detection')
+
 function onSelectionChange(rows: any[]) {
   selectedIds.value = rows.map((r) => r.id)
 }
@@ -416,7 +431,7 @@ async function clearOneAnnotation(img: any) {
     ? `确认去除「${img.filename}」的 AI 预标注? 该图片将回到待标注状态, 下次自动标注会重新预测`
     : (tipMap[tt] || tipMap.classification)
   try {
-    await ElMessageBox.confirm(tip, '去除标注', { type: 'warning' })
+    await ElMessageBox.confirm(tip, '清除标注', { type: 'warning' })
   } catch { return }
   try {
     const r: any = await annotationApi.clear([img.id])
@@ -433,7 +448,7 @@ async function clearOneAnnotation(img: any) {
       if (maskN > 0) detailParts.push(`清理 ${maskN} 个分割 mask`)
       const detailSuffix = detailParts.length > 0 ? `, ${detailParts.join(', ')}` : ''
       ElMessage.success(
-        `已去除标注 (${ok} 张${detailSuffix}${skip > 0 ? `, 跳过 ${skip} 张` : ''})`
+        `已清除标注 (${ok} 张${detailSuffix}${skip > 0 ? `, 跳过 ${skip} 张` : ''})`
       )
     } else {
       ElMessage.info(`无需处理 (跳过 ${skip} 张)`)
@@ -441,7 +456,7 @@ async function clearOneAnnotation(img: any) {
     selectedIds.value = selectedIds.value.filter((id) => id !== img.id)
     await load()
   } catch (e: any) {
-    ElMessage.error('去除标注失败: ' + (e?.response?.data?.detail || e?.message))
+    ElMessage.error('清除标注失败: ' + (e?.response?.data?.detail || e?.message))
   }
 }
 
@@ -453,9 +468,9 @@ async function batchClearAnnotation() {
   }
   try {
     await ElMessageBox.confirm(
-      `确认对选中的 ${selectedIds.value.length} 张图片执行"去除标注"?` +
+      `确认对选中的 ${selectedIds.value.length} 张图片执行"清除标注"?` +
       `\n分类图会清人工/AI 类别, 检测图会清所有检测框, 分割图会清 mask 物理文件; 无标注的图片会跳过; 历史会保留在审计日志`,
-      '批量去除标注',
+      '批量清除标注',
       { type: 'warning' }
     )
   } catch { return }
@@ -473,7 +488,7 @@ async function batchClearAnnotation() {
       if (maskN > 0) detailParts.push(`分割 mask ${maskN} 个`)
       const detailSuffix = detailParts.length > 0 ? `, 清理 ${detailParts.join(', ')}` : ''
       ElMessage.success(
-        `已去除标注 ${ok} 张${detailSuffix}${skip > 0 ? `, 跳过 ${skip} 张` : ''}`
+        `已清除标注 ${ok} 张${detailSuffix}${skip > 0 ? `, 跳过 ${skip} 张` : ''}`
       )
     } else {
       ElMessage.info('所选图片均无标注, 跳过')
@@ -481,7 +496,7 @@ async function batchClearAnnotation() {
     selectedIds.value = []
     await load()
   } catch (e: any) {
-    ElMessage.error('批量去除标注失败: ' + (e?.response?.data?.detail || e?.message))
+    ElMessage.error('批量清除标注失败: ' + (e?.response?.data?.detail || e?.message))
   }
 }
 
@@ -504,7 +519,39 @@ async function handleExport(format: 'coco' | 'yolo' | 'csv') {
 }
 
 function goBack() { router.push('/datasets') }
-function goAnnotate() { router.push(`/annotate/${datasetId.value}`) }
+/**
+ * v2.5.44: 「去标注」按钮跳转到标注工作台
+ * - 之前: 一律跳到 /annotate/:datasetId, 工作台自动 loadNext 拉第一张待标注
+ *   问题: 用户在数据集详情页精心勾选了 N 张图片 (通常是从大量已标图中挑出漏标的),
+ *   跳转后却看到一张无关的「下一张」, 还得自己一张张翻到选中区域, 体验割裂
+ * - 现在: 若 selectedIds 非空, 从中找出第一张 status === 'pending' 的图片,
+ *   把其 id 作为 imageId query 拼到 URL 上
+ *   - Annotate 页 onMounted / watch(datasetId) 会读这个 query, 把该图设为当前图
+ *   - 用户进入工作台后看到的第 1 张, 必然是自己勾选的那批里的「待标注」第 1 张
+ *   - 继续点「下一张」时, 工作台按原有逻辑从后端拉新图 (排除 historyIds), 流转顺畅
+ * - 若 selectedIds 为空, 走原行为 (无 imageId, 工作台 loadNext)
+ * - 若 selectedIds 中无 pending 图 (例如全选的都是已标图), 也走原行为,
+ *   工作台会拉下一张待标, 用户至少不会卡在"加载不出图"的死状态
+ */
+function goAnnotate() {
+  const did = datasetId.value
+  if (!did) return
+  let targetImageId: number | null = null
+  if (selectedIds.value.length > 0) {
+    // 按当前 images 数组顺序找第一张 pending (顺序与表格/网格一致, 符合"第一张"直觉)
+    // 用 Set 加速 selectedIds 查找
+    const sel = new Set(selectedIds.value)
+    const firstPending = images.value.find(
+      (img: any) => sel.has(img.id) && img.status === 'pending'
+    )
+    if (firstPending) targetImageId = firstPending.id
+  }
+  if (targetImageId != null) {
+    router.push({ path: `/annotate/${did}`, query: { imageId: String(targetImageId) } })
+  } else {
+    router.push(`/annotate/${did}`)
+  }
+}
 
 function formatBytes(b: number): string {
   if (!b) return '-'
@@ -747,7 +794,20 @@ watch(() => route.params.id, resetPage)
               </el-tag>
             </div>
           </el-tooltip>
+          <!-- v2.5.45: 测评按钮对目标检测任务冗余, 隐藏
+               详细分析:
+               - 测评接口 POST /api/images/preview-confidence 走 batch_predict (top-1/top-5),
+                 是「单标签分类」单图二值「标/不标」预览, 返回字段 (top1/top1_conf/reason)
+                 都基于单标签分类假设
+               - 目标检测每张图含多个 bbox, 每 bbox 独立类别+置信度,
+                 「会被标注」二值判定不准确, 与实际预标注差异大
+               - 用户在标注工作台 DetectionPanel 能直接看到每 bbox 的置信度,
+                 干跑预览的边际价值低
+               - 后端 API 本身保留 (分类任务仍要用), 仅前端按任务类型隐藏入口
+               分割任务同样不适用 top-1 预览, 但本数据集若 task_type=segmentation
+               通常也不会走到这个数据集的检测 UI, 暂不批量隐藏 -->
           <el-tooltip
+            v-if="!isDetectionTask"
             placement="top" :show-after="200"
             :content="hasFinetuneModel
               ? 'dry-run 试跑当前页图片, 不写库, 弹窗显示 3 类: 会标/待标/无交集, 帮你在执行批量预标注前评估阈值是否合适'
@@ -762,9 +822,16 @@ watch(() => route.params.id, resetPage)
           </el-tooltip>
         </div>
 
-        <!-- ===== 操作组 (去标注; 导出已回到 page header 原位) ===== -->
+        <!-- ===== 操作组 (去标注; 导出已回到 page header 原位) =====
+             v2.5.44: 选中有图片时, 跳转后默认显示选中区域的第一张待标注图
+             (通过 URL ?imageId= 透传给工作台, 见 goAnnotate) -->
         <div class="filter-group filter-group--ops">
-          <el-tooltip placement="top" :show-after="200" content="跳转到标注工作台, 继续人工确认/修正">
+          <el-tooltip
+            placement="top" :show-after="200"
+            :content="selectedIds.length > 0
+              ? '跳转到标注工作台, 默认显示选中图片中的第一张待标注图'
+              : '跳转到标注工作台, 继续人工确认/修正'"
+          >
             <el-button :icon="EditPen" @click="goAnnotate" class="filter-cell filter-cell--btn">去标注</el-button>
           </el-tooltip>
         </div>
@@ -782,7 +849,7 @@ watch(() => route.params.id, resetPage)
             {{ selectedIds.length }}
           </el-tag>
           <el-button :disabled="selectedIds.length === 0" type="warning"
-            :icon="RefreshLeft" @click="batchClearAnnotation" class="filter-cell filter-cell--btn">去标</el-button>
+            :icon="RefreshLeft" @click="batchClearAnnotation" class="filter-cell filter-cell--btn">清除标注</el-button>
           <el-button :disabled="selectedIds.length === 0" type="danger"
             :icon="Delete" @click="batchDelete" class="filter-cell filter-cell--btn">删除</el-button>
           <div class="view-mode-switch" :title="viewMode === 'grid' ? '网格视图' : '列表视图'">
@@ -872,15 +939,17 @@ watch(() => route.params.id, resetPage)
               circle
               @click.stop="openViewer(img.id)"
             />
-            <el-button
-              v-if="hasAnnotation(img)"
-              class="clear-btn"
-              type="warning"
-              :icon="RefreshLeft"
-              size="small"
-              circle
-              @click.stop="clearOneAnnotation(img)"
-            />
+            <el-tooltip content="清除标注" placement="top">
+              <el-button
+                v-if="hasAnnotation(img)"
+                class="clear-btn"
+                type="warning"
+                :icon="RefreshLeft"
+                size="small"
+                circle
+                @click.stop="clearOneAnnotation(img)"
+              />
+            </el-tooltip>
             <el-button class="del-btn" type="danger" :icon="Delete" size="small" circle
               @click.stop="deleteOne(img)" />
           </div>
@@ -971,7 +1040,7 @@ watch(() => route.params.id, resetPage)
             v-if="row.final_label_id || ['human_confirmed','human_corrected','trained','ai_labeled'].includes(row.status)"
             size="small" type="warning" :icon="RefreshLeft"
             @click.stop="clearOneAnnotation(row)"
-          >去标</el-button>
+          >清除标注</el-button>
           <el-button size="small" type="danger" :icon="Delete" @click.stop="deleteOne(row)" />
         </template>
       </el-table-column>

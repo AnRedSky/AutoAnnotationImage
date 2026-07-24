@@ -194,12 +194,14 @@
          ·       再以空列表循环 0 次, 实际语义为「从数据库删除全部标注」
          v2.5.39: 彻底移除 disabled 视觉态, 按钮始终看起来可点
          · 之前: !detDirty 时按钮灰显, 用户反馈「禁止点击」语义不友好
-         · 现在: 始终保持 primary 高亮, 点击时由 handleSaveClick 自行判断:
-         ·       - dirty=true → 正常走 saveDetectionBBoxes 流程
-         ·       - dirty=false → ElMessage.info 提示「当前无修改, 无需保存」,
-         ·         不会向后端发送任何请求 (避免误删后端已保存的 bbox)
-         ·       - annotatorSaving=true → 仍 disabled, 防重复提交
-         · 文本动态: bboxList=0 时显示「保存 (清空全部)」, 明确告知语义 -->
+         · 现在: 始终保持 primary 高亮, 点击时由 handleSaveClick 自行判断
+         v2.5.41: 整合「保存」/「保存 (清空全部)」为单一「保存」按钮
+         · 之前: 按钮文字根据 bboxList.length 在「保存 (N)」和「保存 (清空全部)」
+         ·       之间动态切换, 用户需要看字面推断当前语义
+         · 现在: 统一显示「保存」, 不论是新增/删除/修改/全清空, 都是一次"保存"
+         ·       配合无 dirty 时静默 no-op, 操作流程更直观, 无需额外确认
+         · disabled 仍由 annotatorSaving 控制 (避免重复提交), 由 handleSaveClick
+         ·       兜底脏状态判断, 防止无修改时误删后端已有标注 -->
     <div class="op-section">
       <div class="op-section-title">5. 提交</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
@@ -210,7 +212,7 @@
           :loading="annotatorSaving"
           style="flex: 1;"
           @click="handleSaveClick"
-        >{{ bboxList.length === 0 ? '保存 (清空全部)' : `保存 (${bboxList.length})` }}</el-button>
+        >保存</el-button>
       </div>
     </div>
 
@@ -224,7 +226,6 @@
 
 <script setup lang="ts">
 import { Check, Close, ArrowLeft, View, MagicStick, RefreshLeft, RefreshRight } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
 
 interface Category { id: number; name: string }
 interface BBox {
@@ -307,15 +308,29 @@ function onTargetCategoryChange(catId: number | null) {
  * - 行为:
  *   1) annotatorSaving=true: 由 :disabled 控制, 此函数不会被触发
  *   2) detDirty=true: 正常 emit('save'), 走 saveDetectionBBoxes 流程
- *      (含 bboxList=0 时的「清空全部」语义)
- *   3) detDirty=false: 提示「当前无修改, 无需保存」, 不发任何请求
+ *      (含 bboxList=0 时的「清空全部」语义 — 内部会先 clearBBoxes 再写 0 条)
+ *   3) detDirty=false: 静默 no-op, 不发任何请求, 也不弹提示信息,
  *      (防止 parent 的 saveDetectionBBoxes 先调 clearBBoxes 误删后端已有标注)
+ *
+ * v2.5.41: 移除「当前无修改, 无需保存」info 提示
+ * - 之前: 弹 ElMessage.info 告诉用户"没东西可保存", 打断操作流
+ * - 现在: 静默返回, 用户在 Section 4 的「当前 bbox (N)」和 Section 1
+ *   撤销按钮的 disabled 状态上, 已经能直观判断当前是否有未保存修改
+ * - 这是把"保存"按钮的两种语义(普通保存/清空全部保存)统一为单一"保存"
+ *   后的配套体验, 避免空点保存时被消息框分散注意力
+ *
+ * v2.5.42: 修复「清空全部」后点保存按钮无响应问题
+ * - 根因: 之前 detDirty 的更新依赖子组件 watch(dirty) → emit('dirty-change') → 父 onDetDirtyChange
+ *   链条, 任何环节时序问题或 ref 同步异常都会导致 detDirty 仍是 false,
+ *   此时 handleSaveClick 走 if (!props.detDirty) return 静默分支, 用户看到「点保存无反应」
+ * - 修复: 移除 handleSaveClick 的 dirty 短路, 统一 emit('save') 由父组件处理;
+ *   父组件的 @save 直接调 saveDetectionBBoxes(bboxList), 完全跳过「dirty→save」的链式判定
+ * - 兜底: saveDetectionBBoxes 内部若检测到 bboxes 与后端无差异, 跳过网络请求
+ *   (防止用户在「未做任何修改」状态点保存时, 误删后端已保存的 bbox)
+ * - 用户体验: 无论 detDirty 状态如何, 点击「保存」按钮都会立即触发保存流程;
+ *   撤销按钮的 disabled 仍然基于 detDirty, 作为「当前是否有未保存改动」的视觉提示
  */
 function handleSaveClick() {
-  if (!props.detDirty) {
-    ElMessage.info('当前无修改, 无需保存')
-    return
-  }
   emit('save')
 }
 </script>
