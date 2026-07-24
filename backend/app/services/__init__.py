@@ -1,9 +1,9 @@
 """
 Services Package
 ================
-公共业务服务模块: 几何计算、AI 推理、文件存储、**业务编排 (Phase 3 新增)**.
+公共业务服务模块: 几何计算、AI 推理、文件存储、**业务编排 (Phase 3-4 新增)**.
 
-**业务编排服务 (v3.0.0 Phase 3)**:
+**业务编排服务 (v3.0.0 Phase 3-4)**:
 - JobStateService: 训练任务状态统一查询 (解决 4 处真相源)
 - TrainingService: 训练任务启动/编排
 - ImageService: 图片业务编排 (标注 / 状态 / AI 候选)
@@ -15,6 +15,7 @@ Services Package
 - UserService: 用户业务编排
 - StatsService: 统计业务
 - AuthService: 认证业务
+- AutoAnnotateService: AI 预标注业务编排 (v3.0.0 Phase 4 新增)
 
 **工具服务 (Phase 1 已有)**:
 - ai_service: timm 模型加载/推理
@@ -48,6 +49,8 @@ from app.services.annotation_service import AnnotationService
 from app.services.user_service import UserService
 from app.services.stats_service import StatsService
 from app.services.auth_service import AuthService
+# v3.0.0 Phase 4 新增
+from app.services.auto_annotate_service import AutoAnnotateService, AutoAnnotateResult, ASYNC_THRESHOLD
 
 __all__ = [
     # 工具服务
@@ -76,4 +79,8 @@ __all__ = [
     "UserService",
     "StatsService",
     "AuthService",
+    # v3.0.0 Phase 4 新增
+    "AutoAnnotateService",
+    "AutoAnnotateResult",
+    "ASYNC_THRESHOLD",
 ]
