@@ -31,7 +31,7 @@
         <div class="base-model-option">
           <span class="base-model-option__name">
             {{ m.name }}
-            <!-- v2.5.47: 推荐标识 — 后端 recommended=True 时显示浅色高亮, 引导用户选论文 demo 默认 -->
+            <!-- v2.5.47: 推荐标识 — 后端 recommended=True 时显示浅色高亮, 引导用户选推荐模型 -->
             <el-tag
               v-if="m.recommended"
               size="small" type="success" effect="dark"
@@ -90,8 +90,8 @@ import { getTaskTypeMeta } from '@/utils/taskType'
  *                后端返回的 task_type 是字符串而非数组, 与此前 hand-crafted 列表的
  *                taskTypes[] 不再兼容, 全部统一为单一字符串
  * - description: 适用场景描述, 显示在 el-option 底部, 选中后 el-select 顶部 tooltip 悬停可见
- * - recommended: 论文 demo 推荐项 (后端 recommended=True), UI 浅绿"推荐"标签提示
- * - imagenet_top1 / coco_mAP50 / coco_mIoU: 预训练指标, 论文实验用, 此处不在 UI 渲染
+ * - recommended: 后端 recommended=True 的推荐项, UI 浅绿"推荐"标签提示
+ * - imagenet_top1 / coco_mAP50 / coco_mIoU: 预训练指标, 选型参考用, 此处不在 UI 渲染
  */
 export interface BaseModelOption {
   name: string

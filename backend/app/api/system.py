@@ -1,7 +1,7 @@
 """
 System API: Health / Info
 =========================
-为运维 / 前端 / 论文实验提供:
+为运维 / 前端 / 业务方提供:
   - GET /api/health        服务健康检查
   - GET /api/system/info   系统信息（模型列表 / 配置 / 版本）
 """
@@ -89,7 +89,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 @router.get("/system/info")
 async def system_info():
     """
-    系统信息（无需鉴权）: 论文附录 / 前端 about 页面
+    系统信息（无需鉴权）: 前端 about 页面 / 运维巡检
     """
     import platform
     import sys

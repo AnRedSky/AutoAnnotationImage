@@ -106,7 +106,7 @@ def train_segmentation_task(
     启动分割训练 (DeepLabV3+):
     1) 创建/复用 TrainingJob (task_type='segmentation')
     2) 加载 (image, mask) pairs
-    3) 调 train_segmentation (CPU, 1-3 epoch demo)
+    3) 调 train_segmentation (CPU, 1-3 epoch 快速验证)
     4) 写 ModelVersion (state_dict 落盘)
     5) TrainingJob -> SUCCESS
     """

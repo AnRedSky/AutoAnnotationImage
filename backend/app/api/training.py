@@ -673,7 +673,7 @@ async def list_training_jobs(
     current_user: User = Depends(get_current_user),
 ):
     """
-    训练任务历史列表 (论文实验数据来源)
+    训练任务历史列表 (训练运行历史数据)
     - 按 dataset_id / state 过滤 (state 可选)
     - 按 q 关键词在 model_name / base_model 两个字段做模糊匹配 (大小写不敏感)
     - 分页: page (>=1) + page_size (1-100, 默认 10)

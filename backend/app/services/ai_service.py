@@ -28,8 +28,8 @@ if TYPE_CHECKING:  # 仅类型注解用, 运行时无开销
 from PIL import Image
 
 
-# ImageNet 1k 类别 (离线精简版, 演示用)
-IMAGENET_DEMO_LABELS_PATH = Path(__file__).parent.parent / "ml" / "imagenet_demo_labels.json"
+# ImageNet 1k 类别 (离线精简版, 展示用常见类目)
+IMAGENET_COMMON_LABELS_PATH = Path(__file__).parent.parent / "ml" / "imagenet_common_labels.json"
 
 
 class ModelPool:
@@ -190,7 +190,7 @@ class AIService:
         self.current_model_name: Optional[str] = None
         self.current_model_path: Optional[str] = None
         # 自定义标签映射 (fine-tune 模式使用): idx -> 项目类目中文名
-        # 设为 None 时退回 ImageNet demo labels / f"class_{idx}"
+        # 设为 None 时退回 ImageNet common labels / f"class_{idx}"
         self._custom_label_map: Optional[Dict[int, str]] = None
         # timm pretrained 模型的 1000 类 ImageNet 英文名 (lazy 填充)
         self._imagenet_label_lookup: Dict[int, str] = {}
@@ -205,12 +205,12 @@ class AIService:
         )
         # v2.5.15 P1-5 / C-2: ModelPool 解决单例互踩
         self._pool = ModelPool(max_size=2)
-        self._demo_labels = self._load_demo_labels()
+        self._common_labels = self._load_common_labels()
 
-    def _load_demo_labels(self) -> Dict[int, str]:
-        """加载离线演示用类别"""
-        if IMAGENET_DEMO_LABELS_PATH.exists():
-            with open(IMAGENET_DEMO_LABELS_PATH, encoding="utf-8") as f:
+    def _load_common_labels(self) -> Dict[int, str]:
+        """加载离线常见类目"""
+        if IMAGENET_COMMON_LABELS_PATH.exists():
+            with open(IMAGENET_COMMON_LABELS_PATH, encoding="utf-8") as f:
                 names = json.load(f)
             return {i: n for i, n in enumerate(names)}
         return {}
@@ -218,7 +218,7 @@ class AIService:
     def set_label_map(self, label_map: Optional[Dict[int, str]]):
         """设置 / 清除自定义标签映射
         - 传 dict: 进入 fine-tune 模式, topk 索引用此 dict 翻译成项目类目
-        - 传 None: 退回 ImageNet demo labels
+        - 传 None: 退回 ImageNet common labels
         """
         self._custom_label_map = label_map
 
@@ -298,13 +298,13 @@ class AIService:
         for prob, idx in zip(top_probs[0], top_indices[0]):
             idx_int = idx.item()
             # 优先级: 自定义 label map (fine-tune) > imagenet 1000 (timm pretrained)
-            #          > demo labels (ImageNet 精简) > class_X 兜底
+            #          > common labels (ImageNet 精简) > class_X 兜底
             if self._custom_label_map is not None and idx_int in self._custom_label_map:
                 label = self._custom_label_map[idx_int]
             else:
                 label = (
                     self._imagenet_label_lookup.get(idx_int)
-                    or self._demo_labels.get(idx_int)
+                    or self._common_labels.get(idx_int)
                     or f"class_{idx_int}"
                 )
             results.append({
@@ -421,13 +421,13 @@ class AIService:
             results = []
             for prob, idx in zip(probs_row, idxs_row):
                 idx_int = idx.item()
-                # 优先级: 自定义 label map > imagenet 1000 > demo > class_X
+                # 优先级: 自定义 label map > imagenet 1000 > common labels > class_X
                 if self._custom_label_map is not None and idx_int in self._custom_label_map:
                     label = self._custom_label_map[idx_int]
                 else:
                     label = (
                         self._imagenet_label_lookup.get(idx_int)
-                        or self._demo_labels.get(idx_int)
+                        or self._common_labels.get(idx_int)
                         or f"class_{idx_int}"
                     )
                 results.append({"label": label, "confidence": round(prob.item(), 4)})

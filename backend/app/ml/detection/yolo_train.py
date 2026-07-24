@@ -11,7 +11,7 @@ YOLO Training Adapter (v2.0.0 目标检测)
 - ultralytics 必须懒加载 (5xx MB) → 仅 _run_yolo_train_sync 内 import
 - 进度回调: (stage, current_epoch, total_epochs, metrics_dict)
   - metrics_dict 含 train/val 的 box_loss / cls_loss / dfl_loss / mAP50 / mAP50-95
-- CPU 友好: 论文 demo 跑 CPU 即可 (epochs 5-10, imgsz 320, 几十张图)
+- CPU 友好: 跑 CPU 即可 (epochs 5-10, imgsz 320, 几十张图)
 - 失败抛出 YoloTrainError, 由 Celery 任务捕获并写 DB error_msg
 """
 from __future__ import annotations
@@ -58,7 +58,7 @@ def train_yolo(
         batch: 批大小
         device: "cpu" / "cuda" / "0" (cuda:0)
         project: ultralytics 训练产物根目录
-        name: 实验名 (run 名)
+        name: 训练任务名 (run 名)
         progress_cb: 进度回调
 
     Returns:
@@ -161,7 +161,7 @@ def train_yolo(
             name=name,
             exist_ok=True,
             verbose=False,
-            # 论文 demo: 关闭 mosaic/混合精度避免 CPU 慢
+            # CPU 模式: 关闭 mosaic/混合精度避免 CPU 慢
             mosaic=0.0 if device == "cpu" else 1.0,
             amp=False if device == "cpu" else True,
         )

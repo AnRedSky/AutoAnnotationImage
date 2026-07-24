@@ -6,7 +6,7 @@ File Serving API
   GET /api/files/{image_id}/thumbnail?size=240
 前端 <img :src="imageApi.fileUrl(img.id)"> 直接可用。
 
-鉴权策略：可选鉴权（论文 demo / 内部系统）
+鉴权策略：可选鉴权（演示 / 内部系统）
   - 带 Authorization Bearer xxx 或 ?token=xxx → 校验（验证失败仍 401）
   - 都不带 → 允许访问（返回图片）
   - 设计依据：<img> 标签无法附加 header，query token 也不是 100% 可靠
@@ -86,7 +86,7 @@ async def get_image_file(
 ):
     """
     通过图片 ID 返回图片二进制流
-    - 鉴权可选：带 token 则校验 user，不带也允许（demo/内部使用）
+    - 鉴权可选：带 token 则校验 user，不带也允许（演示/内部使用）
     - 自动按文件后缀设置 Content-Type
     """
     result = await db.execute(select(Image).where(Image.id == image_id))

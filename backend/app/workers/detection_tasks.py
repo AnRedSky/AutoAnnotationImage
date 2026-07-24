@@ -135,7 +135,7 @@ def train_detection_task(
                 task_type="detection",
                 epochs=epochs,
                 batch_size=batch,
-                learning_rate=0.0,  # YOLO 自带 lr 调度, 论文不显式
+                learning_rate=0.0,  # YOLO 自带 lr 调度, 不显式传
                 state="PROGRESS",
                 progress=0.0,
                 started_at=started_at,

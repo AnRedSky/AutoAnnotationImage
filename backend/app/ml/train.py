@@ -187,7 +187,7 @@ def run_training(
         async with AsyncSessionLocal() as db:
             # 加载已确认标注的图片
             # 可训练状态:
-            #   - human_confirmed / human_corrected: 人工确认/修正 (论文主流程)
+            #   - human_confirmed / human_corrected: 人工确认/修正 (生产主流程)
             #   - ai_labeled: AI 自动标注 (演示/快速验证场景, 用户主动接受 AI 标签即可训练)
             #
             # 用 LEFT JOIN 兼容 final_label_id=NULL 的 "孤儿" ai_labeled 图 (老数据, 当年

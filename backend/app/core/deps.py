@@ -58,7 +58,7 @@ async def get_user_optional_for_query(
 
     - Authorization header 优先
     - 其次 query ?token=xxx
-    - 都没有 → None (允许匿名访问, demo 场景)
+    - 都没有 → None (允许匿名访问, 内部场景)
     - 有 token 但无效 → 401
     """
     if not token:

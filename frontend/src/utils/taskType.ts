@@ -109,7 +109,7 @@ export const TASK_TYPE_OPTIONS = [
 /**
  * 训练页/标注页「基础模型」下拉默认值, 随任务类型动态切换
  * - classification: timm ImageNet 预训练 (efficientnet_b0, 经典)
- * - detection:     yolov8n (轻量, 论文 demo 首选)
+ * - detection:     yolov8n (轻量, 适合快速验证)
  * - segmentation:  deeplabv3_resnet50 (torchvision 标准实现)
  */
 export const DEFAULT_BASE_MODEL: Record<string, string> = {

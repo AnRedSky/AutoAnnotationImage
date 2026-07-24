@@ -1,7 +1,7 @@
 """
 Stats API: 标注 / 训练 / 系统综合统计
 ====================================
-为论文核心图表提供数据源:
+为产品运营核心图表提供数据源:
   - 各状态图片分布（饼图）
   - AI 节省时间估算（柱状图）
   - 置信度分布（直方图）
@@ -74,7 +74,7 @@ async def dataset_stats(
     current_user: User = Depends(get_current_user),
 ):
     """
-    单数据集统计（论文核心图表数据）
+    单数据集统计（产品运营核心图表数据）
     """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
@@ -261,7 +261,7 @@ async def model_comparison(
     current_user: User = Depends(get_current_user),
 ):
     """
-    两个模型版本对比（论文核心实验图表数据）
+    两个模型版本对比（A/B 测试对比图表数据）
     """
     a = await db.get(ModelVersion, model_id_a)
     b = await db.get(ModelVersion, model_id_b)

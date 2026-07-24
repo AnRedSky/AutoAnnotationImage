@@ -216,7 +216,7 @@ async def get_task_status(
 @router.get("/models")
 async def list_available_models(current_user: User = Depends(get_current_user)):
     """
-    列出系统支持的基础预训练模型 (论文核心实验用)
+    列出系统支持的基础预训练模型 (业务方选型参考)
 
     按 task_type 字段分组:
     - classification: timm ImageNet 预训练 (整图级)
@@ -228,14 +228,14 @@ async def list_available_models(current_user: User = Depends(get_current_user)):
     - 该接口是「单一权威」: 标注工作台基础模型下拉 + 训练页参考都从这拉
     - 前端按 task_type 字段过滤显示, 避免出现"任务类型不匹配的基础模型"
     - task_type 必填, 不允许 null (缺省 classification)
-    - recommended=True 是论文 demo 默认推荐项 (1-3 个)
+    - recommended=True 是新手引导默认推荐项 (1-3 个)
     - description: 中文适用场景说明, 前端在 option 底部 + tooltip 展示 (v2.5.47 新增)
     """
     return {
         "models": [
             # ----- classification: timm ImageNet -----
             {"name": "resnet18",              "params": "11.7M", "imagenet_top1": 70.6, "framework": "timm",       "task_type": "classification", "recommended": False,
-             "description": "轻量级残差网络, 训练快、显存占用低, 适合中小数据集快速实验或 CPU/低端 GPU 部署"},
+             "description": "轻量级残差网络, 训练快、显存占用低, 适合中小数据集快速验证或 CPU/低端 GPU 部署"},
             {"name": "resnet50",              "params": "25.6M", "imagenet_top1": 76.1, "framework": "timm",       "task_type": "classification", "recommended": True,
              "description": "经典深度残差网络, 特征表达力强, 适合中等规模数据集与追求高精度的训练场景"},
             {"name": "efficientnet_b0",       "params": "5.3M",  "imagenet_top1": 77.1, "framework": "timm",       "task_type": "classification", "recommended": True,
@@ -252,7 +252,7 @@ async def list_available_models(current_user: User = Depends(get_current_user)):
             {"name": "yolov8n", "params": "3.2M",  "coco_mAP50": 37.3, "framework": "ultralytics", "task_type": "detection",     "recommended": True,
              "description": "YOLOv8 nano, 3.2M 参数, 速度极快, 适合移动端部署、实时检测或算力受限的工业场景"},
             {"name": "yolov8s", "params": "11.2M", "coco_mAP50": 44.9, "framework": "ultralytics", "task_type": "detection",     "recommended": True,
-             "description": "YOLOv8 small, 11.2M 参数, 速度-精度平衡, 适合论文 demo 与一般工业质检任务"},
+             "description": "YOLOv8 small, 11.2M 参数, 速度-精度平衡, 适合典型工业质检任务"},
             {"name": "yolov8m", "params": "25.9M", "coco_mAP50": 50.2, "framework": "ultralytics", "task_type": "detection",     "recommended": False,
              "description": "YOLOv8 medium, 25.9M 参数, 中等规模, 适合数据量充足且追求较高精度的检测任务"},
             {"name": "yolov8l", "params": "43.7M", "coco_mAP50": 52.9, "framework": "ultralytics", "task_type": "detection",     "recommended": False,

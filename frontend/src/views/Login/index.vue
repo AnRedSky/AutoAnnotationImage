@@ -105,7 +105,7 @@ const features = [
           </div>
         </div>
         <div class="brand-footer">
-          © 2026 毕业论文项目 · 基于 PyTorch + FastAPI + Vue
+          © 2026 图像自动标注系统 · 基于 PyTorch + FastAPI + Vue
         </div>
       </div>
     </div>

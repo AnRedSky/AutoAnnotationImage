@@ -1,5 +1,5 @@
 # ============================================================
-#  Graduation Thesis Project - Windows PowerShell Wrapper
+#  Image Annotation Platform - Windows PowerShell Wrapper
 #  ============================================================
 #  Thin wrapper that delegates to start_local.py
 #  (Python is more reliable for Chinese paths and complex IO)
@@ -29,7 +29,7 @@ $PyExe     = Join-Path $RootDir "backend\.venv\Scripts\python.exe"
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Graduation Thesis Project - Local One-Click Startup" -ForegroundColor Cyan
+Write-Host "  Image Annotation Platform - Local One-Click Startup" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  Backend API  : http://127.0.0.1:5000/docs"
 Write-Host "  Frontend     : http://127.0.0.1:5173"

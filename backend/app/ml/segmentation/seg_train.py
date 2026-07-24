@@ -8,7 +8,7 @@ Segmentation Training (v2.0.0 图像分割)
 - CrossEntropyLoss + Adam
 - mIoU 评估
 - progress_cb(stage, current, total, info) 回调用于 TrainingJob 进度
-- 论文 demo 默认 CPU
+- 缺省 CPU 训练
 """
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def train_segmentation(
         best_state_dict: bytes (state_dict 序列化, 用于 ModelVersion 落盘),
     }
 
-    注: CPU 训练, 论文 demo 用; 真实生产建议 GPU.
+    注: 缺省 CPU 训练, 生产部署建议 GPU.
     """
     from .seg_dataset import SegmentationPairDataset
 

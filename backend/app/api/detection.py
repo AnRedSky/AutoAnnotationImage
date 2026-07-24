@@ -162,7 +162,7 @@ async def replace_image_bboxes(
     current_user: User = Depends(get_current_user),
 ):
     """
-    单图 BBox 全量替换 (论文核心: 人工确认 / 修正 AI 预标注)
+    单图 BBox 全量替换 (核心交互: 人工确认 / 修正 AI 预标注)
 
     语义:
     - DELETE 该 image_id 下所有现有 BBox
@@ -361,7 +361,7 @@ async def start_detection_train(
             epochs=payload.epochs,
             imgsz=payload.imgsz,
             batch=payload.batch_size,
-            device="cpu",  # 论文 demo 默认 CPU
+            device="cpu",  # 缺省 CPU, 适合开发/演示部署
         )
     except Exception as e:
         raise HTTPException(503, f"Celery .delay() 失败: {e}")

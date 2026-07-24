@@ -2,7 +2,7 @@
 import os
 
 script = r'''# ============================================================
-#  Graduation Thesis Project - Windows Local One-Click Startup
+#  Image Annotation Platform - Windows Local One-Click Startup
 #  ============================================================
 #  Usage:
 #    .\scripts\start_local.ps1              # default: backend + frontend

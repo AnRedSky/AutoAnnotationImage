@@ -2,7 +2,7 @@
 Export API: 标注导出
 ====================
 支持 COCO / YOLO / CSV 三种主流标注格式 (含 v2.0.0 检测专用格式)
-论文实验数据可基于此接口导出
+业务数据可基于此接口导出
 
 v2.0.0 端点 (检测):
 - GET /api/export/yolo-det/{ds_id}   YOLO 检测 zip (images + labels + data.yaml)
@@ -162,7 +162,7 @@ async def export_csv(
     current_user: User = Depends(get_current_user),
 ):
     """
-    导出 CSV 明细表（用于论文统计 / Excel 分析）
+    导出 CSV 明细表（用于业务统计 / Excel 分析）
     字段: image_id, filename, status, ai_top1, ai_top1_conf, final_label, annotated_at
     """
     dataset = await db.get(Dataset, dataset_id)
@@ -412,8 +412,8 @@ async def export_coco_detection(
 # 设计原则:
 # - 与 detection 导出共用前缀 /api/export, 资源是同一个 dataset
 # - 强制要求 dataset.task_type == "segmentation", 否则 400
-# - VOC-seg: 论文标准 PASCAL VOC 分割目录布局
-# - COCO-seg: COCO segmentation 字段 (RLE 简化: 用 polygon 包围外接矩形, 论文 demo 够用)
+# - VOC-seg: 行业标准 PASCAL VOC 分割目录布局
+# - COCO-seg: COCO segmentation 字段 (RLE 简化: 用 polygon 包围外接矩形, MVP 够用)
 # - AI 预标注已在 S5.2 /api/segmentation/auto-annotate 端点实现, 此处不重复
 
 
@@ -588,14 +588,14 @@ async def export_coco_segmentation(
       {
         info, images, categories,
         annotations: [{id, image_id, category_id,
-                       segmentation: [[x1,y1,...]],  # polygon 包围外接矩形 (论文 demo 简化)
+                       segmentation: [[x1,y1,...]],  # polygon 包围外接矩形 (MVP 简化)
                        bbox: [x, y, w, h],
                        area, iscrowd}]
       }
 
     说明:
     - COCO segmentation 接受 RLE 或 polygon, 此处用 polygon (4 顶点的 bbox polygon)
-    - 完整连通域 RLE 需要 pycocotools, 论文 demo 暂用 polygon 等价表达
+    - 完整连通域 RLE 需要 pycocotools, 当前用 polygon 等价表达
     """
     import numpy as np
     from PIL import Image as PILImage

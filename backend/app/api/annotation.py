@@ -308,7 +308,7 @@ async def annotation_stats(
     current_user: User = Depends(get_current_user),
 ):
     """
-    标注效率统计 (论文核心图表数据源)
+    标注效率统计 (产品运营核心指标数据源)
     - 各状态图片数
     - AI 节省时间估算
     - 标注员人均速度
