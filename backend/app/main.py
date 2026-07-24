@@ -44,6 +44,14 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger("app.main")
     # 启动
     await init_db()
+    # v2.5.29: ultralytics 路径集中配置 (与 worker 启动时一致)
+    # 防止 API 进程第一次调用 YOLO(...) 时把 .pt 落到 cwd
+    try:
+        from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+        configure_ultralytics()
+        migrate_legacy_yolo_weights()
+    except Exception as e:
+        logger.warning(f"ultralytics_setup 失败, 不影响 API 启动: {e}")
     logger.info("Application started")
     yield
     # 关闭: 优雅释放数据库连接池与 Redis 连接，避免热重启丢数据/泄漏连接

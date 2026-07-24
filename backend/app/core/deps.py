@@ -2,7 +2,7 @@
 FastAPI Dependencies: Current User, Role Check
 """
 from typing import Optional
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -43,3 +43,42 @@ async def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin permission required")
     return current_user
+
+
+# ============== v2.5.35 新增: SSE 用可选鉴权 ==============
+# 复用 SSE 端点 (EventSource 无法设 Authorization header, 走 query ?token=xxx 兜底).
+# 之前在 training.py 内 inline 实现, 现在提升到 core/deps 供 detection/segmentation 共用.
+
+async def get_user_optional_for_query(
+    request: Request,
+    token: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    """可选鉴权 (支持 query token) — 与原 training.py 实现完全等价.
+
+    - Authorization header 优先
+    - 其次 query ?token=xxx
+    - 都没有 → None (允许匿名访问, demo 场景)
+    - 有 token 但无效 → 401
+    """
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+    if not token:
+        return None
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(401, "Could not validate credentials",
+                            headers={"WWW-Authenticate": "Bearer"})
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(401, "Could not validate credentials")
+    try:
+        result = await db.execute(select(User).where(User.id == int(user_id)))
+        user = result.scalar_one_or_none()
+    except Exception:
+        user = None
+    if not user or not user.is_active:
+        raise HTTPException(401, "Could not validate credentials")
+    return user

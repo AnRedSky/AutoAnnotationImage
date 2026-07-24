@@ -108,6 +108,19 @@ def train_yolo(
     except Exception as e:
         raise YoloTrainError(f"加载预训练权重失败 ({model_name}): {e}") from e
 
+    # ---- v2.5.29: 防御性兜底 - 如果 model_name 是裸名 (如 "yolov8n") 且 weights_dir
+    # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
+    # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.core.ultralytics_setup.
+    if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
+        from app.config import settings
+        candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"
+        if candidate.exists():
+            try:
+                model = YOLO(str(candidate))
+            except Exception:
+                # 回退原版, 不阻塞训练
+                pass
+
     # 训练回调: ultralytics 提供 add_callback('on_train_epoch_end', fn)
     def _on_epoch_end(trainer):
         epoch = trainer.epoch + 1  # 0-based → 1-based

@@ -7,8 +7,44 @@ All configs from environment variables, with sensible defaults for dev.
 import os
 from pathlib import Path
 from typing import List, Optional
-from pydantic import model_validator
+from pydantic import model_validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# ---- v2.5.30: 项目根目录绝对锚点 ----
+# 历史问题: UPLOAD_DIR / MODEL_DIR / PRETRAINED_CACHE_DIR 等默认值是 "./uploads" "./models",
+#           Path(...).resolve() 会基于 cwd 解析, 当从 backend/ 启动后端时, 路径会变成
+#           backend/uploads, backend/models, 污染项目源码目录, 并与项目根目录的 models/ 重复.
+# 修复: 在模块加载时计算项目根 (config.py 位于 backend/app/config.py → 上 2 层就是项目根),
+#       全部默认值强制以项目根为基准, 与 cwd 无关. 用户在 .env 里显式设置绝对路径时仍优先用 .env.
+#       用户在 .env 里写相对路径 (如 "./models") 也会基于项目根解析, 而非 cwd.
+_BACKEND_ROOT = Path(__file__).resolve().parent          # backend/app
+_PROJECT_ROOT = _BACKEND_ROOT.parent                             # backend
+_DEFAULT_MODEL_DIR = (_PROJECT_ROOT / "models").resolve()
+_DEFAULT_UPLOAD_DIR = (_PROJECT_ROOT / "uploads").resolve()
+_DEFAULT_DATA_DIR = (_DEFAULT_MODEL_DIR / "data").resolve()
+_DEFAULT_PRETRAINED_CACHE_DIR = (_DEFAULT_MODEL_DIR / "cache").resolve()
+_DEFAULT_ULTRALYTICS_HOME = (_DEFAULT_PRETRAINED_CACHE_DIR / "ultralytics").resolve()
+
+
+def _resolve_storage_path(env_value: "Optional[str]", default_abs: Path) -> Path:
+    """
+    v2.5.30: 把 env 里读到的路径 + 默认值, 统一规范成"基于项目根的绝对路径".
+
+    规则:
+    - env_value 为空 (None / "" / 空白): 用 default_abs
+    - env_value 是绝对路径: 原样用 (尊重用户/部署定制)
+    - env_value 是相对路径: 基于项目根 (而非 cwd) 解析, 避免 backend/ 启动时
+      把 ./models 解析成 backend/models
+    - 统一 .resolve() 处理 ../, 符号链接, 大小写
+    """
+    if env_value is None or str(env_value).strip() == "":
+        return Path(default_abs).resolve()
+    p = Path(str(env_value).strip())
+    if p.is_absolute():
+        return p.resolve()
+    # 相对路径: 锚到项目根, 而非 cwd
+    return (_PROJECT_ROOT / p).resolve()
 
 
 class Settings(BaseSettings):
@@ -75,16 +111,42 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").lower() == "true"
 
     # ===== File Storage =====
-    UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
-    MODEL_DIR: Path = Path(os.getenv("MODEL_DIR", "./models")).resolve()
+    # v2.5.30: 强制以项目根为基准的绝对路径, 不再依赖 cwd. .env 里若写了绝对路径仍优先用 .env;
+    #          .env 里若写的是相对路径 (如 "./models"), 也会基于项目根解析, 而非 cwd.
+    #          解决: 从 backend/ 启动时, 老的 "./models" 不再变成 backend/models.
+    UPLOAD_DIR: Path = _resolve_storage_path(os.getenv("UPLOAD_DIR"), _DEFAULT_UPLOAD_DIR)
+    MODEL_DIR: Path = _resolve_storage_path(os.getenv("MODEL_DIR"), _DEFAULT_MODEL_DIR)
     # 临时训练数据根目录 (YOLO 数据集导出等), 默认 MODEL_DIR/data
-    DATA_DIR: Path = Path(
-        os.getenv("DATA_DIR", str(Path(os.getenv("MODEL_DIR", "./models")) / "data"))
-    ).resolve()
+    DATA_DIR: Path = _resolve_storage_path(os.getenv("DATA_DIR"), _DEFAULT_DATA_DIR)
     # 预训练权重统一缓存根目录 (timm/torchvision/ultralytics), 默认 MODEL_DIR/cache
-    PRETRAINED_CACHE_DIR: Path = Path(
-        os.getenv("PRETRAINED_CACHE_DIR", str(Path(os.getenv("MODEL_DIR", "./models")) / "cache"))
-    ).resolve()
+    PRETRAINED_CACHE_DIR: Path = _resolve_storage_path(
+        os.getenv("PRETRAINED_CACHE_DIR"), _DEFAULT_PRETRAINED_CACHE_DIR
+    )
+    # ---- v2.5.29: ultralytics 单独子目录 (YOLO_CONFIG_DIR / weights_dir / runs_dir 统一指向这) ----
+    # 背景: ultralytics 8.x 不会读 ULTRALYTICS_HOME 来定位 weights_dir, 而是读
+    #       $YOLO_CONFIG_DIR/settings.yaml (默认 %APPDATA%/Ultralytics/settings.yaml).
+    #       用户机器上该 yaml 里 weights_dir 指向不存在的 ComfyUI 路径, 触发 ultralytics
+    #       把下载的 yolov8n.pt 等落到当前工作目录 (backend/), 污染项目目录.
+    # 解决: 用 YOLO_CONFIG_DIR 强制把 settings.yaml 放在项目内, 然后 startup 时
+    #       把 weights_dir / runs_dir / datasets_dir 三个字段覆盖到 PRETRAINED_CACHE_DIR
+    #       下. 旧 settings.yaml 里的脏值不会再被读 (因为换了 YOLO_CONFIG_DIR).
+    # v2.5.30: 默认值改为项目根绝对路径 (与 MODEL_DIR/PRETRAINED_CACHE_DIR 一致), 不再依赖 cwd.
+    ULTRALYTICS_HOME: Path = _resolve_storage_path(
+        os.getenv("ULTRALYTICS_HOME"), _DEFAULT_ULTRALYTICS_HOME
+    )
+    ULTRALYTICS_WEIGHTS_DIR: Path = _resolve_storage_path(
+        os.getenv("ULTRALYTICS_WEIGHTS_DIR"), _DEFAULT_ULTRALYTICS_HOME / "weights"
+    )
+    ULTRALYTICS_RUNS_DIR: Path = _resolve_storage_path(
+        os.getenv("ULTRALYTICS_RUNS_DIR"), _DEFAULT_ULTRALYTICS_HOME / "runs"
+    )
+    ULTRALYTICS_DATASETS_DIR: Path = _resolve_storage_path(
+        os.getenv("ULTRALYTICS_DATASETS_DIR"), _DEFAULT_ULTRALYTICS_HOME / "datasets"
+    )
+    # YOLO_CONFIG_DIR: ultralytics 把 settings.yaml 写到这里; 默认 ULTRALYTICS_HOME 根目录
+    YOLO_CONFIG_DIR: Path = _resolve_storage_path(
+        os.getenv("YOLO_CONFIG_DIR"), _DEFAULT_ULTRALYTICS_HOME
+    )
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 
     # ===== ML =====
@@ -131,6 +193,28 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    # ---- v2.5.30: 路径字段后处理 ----
+    # 上面字段默认值用了 _resolve_storage_path, 但 pydantic-settings 会从 .env 重新
+    # 加载并覆盖默认值, 覆盖后可能把相对路径 (如 "./models") 灌进来, 仍然存在
+    # backend/ 启动时被解析到 backend/models 的隐患. 这里用 field_validator 在
+    # .env 覆盖之后再做一次归一化: 相对路径基于项目根解析.
+    _STORAGE_PATH_FIELDS = (
+        "UPLOAD_DIR", "MODEL_DIR", "DATA_DIR", "PRETRAINED_CACHE_DIR",
+        "ULTRALYTICS_HOME", "ULTRALYTICS_WEIGHTS_DIR", "ULTRALYTICS_RUNS_DIR",
+        "ULTRALYTICS_DATASETS_DIR", "YOLO_CONFIG_DIR",
+    )
+
+    @field_validator(*_STORAGE_PATH_FIELDS)
+    @classmethod
+    def _normalize_storage_path(cls, v):
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            return v
+        p = Path(v) if not isinstance(v, Path) else v
+        if p.is_absolute():
+            return p.resolve()
+        # 相对路径: 锚到项目根, 而非 cwd
+        return (_PROJECT_ROOT / p).resolve()
 
     # ===== 派生属性（向后兼容） =====
 
@@ -229,6 +313,12 @@ settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 settings.MODEL_DIR.mkdir(parents=True, exist_ok=True)
 settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 settings.PRETRAINED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# v2.5.29: ultralytics 子目录统一预先创建, worker 启动时 settings.weights_dir 即指向这里
+settings.ULTRALYTICS_HOME.mkdir(parents=True, exist_ok=True)
+settings.ULTRALYTICS_WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+settings.ULTRALYTICS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+settings.ULTRALYTICS_DATASETS_DIR.mkdir(parents=True, exist_ok=True)
+settings.YOLO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---- 在最早时机同步关键环境变量到 os.environ ----
 # config.py 是 app 启动时第一个被 import 的模块，pydantic-settings 自动从 .env
