@@ -1,5 +1,9 @@
 """
 Dataset API: CRUD + Category Management
+
+**v3.0.0 Phase 3 重构**:
+- delete_dataset: 级联删除下沉到 DatasetService.cascade_delete
+  (110 行 → 12 行, 业务规则统一)
 """
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,10 +13,12 @@ from app.config import settings
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models.dataset import Dataset
-from app.models.category import Category
-from app.models.user import User
+from app.model.dataset import Dataset
+from app.model.category import Category
+from app.model.user import User
 from app.core.deps import get_current_user
+# v3.0.0 Phase 3: 业务编排下沉
+from app.services import DatasetService
 
 router = APIRouter()
 
@@ -135,107 +141,31 @@ async def delete_dataset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """删除数据集 (级联删除其下图片/类别/标注/训练任务/模型版本, 并清理磁盘文件)
+    """删除数据集 (v3.0.0 Phase 3: 业务下沉到 DatasetService.cascade_delete)
 
-    修复历史: 之前只 db.delete(dataset) 会 500, 原因:
+    业务规则 (全部在 service 层):
+    - 仅 draft / done 状态可删除
+    - 显式顺序: training_job → model_version → annotation_log → image → category → dataset
+    - 自动清理磁盘: 图片目录 + 模型 .pth 文件
+
+    修复历史 (详见 [project_memory]):
+    - 之前只 db.delete(dataset) 会 500, 原因:
       - training_job.dataset_id / model_version.dataset_id 没有 ondelete=CASCADE
       - image.final_label_id -> category.id 也没 ondelete, 删 category 会阻塞
       - 磁盘上 storage/ 目录下的图片文件没清理
     """
-    from sqlalchemy import delete as sa_delete
-    from app.models.image import Image
-    from app.models.annotation_log import AnnotationLog
-    from app.models.training_job import TrainingJob
-    from app.models.model_version import ModelVersion
-    from app.models.category import Category
-
-    dataset = await db.get(Dataset, dataset_id)
+    dataset = await DatasetService.get(db, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
-    # 1. 先取本数据集下所有 image id, 用于清 annotation_log 和磁盘文件
-    img_rows = (await db.execute(
-        select(Image.id, Image.storage_path).where(Image.dataset_id == dataset_id)
-    )).all()
-    img_ids = [r[0] for r in img_rows]
-    storage_paths = [r[1] for r in img_rows if r[1]]
+    # 业务规则: 仅 draft / done 可删
+    await DatasetService.assert_can_delete(db, dataset)
 
-    # 2. 清 annotation_log (有 image_id 的 ON DELETE CASCADE, 但保险起见显式删)
-    if img_ids:
-        await db.execute(
-            sa_delete(AnnotationLog).where(AnnotationLog.image_id.in_(img_ids))
-        )
-
-    # 3. 清 training_job (dataset_id 没有 ON DELETE CASCADE, 必须显式删)
-    await db.execute(
-        sa_delete(TrainingJob).where(TrainingJob.dataset_id == dataset_id)
-    )
-
-    # 4. 清 model_version (同理), 同时取 .pth 路径以便清理磁盘
-    mv_rows = (await db.execute(
-        select(ModelVersion.file_path).where(ModelVersion.dataset_id == dataset_id)
-    )).all()
-    pth_paths = [r[0] for r in mv_rows if r[0]]
-    await db.execute(
-        sa_delete(ModelVersion).where(ModelVersion.dataset_id == dataset_id)
-    )
-
-    # 5. 清 image (final_label_id -> category.id 没 cascade, 必须先解引用再删图)
-    #    将 final_label_id 置 NULL 后再删 image (ai_prediction 是 JSON, 不需要解)
-    if img_ids:
-        await db.execute(
-            sa_update(Image)
-            .where(Image.id.in_(img_ids))
-            .values(final_label_id=None)
-        )
-    await db.execute(
-        sa_delete(Image).where(Image.dataset_id == dataset_id)
-    )
-
-    # 6. 清 category
-    await db.execute(
-        sa_delete(Category).where(Category.dataset_id == dataset_id)
-    )
-
-    # 7. 最后删 dataset 自身
-    await db.delete(dataset)
-    await db.commit()
-
-    # 8. 清理磁盘文件 (失败不影响主流程, 但记录 warn)
-    from pathlib import Path as _P
-    upload_root = settings.UPLOAD_DIR
-    cleaned_files = 0
-    for rel in storage_paths:
-        try:
-            f = upload_root / rel
-            if f.exists():
-                f.unlink()
-                cleaned_files += 1
-        except OSError as e:
-            import logging
-            logging.getLogger(__name__).warning(f"failed to delete {rel}: {e}")
-    # 清理模型 .pth
-    for p in pth_paths:
-        try:
-            pf = _P(p)
-            if pf.exists():
-                pf.unlink()
-                cleaned_files += 1
-        except OSError as e:
-            import logging
-            logging.getLogger(__name__).warning(f"failed to delete model {p}: {e}")
-    # 清理空目录
-    try:
-        ds_dir = upload_root / str(dataset_id)
-        if ds_dir.exists() and not any(ds_dir.iterdir()):
-            ds_dir.rmdir()
-    except OSError:
-        pass
-
+    counts = await DatasetService.cascade_delete(db, dataset)
     return {
         "success": True,
         "deleted_id": dataset_id,
-        "cleaned_files": cleaned_files,
+        "cascade_counts": counts,
     }
 
 
