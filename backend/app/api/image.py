@@ -23,8 +23,10 @@ from app.core.deps import get_current_user
 from app.services import ai_service
 from app.services.ai_service import filter_predictions_to_categories
 from app.services.storage_service import storage_service
+# v3.0.0 Phase 4: 业务编排下沉到 Service
+from app.services import ImageService
 from app.config import settings
-from app.models.model_version import ModelVersion
+from app.model.model_version import ModelVersion
 
 router = APIRouter()
 
@@ -1049,15 +1051,16 @@ async def delete_image(
     current_user: User = Depends(get_current_user),
 ):
     """
-    删除单张图片
-    - 删文件
+    删除单张图片 (v3.0.0 Phase 4: thin wrapper, 业务下沉到 ImageService.delete)
+
+    业务规则 (全部在 service 层):
+    - 删文件 (storage_service)
     - 删 AnnotationLog (CASCADE 已配)
-    - 删 BBoxAnnotation / SegmentationMask (v2.0.0: ORM cascade='all, delete-orphan')
+    - 删 BBoxAnnotation / SegmentationMask (ORM cascade='all, delete-orphan')
     - 更新 dataset.image_count / annotated_count
 
     关键: 必须 eager load 关联 (bbox_annotations / segmentation_mask), 否则
-    SQLAlchemy 的 ORM cascade 不会触发, bbox/mask 会残留 (即使 DB 层有
-    ON DELETE CASCADE, SQLite 默认不开启 PRAGMA foreign_keys, 也不可靠)
+    SQLAlchemy 的 ORM cascade 不会触发, bbox/mask 会残留
     """
     from sqlalchemy.orm import selectinload
     stmt = (
@@ -1072,41 +1075,7 @@ async def delete_image(
     if not img:
         raise HTTPException(404, "Image not found")
 
-    dataset_id = img.dataset_id
-    was_annotated = img.status in ("human_confirmed", "human_corrected", "trained")
-
-    # 删文件
-    try:
-        if storage_service.exists(img.storage_path):
-            await storage_service.delete(img.storage_path)
-    except Exception:
-        pass
-
-    # 删 DB
-    await db.delete(img)
-    # 用 SQLAlchemy case 替代 MySQL 专属的 GREATEST, 兼容 SQLite/PostgreSQL
-    new_img_count = case(
-        (Dataset.image_count - 1 < 0, 0),
-        else_=Dataset.image_count - 1,
-    )
-    await db.execute(
-        update(Dataset)
-        .where(Dataset.id == dataset_id)
-        .values(image_count=new_img_count)
-    )
-    if was_annotated:
-        new_ann_count = case(
-            (Dataset.annotated_count - 1 < 0, 0),
-            else_=Dataset.annotated_count - 1,
-        )
-        await db.execute(
-            update(Dataset)
-            .where(Dataset.id == dataset_id)
-            .values(annotated_count=new_ann_count)
-        )
-    await db.commit()
-
-    return {"success": True, "deleted_id": image_id}
+    return await ImageService.delete(db, img)
 
 
 @router.post("/batch-delete")
@@ -1116,67 +1085,7 @@ async def batch_delete_images(
     current_user: User = Depends(get_current_user),
 ):
     """
-    批量删除图片
+    批量删除图片 (v3.0.0 Phase 4: thin wrapper, 业务下沉到 ImageService.batch_delete)
     Body: { "image_ids": [1, 2, 3] } (或直接数组)
     """
-    if not image_ids:
-        raise HTTPException(400, "image_ids cannot be empty")
-    if len(image_ids) > 500:
-        raise HTTPException(400, "Too many ids (max 500)")
-
-    # 1) 找出所有需要删除的图
-    stmt = select(Image).where(Image.id.in_(image_ids))
-    images = (await db.execute(stmt)).scalars().all()
-    if not images:
-        return {"success": True, "deleted": 0, "missing": len(image_ids)}
-
-    # 2) 按 dataset 分组 (更新计数)
-    by_dataset: dict = {}
-    annotated_count_by_ds: dict = {}
-    for img in images:
-        by_dataset[img.dataset_id] = by_dataset.get(img.dataset_id, 0) + 1
-        if img.status in ("human_confirmed", "human_corrected", "trained"):
-            annotated_count_by_ds[img.dataset_id] = (
-                annotated_count_by_ds.get(img.dataset_id, 0) + 1
-            )
-
-    # 3) 删文件
-    deleted = 0
-    for img in images:
-        try:
-            if storage_service.exists(img.storage_path):
-                await storage_service.delete(img.storage_path)
-            deleted += 1
-        except Exception:
-            pass
-
-    # 4) 删 DB
-    await db.execute(delete(Image).where(Image.id.in_([i.id for i in images])))
-    # 用 SQLAlchemy case 替代 MySQL 专属的 GREATEST, 兼容 SQLite/PostgreSQL
-    for ds_id, cnt in by_dataset.items():
-        new_img = case(
-            (Dataset.image_count - cnt < 0, 0),
-            else_=Dataset.image_count - cnt,
-        )
-        await db.execute(
-            update(Dataset)
-            .where(Dataset.id == ds_id)
-            .values(image_count=new_img)
-        )
-    for ds_id, cnt in annotated_count_by_ds.items():
-        new_ann = case(
-            (Dataset.annotated_count - cnt < 0, 0),
-            else_=Dataset.annotated_count - cnt,
-        )
-        await db.execute(
-            update(Dataset)
-            .where(Dataset.id == ds_id)
-            .values(annotated_count=new_ann)
-        )
-    await db.commit()
-
-    return {
-        "success": True,
-        "deleted": deleted,
-        "missing": len(image_ids) - len(images),
-    }
+    return await ImageService.batch_delete(db, image_ids)

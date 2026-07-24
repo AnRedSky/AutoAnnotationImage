@@ -222,5 +222,151 @@ class ImageService:
         from app.model.image_queries import count_images_by_status
         return await count_images_by_status(db, dataset_id)
 
+    # ============== 删除 (v3.0.0 Phase 4 新增) ==============
+
+    @staticmethod
+    async def delete(
+        db: AsyncSession,
+        image: "Image",
+        *,
+        commit: bool = True,
+    ) -> Dict[str, Any]:
+        """删除单张图片 (v3.0.0 Phase 4: 业务下沉)
+
+        业务规则:
+        1. 删文件 (storage_service)
+        2. 删 ORM 行 (CASCADE 删 AnnotationLog / BBox / Mask)
+        3. 更新 dataset.image_count, 若原状态为已标注再 -1 annotated_count
+
+        关键: 必须先 eager load 关联 (bbox_annotations / segmentation_mask),
+        否则 SQLAlchemy ORM cascade 不会触发, bbox/mask 会残留
+        """
+        from sqlalchemy.orm import selectinload
+        from sqlalchemy import case, update
+        from app.model.dataset import Dataset
+        from app.services.storage_service import storage_service
+
+        dataset_id = image.dataset_id
+        was_annotated = image.status in ("human_confirmed", "human_corrected", "trained")
+
+        # 1) 删文件
+        try:
+            if storage_service.exists(image.storage_path):
+                await storage_service.delete(image.storage_path)
+        except Exception:
+            logger.exception("Failed to delete file %s", image.storage_path)
+
+        # 2) 删 ORM (CASCADE 触发)
+        await db.delete(image)
+        await db.flush()
+
+        # 3) 更新 dataset 计数 (跨 MySQL/SQLite 兼容)
+        new_img_count = case(
+            (Dataset.image_count - 1 < 0, 0),
+            else_=Dataset.image_count - 1,
+        )
+        await db.execute(
+            update(Dataset)
+            .where(Dataset.id == dataset_id)
+            .values(image_count=new_img_count)
+        )
+        if was_annotated:
+            new_ann_count = case(
+                (Dataset.annotated_count - 1 < 0, 0),
+                else_=Dataset.annotated_count - 1,
+            )
+            await db.execute(
+                update(Dataset)
+                .where(Dataset.id == dataset_id)
+                .values(annotated_count=new_ann_count)
+            )
+        if commit:
+            await db.commit()
+        return {"success": True, "deleted_id": image.id}
+
+    @staticmethod
+    async def batch_delete(
+        db: AsyncSession,
+        image_ids: List[int],
+        *,
+        commit: bool = True,
+    ) -> Dict[str, Any]:
+        """批量删除图片 (v3.0.0 Phase 4: 业务下沉)
+
+        业务规则:
+        1. 校验 image_ids 数量 (1-500)
+        2. 按 dataset 分组, 累计需要减的 image_count / annotated_count
+        3. 删文件 + 删 ORM
+        4. 批量更新 dataset 计数
+        """
+        from sqlalchemy import case, update, delete as sa_delete
+        from app.model.dataset import Dataset
+        from app.services.storage_service import storage_service
+
+        if not image_ids:
+            raise HTTPException(400, "image_ids cannot be empty")
+        if len(image_ids) > 500:
+            raise HTTPException(400, "Too many ids (max 500)")
+
+        # 1) 找出需要删的图
+        result = await db.execute(
+            select(Image).where(Image.id.in_(image_ids))
+        )
+        images = list(result.scalars().all())
+        if not images:
+            return {"success": True, "deleted": 0, "missing": len(image_ids)}
+
+        # 2) 按 dataset 分组
+        by_dataset: Dict[int, int] = {}
+        annotated_count_by_ds: Dict[int, int] = {}
+        for img in images:
+            by_dataset[img.dataset_id] = by_dataset.get(img.dataset_id, 0) + 1
+            if img.status in ("human_confirmed", "human_corrected", "trained"):
+                annotated_count_by_ds[img.dataset_id] = (
+                    annotated_count_by_ds.get(img.dataset_id, 0) + 1
+                )
+
+        # 3) 删文件
+        deleted = 0
+        for img in images:
+            try:
+                if storage_service.exists(img.storage_path):
+                    await storage_service.delete(img.storage_path)
+                deleted += 1
+            except Exception:
+                logger.exception("Failed to delete file %s", img.storage_path)
+
+        # 4) 删 ORM
+        await db.execute(sa_delete(Image).where(Image.id.in_([i.id for i in images])))
+
+        # 5) 批量更新 dataset 计数
+        for ds_id, cnt in by_dataset.items():
+            new_img = case(
+                (Dataset.image_count - cnt < 0, 0),
+                else_=Dataset.image_count - cnt,
+            )
+            await db.execute(
+                update(Dataset)
+                .where(Dataset.id == ds_id)
+                .values(image_count=new_img)
+            )
+        for ds_id, cnt in annotated_count_by_ds.items():
+            new_ann = case(
+                (Dataset.annotated_count - cnt < 0, 0),
+                else_=Dataset.annotated_count - cnt,
+            )
+            await db.execute(
+                update(Dataset)
+                .where(Dataset.id == ds_id)
+                .values(annotated_count=new_ann)
+            )
+        if commit:
+            await db.commit()
+        return {
+            "success": True,
+            "deleted": deleted,
+            "missing": len(image_ids) - len(images),
+        }
+
 
 __all__ = ["ImageService"]
