@@ -1,9 +1,15 @@
 <!--
-  AnnotationToolbar.vue (v2.5.7 拆分自 Annotate.vue, v2.5.15 +已人工标注卡)
+  AnnotationToolbar.vue (v2.5.7 拆分自 Annotate.vue, v2.5.15 +已人工标注卡, v2.5.48 +类别卡)
   ===================================================
   标注工作台顶部工具栏:
-  - 6 个统计卡片 (待标注 / 已人工标注 / AI 已标 / 本轮已标 / 本轮总耗时 / 总累计耗时)
+  - 4 个统计卡片 (待标注 / 已人工标注 / AI 已标 / 类别)
     · 已人工标注: 包含已确认 + 已修正, 与 DatasetDetail 统计卡口径一致
+    · 类别: 显示数据集总类数; hover 展示每类的总样本 / 已人工标 / AI 已标
+      (类目级覆盖度, 反映任务复杂度 + 各类的标注进度)
+  - v2.5.48: 移除 3 个低价值指标 ——
+    · 本会话已标: 与「已人工标注」语义重复 (差在 session scope, 切换 dataset 即重置)
+    · 本会话耗时: 孤立秒数无意义, 标注效率 = 已标/耗时 已在 DatasetDetail 体现
+    · 估算 AI 节省: 后端硬编码 ai_labeled * 3 (拍脑袋), 不可验证 / 不可解释
   - 数据集选择 + 任务类型徽章 (popover 详解)
   - 模型选择 (项目模型 / 基础模型): 三任务统一交互
     · classification: 项目模型 → fine-tune 下拉; 基础模型 → timm ImageNet 下拉
@@ -18,7 +24,7 @@
     models, finetuneModels, selectedModelId, activeModel, useFinetune
     stats, pendingCount, aiLabeledCount,
     humanConfirmedCount, humanCorrectedCount,
-    sessionStats
+    categories                          // v2.5.48 新增: 类目列表, 供「类别」卡 + hover 详情
     autoLabeling
 
   Emits:
@@ -30,18 +36,27 @@
 -->
 <template>
   <div>
-    <!-- 顶部统计 (6 卡片, 6×4=24 列; 参考 DatasetDetail 统计卡布局)
-         v2.5.15: 新增"已人工标注"卡 (已确认 + 已修正), 数据来源 status_counts
-         · 修复: 之前工作台只显示待标注/AI已标/本会话指标, 缺少数据集级人工标注累计数
-         · 现在与 DatasetDetail 顶部统计卡口径保持一致, 用户切换 dataset 时数据同步 -->
+    <!-- 顶部统计 (v2.5.48: 6 卡 → 4 卡)
+         · 待标注 (蓝)        来源: status_counts.pending
+         · 已人工标注 (绿)    来源: status_counts.human_confirmed + human_corrected
+                             · 副标题: 已确认 N · 已修正 N
+         · AI 已标 (灰)       来源: status_counts.ai_labeled
+         · 类别 (紫) v2.5.48  来源: categories.length
+                             · hover tooltip: 每类的总样本 / 已人工标 / AI 已标
+
+         v2.5.48 移除的 3 个低价值指标:
+         · 本会话已标: 与「已人工标注」语义重叠 (差在 session scope, 切换 dataset 即重置)
+         · 本会话耗时: 孤立秒数无意义, 标注效率 = 已标/耗时 已在 DatasetDetail 体现
+         · 估算 AI 节省: 后端硬编码 ai_labeled * 3 (拍脑袋), 不可验证 / 不可解释
+    -->
     <el-row v-if="stats" :gutter="12" style="margin-bottom: 16px;">
-      <el-col :span="4">
+      <el-col :span="6">
         <el-card shadow="hover" class="stat-card">
           <el-statistic title="待标注" :value="pendingCount" suffix="张"
             :value-style="{ color: '#409eff' }" />
         </el-card>
       </el-col>
-      <el-col :span="4">
+      <el-col :span="6">
         <el-card shadow="hover" class="stat-card">
           <el-statistic title="已人工标注"
             :value="humanConfirmedCount + humanCorrectedCount" suffix="张"
@@ -53,28 +68,58 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :span="4">
+      <el-col :span="6">
         <el-card shadow="hover" class="stat-card">
           <el-statistic title="AI 已标" :value="aiLabeledCount" suffix="张"
             :value-style="{ color: '#909399' }" />
         </el-card>
       </el-col>
-      <el-col :span="4">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="本会话已标" :value="sessionStats.confirmed + sessionStats.corrected" suffix="张" />
-        </el-card>
-      </el-col>
-      <el-col :span="4">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="本会话耗时"
-            :value="Number((sessionStats.total_time_ms / 1000).toFixed(1))" :precision="1" suffix="秒" />
-        </el-card>
-      </el-col>
-      <el-col :span="4">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="估算 AI 节省" :value="stats.estimated_saved_seconds || 0"
-            suffix="秒" :value-style="{ color: '#e6a23c' }" />
-        </el-card>
+      <!-- v2.5.48: 类别卡 — 显示总类数, hover 看每类详情
+           - el-tooltip 触发 hover 弹出详细面板
+           - 面板内: 类目名 + 3 列计数 (总样本 / 已人工 / AI 已标)
+           - 数据来源: datasetApi.categories 已在父组件加载到 categories.value
+           - 空态: 0 个类目时显示「-」 + tooltip 提示「数据集未配置类目」 -->
+      <el-col :span="6">
+        <el-tooltip
+          placement="top"
+          :disabled="categories.length === 0"
+          :show-after="200"
+        >
+          <template #content>
+            <div v-if="categories.length === 0" style="padding: 4px 8px;">
+              当前数据集未配置类目
+            </div>
+            <div v-else class="category-tooltip">
+              <div class="category-tooltip__header">各类目已标进度</div>
+              <table class="category-tooltip__table">
+                <thead>
+                  <tr>
+                    <th class="ct-name">类目</th>
+                    <th class="ct-num">总样本</th>
+                    <th class="ct-num">已人工</th>
+                    <th class="ct-num">AI 已标</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in categories" :key="c.id">
+                    <td class="ct-name">
+                      <span class="ct-dot" :style="{ background: c.color || '#409eff' }"></span>
+                      {{ c.name }}
+                    </td>
+                    <td class="ct-num">{{ c.sample_count ?? 0 }}</td>
+                    <td class="ct-num ct-human">{{ c.human_labeled_count ?? 0 }}</td>
+                    <td class="ct-num ct-ai">{{ c.ai_labeled_count ?? 0 }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <el-card shadow="hover" class="stat-card stat-card--clickable">
+            <el-statistic :title="categories.length === 0 ? '类别' : `类别 (共 ${categories.length} 类)`"
+              :value="categories.length" suffix="类"
+              :value-style="{ color: categories.length > 0 ? '#722ed1' : '#c0c4cc' }" />
+          </el-card>
+        </el-tooltip>
       </el-col>
     </el-row>
 
@@ -288,7 +333,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { PropType } from 'vue'
-import { MagicStick } from '@element-plus/icons-vue'
+import { MagicStick, InfoFilled } from '@element-plus/icons-vue'
 
 /**
  * v2.5.47: 移除原硬编码 DETECTION_MODELS, 改为从 models prop 过滤
@@ -342,7 +387,23 @@ const props = defineProps({
   humanConfirmedCount: { type: Number, required: true },
   /** v2.5.15: 已修正人工标注数 (status_counts.human_corrected) */
   humanCorrectedCount: { type: Number, required: true },
-  sessionStats: { type: Object as PropType<{ confirmed: number; corrected: number; total_time_ms: number }>, required: true },
+  /**
+   * v2.5.48: 数据集类目列表 (供「类别」卡 + hover 详情)
+   * - 来源: datasetApi.categories (父组件 Annotate/index.vue onMounted 拉取)
+   * - 字段: id, name, color?, sample_count, human_labeled_count, ai_labeled_count
+   * - 用途: 顶部「类别」统计卡总数显示, hover tooltip 展示每类进度
+   */
+  categories: {
+    type: Array as PropType<Array<{
+      id: number
+      name: string
+      color?: string
+      sample_count?: number
+      human_labeled_count?: number
+      ai_labeled_count?: number
+    }>>,
+    default: () => [],
+  },
   autoLabeling: { type: Boolean, required: true },
   /** v2.5.36: AI 预标注实时进度 (0-100) */
   autoLabelProgress: { type: Number, default: 0 },
@@ -420,5 +481,81 @@ const filteredDatasets = computed(() => {
   -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* v2.5.48: 类别卡的「悬停查看」提示 (放在 stat-meta 下面, 浅紫引导色) */
+.stat-meta--hint {
+  color: #722ed1;
+  font-size: 11px;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+/* v2.5.48: 类别卡 hover 状态 (区别于普通卡, 提示用户可悬停) */
+.stat-card--clickable {
+  cursor: help;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stat-card--clickable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(114, 46, 209, 0.15);
+}
+</style>
+
+<!--
+  v2.5.48: 类别 tooltip 表格样式 (全局, 不带 scoped)
+  - el-tooltip 的 content slot 渲染在 popper 容器里, scoped 的 [data-v-xxx] 选择器匹配不上
+  - 命名空间 .category-tooltip-* 避免污染其它组件
+  - 表格风格: 浅色细线, 类目名带颜色圆点, 数字列右对齐 + 等宽数字
+-->
+<style>
+.category-tooltip {
+  font-size: 12px;
+  line-height: 1.5;
+  min-width: 240px;
+}
+.category-tooltip__header {
+  font-weight: 600;
+  color: #303133;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #ebeef5;
+  margin-bottom: 6px;
+}
+.category-tooltip__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.category-tooltip__table th,
+.category-tooltip__table td {
+  padding: 4px 6px;
+  text-align: left;
+}
+.category-tooltip__table th {
+  color: #909399;
+  font-weight: 500;
+  font-size: 11px;
+  border-bottom: 1px solid #ebeef5;
+}
+.category-tooltip__table .ct-name {
+  min-width: 90px;
+}
+.category-tooltip__table .ct-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  width: 56px;
+}
+.category-tooltip__table .ct-human {
+  color: #67c23a;
+  font-weight: 600;
+}
+.category-tooltip__table .ct-ai {
+  color: #909399;
+}
+.category-tooltip__table .ct-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 </style>

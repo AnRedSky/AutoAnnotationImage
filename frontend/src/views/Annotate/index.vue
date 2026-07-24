@@ -649,7 +649,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
       :ai-labeled-count="aiLabeledCount"
       :human-confirmed-count="humanConfirmedCount"
       :human-corrected-count="humanCorrectedCount"
-      :session-stats="sessionStats"
+      :categories="categories"
       :auto-labeling="autoLabeling"
       :auto-label-progress="autoLabelProgress"
       :auto-label-progress-message="autoLabelProgressMessage"
