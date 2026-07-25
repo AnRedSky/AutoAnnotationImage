@@ -16,6 +16,7 @@ import { useRouter } from 'vue-router'
 import {
   Search, Lightning, DataAnalysis, EditPen, RefreshLeft, Delete,
   Check, Minus, Grid, List, InfoFilled, WarningFilled, Promotion,
+  Warning,  // v3.0.0 新增
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -54,6 +55,7 @@ const emit = defineEmits<{
   (e: 'batchClear'): void
   (e: 'batchDelete'): void
   (e: 'toggleSelectAll'): void
+  (e: 'batchMarkUnqualified'): void  // v3.0.0 新增
 }>()
 
 const router = useRouter()
@@ -184,6 +186,9 @@ const goTraining = () => router.push('/training')
         </el-tag>
         <el-button size="small" :disabled="selectedCount === 0" type="warning"
           :icon="RefreshLeft" @click="emit('batchClear')" class="filter-cell filter-cell--btn">清除标注</el-button>
+        <el-button size="small" :disabled="selectedCount === 0" type="warning"
+          :icon="Warning" @click="emit('batchMarkUnqualified')"
+          class="filter-cell filter-cell--btn">标记不合格</el-button>
         <el-button size="small" :disabled="selectedCount === 0" type="danger"
           :icon="Delete" @click="emit('batchDelete')" class="filter-cell filter-cell--btn">删除</el-button>
         <div class="view-mode-switch" :title="viewMode === 'grid' ? '网格视图' : '列表视图'">

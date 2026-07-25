@@ -331,6 +331,58 @@ const loadSpecificImage = async (imageId: number): Promise<boolean> => {
   }
 }
 
+// ============== v3.0.0: 不合格标记事件处理 ==============
+
+/**
+ * 标记当前图为不合格
+ * - 调 API 设置 quality_flag / reject_reason
+ * - 就地更新 image 对象 (避免整页重拉)
+ * - 标记后自动加载下一张 (不合格图不应停留)
+ */
+async function onMarkUnqualified(reason: string, customText: string) {
+  if (!image.value?.id) return
+  try {
+    await annotationApi.markUnqualified({
+      image_id: image.value.id,
+      reason,
+      custom_text: customText || undefined,
+    })
+    ElMessage.success('已标记为不合格')
+    // 就地更新 image 对象
+    image.value = {
+      ...image.value,
+      quality_flag: 'unqualified',
+      reject_reason: reason,
+    }
+    // 标记后自动加载下一张
+    setTimeout(() => loadNext(), 600)
+  } catch (e: any) {
+    ElMessage.error('标记失败: ' + (e?.response?.data?.detail || e?.message))
+  }
+}
+
+/**
+ * 撤销当前图的不合格标记
+ * - 调 API 清空 4 字段
+ * - 就地更新 image 对象
+ * - 刷新统计 (不合格数变化)
+ */
+async function onUnmarkUnqualified() {
+  if (!image.value?.id) return
+  try {
+    await annotationApi.unmarkUnqualified(image.value.id)
+    ElMessage.success('已撤销不合格标记')
+    image.value = {
+      ...image.value,
+      quality_flag: null,
+      reject_reason: null,
+    }
+    await refreshStats()
+  } catch (e: any) {
+    ElMessage.error('撤销失败: ' + (e?.response?.data?.detail || e?.message))
+  }
+}
+
 // ============== computed ==============
 const pendingCount = computed(() => {
   return (stats.value?.status_counts || {}).pending || 0
@@ -355,6 +407,9 @@ const humanConfirmedCount = computed(() => {
 const humanCorrectedCount = computed(() => {
   return (stats.value?.status_counts || {}).human_corrected || 0
 })
+// v3.0.0: 不合格标记状态 (从 image 派生, 供 3 个 Panel 使用)
+const isUnqualified = computed(() => image.value?.quality_flag === 'unqualified')
+const rejectReason = computed(() => image.value?.reject_reason || null)
 // 类别下拉排序 (按 id 升序)
 const sortedCategories = computed(() => {
   return [...categories.value].sort((a: any, b: any) => Number(a.id) - Number(b.id))
@@ -775,10 +830,14 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           :sorted-categories="sortedCategories"
           :can-go-prev="canGoPrev"
           :no-more="noMore"
+          :is-unqualified="isUnqualified"
+          :reject-reason="rejectReason"
           @submit="submit"
           @prev="loadPrev"
           @next="loadNext"
           @view-dataset="viewDataset"
+          @mark-unqualified="onMarkUnqualified"
+          @unmark-unqualified="onUnmarkUnqualified"
         />
         <!-- v2.5.14: 移除 @undo, @redo, @clear-draft, @cancel 监听
              撤销、重做、清空 改为 DetectionPanel 直接调 detAnnotRef 子组件方法
@@ -798,6 +857,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           :history-ids="historyIds"
           :image="image"
           :det-open-popover-idx="detOpenPopoverIdx"
+          :is-unqualified="isUnqualified"
+          :reject-reason="rejectReason"
           @save="() => saveDetectionBBoxes(bboxList)"
           @apply-copy-suggestions="applyCopySuggestions"
           @ignore-copy-suggestions="ignoreCopySuggestions"
@@ -809,6 +870,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           @popover-visible-change="onPopoverVisibleChange"
           @remove-bbox="(idx: number) => removeBboxByIndex(idx)"
           @target-category-change="onDetTargetCategoryChange"
+          @mark-unqualified="onMarkUnqualified"
+          @unmark-unqualified="onUnmarkUnqualified"
         />
         <SegmentationPanel
           v-else-if="image.task_type === 'segmentation'"
@@ -822,6 +885,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           :history-cursor="historyCursor"
           :history-ids="historyIds"
           :image="image"
+          :is-unqualified="isUnqualified"
+          :reject-reason="rejectReason"
           @mode-change="onSegModeChange"
           @category-change="onSegCategoryChange"
           @brush-size-change="onSegBrushSizeChange"
@@ -830,6 +895,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           @view-dataset="viewDataset"
           @save="onSegSave"
           @cancel="onSegClear"
+          @mark-unqualified="onMarkUnqualified"
+          @unmark-unqualified="onUnmarkUnqualified"
         />
       </el-col>
     </el-row>

@@ -8,6 +8,7 @@
  */
 import { View, Delete, RefreshLeft, Check } from '@element-plus/icons-vue'
 import { imageApi } from '@/api'
+import { getRejectReasonLabel } from '@/utils/rejectReason'  // v3.0.0 新增
 
 const props = defineProps<{
   images: any[]
@@ -25,6 +26,7 @@ const emit = defineEmits<{
   (e: 'openViewer', id: number): void
   (e: 'clearAnnotation', img: any): void
   (e: 'deleteOne', img: any): void
+  (e: 'unmarkUnqualified', img: any): void  // v3.0.0 新增
 }>()
 </script>
 
@@ -53,6 +55,15 @@ const emit = defineEmits<{
           <el-tag :type="statusType(img.status)" size="small" class="status-tag">
             {{ statusLabel(img.status) }}
           </el-tag>
+          <!-- v3.0.0: 不合格图片红色覆盖层 + 角标 -->
+          <div v-if="img.quality_flag === 'unqualified'" class="unqualified-overlay">
+            <el-tag type="danger" size="small" effect="dark" class="unqualified-badge">
+              不合格
+            </el-tag>
+            <el-tag type="danger" size="small" effect="plain" class="unqualified-reason">
+              {{ getRejectReasonLabel(img.reject_reason) }}
+            </el-tag>
+          </div>
           <el-button
             class="detail-btn"
             type="primary"
@@ -76,6 +87,20 @@ const emit = defineEmits<{
           </el-tooltip>
           <el-button class="del-btn" type="danger" :icon="Delete" size="small" circle
             @click.stop="emit('deleteOne', img)" />
+          <!-- v3.0.0: 撤销不合格标记按钮 (仅不合格图显示, hover 可见) -->
+          <el-tooltip
+            v-if="img.quality_flag === 'unqualified'"
+            content="撤销不合格标记" placement="top"
+          >
+            <el-button
+              class="unmark-btn"
+              type="success"
+              :icon="RefreshLeft"
+              size="small"
+              circle
+              @click.stop="emit('unmarkUnqualified', img)"
+            />
+          </el-tooltip>
         </div>
         <div class="image-info">
           <el-tooltip :content="img.filename" placement="top">
@@ -169,6 +194,38 @@ const emit = defineEmits<{
 }
 .image-card:hover .del-btn { opacity: 1; }
 .image-card:hover .clear-btn { opacity: 1; }
+.image-card:hover .unmark-btn { opacity: 1; }
+
+/* v3.0.0: 不合格图片视觉标记 */
+.image-card:has(.unqualified-overlay) {
+  border-color: #f56c6c !important;
+}
+.unqualified-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(245, 108, 108, 0.18);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+  border-radius: 4px;
+}
+.unqualified-badge {
+  font-size: 13px;
+  font-weight: 600;
+}
+.unqualified-reason {
+  font-size: 11px;
+}
+.unmark-btn {
+  position: absolute;
+  bottom: 6px;
+  left: 64px;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease-out);
+}
 
 .detail-btn {
   position: absolute;
