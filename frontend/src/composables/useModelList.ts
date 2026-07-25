@@ -55,8 +55,12 @@ export function useModelList(options: UseModelListOptions) {
   const onActivate = async (id: number) => {
     try {
       await modelApi.activate(id)
+      // v3.0.0 行高闪动修复: 与 onDeactivate 保持一致的就地更新模式,
+      // 避免 await load() 整体重拉 data 触发 el-table 整表 DOM 重建
+      // (即使有 row-key, 整表重拉仍会引发 cell 渲染 race condition 导致行高抖动)
+      const row = data.value.find((r) => r.id === id)
+      if (row) row.is_active = true
       ElMessage.success('已激活该版本 (允许多激活并存)')
-      await load()
     } catch (e: any) {
       ElMessage.error('激活失败: ' + (e?.response?.data?.detail || e?.message))
     }

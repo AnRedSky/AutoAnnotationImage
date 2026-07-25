@@ -106,10 +106,24 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
       </el-table-column>
       <el-table-column prop="is_active" label="状态" width="120" align="center">
         <template #default="{ row }">
-          <el-tag v-if="row.is_active" type="success" effect="dark" size="small">
-            <el-icon style="margin-right: 2px;"><CircleCheck /></el-icon>已激活
+          <!-- v3.0.0 行高闪动修复: 用单个 el-tag + 动态属性, 替代 v-if/v-else
+               根因(浏览器运行时证据): 激活切换时, 原 v-if/v-else 让两个 el-tag
+               经历 mount/unmount, 且"已激活"tag 多了 CircleCheck 图标导致 tag
+               宽度 +4px, 配合 align=center 使 X 左移 -7px, 视觉抖动明显;
+               effect=plain→dark 背景色突变也放大"闪动"感知
+               修复: 始终渲染同一个 el-tag + el-icon, 图标用 opacity 控制可见性
+               占位恒定 → tag 宽度恒定 → 无位置抖动 -->
+          <el-tag
+            v-bind="row.is_active
+              ? { type: 'success', effect: 'dark' }
+              : { effect: 'plain' }"
+            size="small"
+            class="status-tag"
+          >
+            <el-icon
+              :style="{ marginRight: '2px', opacity: row.is_active ? 1 : 0 }"
+            ><CircleCheck /></el-icon>{{ row.is_active ? '已激活' : '未激活' }}
           </el-tag>
-          <el-tag v-else effect="plain" size="small">未激活</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="accuracy" label="准确率" width="100" align="center">
@@ -150,25 +164,24 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
       <el-table-column label="操作" width="260" fixed="right" align="center">
         <template #default="{ row }">
           <div class="row-actions">
-            <template v-if="!row.is_active">
-              <el-tooltip content="激活该模型版本 (允许多激活并存)" placement="top">
-                <el-button
-                  size="small"
-                  type="success"
-                  @click="emit('activate', row.id)"
-                >激活</el-button>
-              </el-tooltip>
-            </template>
-            <template v-else>
-              <el-tooltip content="取消该模型版本的激活状态" placement="top">
-                <el-button
-                  size="small"
-                  type="info"
-                  plain
-                  @click="emit('deactivate', row.id)"
-                >取消激活</el-button>
-              </el-tooltip>
-            </template>
+            <!-- v3.0.0 行高闪动修复: 用单个按钮 + 动态属性切换, 替代 v-if/v-else
+                 根因: v-if/v-else 在 is_active 切换时, 整个 el-tooltip + el-button
+                 经历 unmount → mount 周期, .row-actions 容器内子元素数量短暂
+                 由 3 → 2 → 3, inline-flex 容器宽度瞬时塌陷再恢复 → 行视觉抖动
+                 修复: 始终保持同一个 el-tooltip + el-button 实例, 只切换属性/文案 -->
+            <el-tooltip
+              :content="row.is_active
+                ? '取消该模型版本的激活状态'
+                : '激活该模型版本 (允许多激活并存)'"
+              placement="top"
+            >
+              <el-button
+                size="small"
+                :type="row.is_active ? 'info' : 'success'"
+                :plain="row.is_active"
+                @click="row.is_active ? emit('deactivate', row.id) : emit('activate', row.id)"
+              >{{ row.is_active ? '取消激活' : '激活' }}</el-button>
+            </el-tooltip>
             <el-button size="small" @click="emit('detail', row.id)">详情</el-button>
             <el-tooltip content="删除此模型版本 (激活态会同步取消激活)" placement="top">
               <el-button
@@ -244,6 +257,21 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
 .metric { font-variant-numeric: tabular-nums; font-weight: 500; }
 .metric--acc.is-strong { color: #00c48c; font-weight: 600; }
 
+/* v3.0.0 行高闪动修复: 状态 tag 始终渲染图标占位 (opacity 控可见性),
+   配合 white-space:nowrap 防止换行, background-color 过渡让 plain→dark
+   背景色平滑过渡 0.2s, 消除"颜色突变闪动"感知 */
+.status-tag {
+  white-space: nowrap;
+  transition: background-color 0.2s var(--ease-out, ease),
+              color 0.2s var(--ease-out, ease),
+              border-color 0.2s var(--ease-out, ease);
+}
+.status-tag :deep(.el-icon) {
+  /* 图标始终占位, 切换时只变 opacity 不变尺寸, 避免 tag 宽度抖动 */
+  flex-shrink: 0;
+  transition: opacity 0.2s var(--ease-out, ease);
+}
+
 .ds-name {
   display: inline-flex;
   align-items: center;
@@ -260,11 +288,18 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
   white-space: nowrap;
   justify-content: center;
 }
+/* v3.0.0 行高闪动修复:
+   1. 删除原 margin:4 / padding:10px / min-height:auto / size:large 四个无效/有害属性
+      - margin:4 缺少单位被忽略; min-height:auto 非法; size 非 CSS 属性
+      - padding:10px 覆盖了 Element Plus small 默认 padding(8px 15px), 让按钮高度
+        与其他行不一致, 切换时行高抖动
+   2. 统一 min-width: "激活"(2字) ≈ 58px, "取消激活"(4字) ≈ 86px,
+      切换时按钮自身宽度变化 28px, 在 inline-flex 容器中传导至行视觉抖动
+      设 min-width:80px 让所有按钮宽度一致, 消除切换抖动
+   3. margin:0 让 gap 单独控制间距, 避免双重间距 */
 .row-actions .el-button {
-  margin: 4;
-  padding: 10px;
-  min-height: auto;
-  size: large;
+  min-width: 80px;
+  margin: 0;
 }
 
 /* 空状态 */

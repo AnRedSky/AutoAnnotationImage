@@ -171,9 +171,13 @@ body {
   transform: translateY(0);
 }
 
-/* 表格行: 悬浮高亮更柔和 */
-.el-table tr {
-  transition: background 0.2s var(--ease-out);
+/* 表格行: 悬浮高亮更柔和
+   v3.0.0 行高闪动修复: 显式声明只过渡 background-color, 禁止 Element Plus
+   默认对 .el-table__row 应用 transition: all 引发 height/width/padding 抖动
+   (尤其在 fixed 列对齐重算时, 几何属性过渡会放大视觉抖动) */
+.el-table tr,
+.el-table__row {
+  transition: background-color 0.2s var(--ease-out);
 }
 .el-table th.el-table__cell {
   background: var(--bg-soft) !important;
