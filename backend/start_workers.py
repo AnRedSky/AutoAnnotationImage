@@ -205,7 +205,7 @@ def resolve_worker_settings() -> tuple[str, int]:
     Returns:
         (pool, concurrency)
     """
-    from app.config import settings  # 延后 import, 避免 settings 初始化早于 .env
+    from app.core.config import settings  # 延后 import, 避免 settings 初始化早于 .env
 
     # 1) CLI 优先
     pool = _get_arg_value("--pool", "")

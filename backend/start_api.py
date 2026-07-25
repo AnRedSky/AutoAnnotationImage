@@ -38,7 +38,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 import uvicorn  # noqa: E402
 
 # 读 .env 配置（必须先 import settings，让 pydantic-settings 加载 .env）
-from app.config import settings  # noqa: E402,E501
+from app.core.config import settings  # noqa: E402,E501
 
 
 # ============================================================

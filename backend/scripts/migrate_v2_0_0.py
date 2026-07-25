@@ -20,7 +20,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
-from app.config import settings  # noqa: E402
+from app.core.config import settings  # noqa: E402
 from app.core.db_migration import MIGRATIONS, ensure_v2_0_0_schema  # noqa: E402
 
 
