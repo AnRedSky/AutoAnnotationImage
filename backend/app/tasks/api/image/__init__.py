@@ -29,7 +29,9 @@ from fastapi import APIRouter
 
 from app.tasks.api.image.upload import router as upload_router
 from app.tasks.api.image.auto_label import router as auto_label_router
-from app.tasks.api.image.preview import router as preview_router
+from app.tasks.api.preview import router as preview_router
+# preview 包是独立模块 (Phase S3 拆分), 不再嵌在 image/ 下, 减少耦合
+# 但仍 include 到 image 顶层 router, 保持 /api/images/preview-confidence 路径不变
 from app.tasks.api.image.query import router as query_router
 from app.tasks.api.image.delete import router as delete_router
 
