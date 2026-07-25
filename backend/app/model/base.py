@@ -1,15 +1,11 @@
 """
-SQLAlchemy ORM Base Class (Model Layer)
-=======================================
+兼容垫片 (Stage 2.3): Base Class
+================================
 
-所有 ORM 模型继承此 Base. 在 v3.0 重命名 models/ -> model/ 时, 此处作为
-Base 类的归属地 (与具体业务 ORM 模型并列, 方便 model 目录自治).
-
-v3.0.0 新增 (Phase 1.9): 从 app.database.Base 提取
+**v3.0.0 Stage 2.3 迁移**: Base 已迁入 app.common.base_model
 """
-from sqlalchemy.orm import DeclarativeBase
+from app.common.base_model import *  # noqa: F401,F403
+from app.common.base_model import Base  # noqa: F401
 
 
-class Base(DeclarativeBase):
-    """SQLAlchemy ORM 基类"""
-    pass
+__all__ = ["Base"]

@@ -1,27 +1,11 @@
 """
-Category ORM Model
-==================
+兼容垫片 (Stage 2.3): Category ORM Model
+=======================================
+
+**v3.0.0 Stage 2.3 迁移**: Category 已迁入 app.tasks.model.category
 """
-from sqlalchemy import String, Integer, Text, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.model.base import Base
+from app.tasks.model.category import *  # noqa: F401,F403
+from app.tasks.model.category import Category  # noqa: F401
 
 
-class Category(Base):
-    __tablename__ = "category"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    dataset_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("dataset.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(String(50), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=True)
-    color: Mapped[str] = mapped_column(String(20), default="#409EFF")
-    sample_count: Mapped[int] = mapped_column(Integer, default=0)
-    sort_order: Mapped[int] = mapped_column(Integer, default=0)
-
-    # Relationships
-    dataset = relationship("Dataset", back_populates="categories")
-
-    def __repr__(self) -> str:
-        return f"<Category {self.id} {self.name!r} (dataset={self.dataset_id})>"
+__all__ = ["Category"]
