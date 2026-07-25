@@ -251,13 +251,23 @@ def start_foreground():
     if not ensure_redis():
         err("Redis unavailable; Celery cannot start")
         return 1
-    # 关键: 必须 import tasks 模块以触发 @celery_app.task 装饰器,
-    # 否则 train_model_task / auto_annotate_task 不会注册到 celery_app.tasks,
-    # worker 收到任务后会报 KeyError: 'app.workers.tasks.train_model_task'。
-    # celery_app.py 的 include=['app.workers.tasks'] 已经处理了大部分情况,
-    # 但 start_workers.py 是 worker_main 的直接调用方, 显式 import 更稳。
-    from app.workers.celery_app import celery_app
-    from app.workers import tasks as _tasks  # noqa: F401  (register tasks)
+    # 关键: 必须 import celery_app + 子任务模块以触发 @celery_app.task 装饰器,
+    # 否则 train_classification_task / train_detection_task 等不会注册到 celery_app.tasks,
+    # worker 收到任务后会报 KeyError。
+    # celery_app.py 的 include=['app.tasks.workers.classification', ...] 已经处理了
+    # 大部分情况, 但 start_workers.py 是 worker_main 的直接调用方, 显式 import 更稳。
+    # v3.0.0 Stage 2.6 迁移: 路径从 app.workers.* 改为 app.tasks.workers.*
+    # v3.0.0 Stage S4/S5/S6 拆分: workers 包按任务类型拆 3 个子包, 各自 __init__ 负责注册
+    from app.tasks.workers.celery_app import celery_app
+    import app.tasks.workers  # noqa: F401  (触发 classification/detection/segmentation 三个子包 __init__ 的任务注册)
+
+    # 初始化统一日志 (与 API 进程保持一致的日志格式/落盘)
+    try:
+        from app.core.logging_setup import setup_logging
+        setup_logging()
+    except Exception as e:
+        err(f"setup_logging failed (non-fatal): {e}")
+
     loglevel = "info"
     if "--loglevel" in sys.argv:
         i = sys.argv.index("--loglevel")
