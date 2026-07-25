@@ -110,6 +110,50 @@
       </div>
     </div>
 
+    <!-- 6. 不合格标记 (v3.0.0) -->
+    <div class="op-section">
+      <div class="op-section-title">6. 不合格标记</div>
+      <template v-if="image">
+        <template v-if="isUnqualified">
+          <div style="display: flex; align-items: center; gap: 6px; margin-top: 6px;">
+            <el-tag type="danger" size="small" effect="dark">已标记不合格</el-tag>
+            <el-tag type="danger" size="small" effect="plain">
+              {{ getRejectReasonLabel(rejectReason) }}
+            </el-tag>
+          </div>
+          <el-button
+            size="small" type="warning" :icon="RefreshLeft"
+            style="width: 100%; margin-top: 6px;"
+            @click="emit('unmark-unqualified')"
+          >撤销不合格标记</el-button>
+        </template>
+        <template v-else>
+          <el-select
+            v-model="localRejectReason"
+            placeholder="选择不合格原因"
+            size="small" style="width: 100%; margin-top: 6px;"
+          >
+            <el-option
+              v-for="opt in REJECT_REASON_OPTIONS" :key="opt.value"
+              :label="opt.label" :value="opt.value"
+            />
+          </el-select>
+          <el-input
+            v-if="localRejectReason === 'other'"
+            v-model="localCustomText"
+            placeholder="请输入具体原因"
+            size="small" style="width: 100%; margin-top: 6px;"
+          />
+          <el-button
+            size="small" type="danger" :icon="Warning"
+            :disabled="!localRejectReason"
+            style="width: 100%; margin-top: 6px;"
+            @click="handleMarkUnqualified"
+          >标记为不合格</el-button>
+        </template>
+      </template>
+    </div>
+
     <div class="op-section">
       <el-link type="primary" :icon="View" @click="emit('view-dataset')">
         去数据集详情浏览全部图片
@@ -119,7 +163,9 @@
 </template>
 
 <script setup lang="ts">
-import { Check, Close, ArrowLeft, View } from '@element-plus/icons-vue'
+import { ref, watch } from 'vue'
+import { Check, Close, ArrowLeft, View, RefreshLeft, Warning } from '@element-plus/icons-vue'
+import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 
 interface Category { id: number; name: string }
 interface Image {
@@ -129,7 +175,7 @@ interface Image {
   height: number
 }
 
-defineProps<{
+const props = defineProps<{
   segAnnotRef: any
   segDirty: boolean
   annotatorSaving: boolean
@@ -140,6 +186,9 @@ defineProps<{
   historyCursor: number
   historyIds: number[]
   image: Image | null
+  // v3.0.0: 不合格标记状态 (从父组件 image 派生)
+  isUnqualified: boolean
+  rejectReason: string | null
 }>()
 
 const emit = defineEmits<{
@@ -151,6 +200,9 @@ const emit = defineEmits<{
   (e: 'view-dataset'): void
   (e: 'save'): void
   (e: 'cancel'): void
+  // v3.0.0: 不合格标记事件 (单向数据流, 由父组件处理 API 调用)
+  (e: 'mark-unqualified', reason: string, customText: string): void
+  (e: 'unmark-unqualified'): void
 }>()
 
 // 调色板 (与 SegmentationAnnotator 一致)
@@ -162,6 +214,23 @@ function catColor(catId: number | null | undefined): string {
   if (catId == null) return '#909399'
   return DET_PALETTE[Math.abs(Number(catId)) % DET_PALETTE.length]
 }
+
+// ============== v3.0.0: 不合格标记本地状态 ==============
+const localRejectReason = ref<string>('')
+const localCustomText = ref<string>('')
+
+function handleMarkUnqualified() {
+  if (!localRejectReason.value) return
+  emit('mark-unqualified', localRejectReason.value, localCustomText.value)
+  localRejectReason.value = ''
+  localCustomText.value = ''
+}
+
+// 切换图片时清空本地状态 (避免上一张的选择残留)
+watch(() => props.image?.id, () => {
+  localRejectReason.value = ''
+  localCustomText.value = ''
+})
 </script>
 
 <style scoped>
