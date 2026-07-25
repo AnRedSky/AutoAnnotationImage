@@ -102,9 +102,17 @@ class Settings(BaseSettings):
     # 兼容 .env 的 SECRET_KEY 与旧名 JWT_SECRET
     SECRET_KEY: Optional[str] = os.getenv("SECRET_KEY")
     JWT_SECRET: Optional[str] = os.getenv("JWT_SECRET")
-    JWT_ALGORITHM: str = "HS256"
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
     JWT_EXPIRE_MINUTES: int = 60 * 24  # 兼容旧名
+    # v3.0.0 审查修复 Phase-A: 标准化 JWT 签发方/受众 + 时钟漂移容忍
+    # - JWT_ISSUER: 签发方标识, 写入 payload `iss` 声明, 解码时强制校验
+    # - JWT_AUDIENCE: 受众标识, 写入 payload `aud` 声明, 解码时强制校验
+    # - JWT_LEEWAY_SECONDS: 时钟漂移容忍, 默认 60s (应对分布式节点间秒级时差)
+    # - JWT_REQUIRED_CLAIMS: 必填声明白名单, 缺失任意一个即 401
+    JWT_ISSUER: str = os.getenv("JWT_ISSUER", "image-annotation")
+    JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "image-annotation-api")
+    JWT_LEEWAY_SECONDS: int = int(os.getenv("JWT_LEEWAY_SECONDS", "60"))
 
     # ===== MinIO / Storage =====
     MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000")
@@ -354,6 +362,7 @@ _ENV_SYNC_KEYS = [
     "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
     "CELERY_WORKER_POOL", "CELERY_WORKER_CONCURRENCY",
     "SECRET_KEY",
+    "JWT_ISSUER", "JWT_AUDIENCE", "JWT_ALGORITHM", "JWT_LEEWAY_SECONDS",
 ]
 for _k in _ENV_SYNC_KEYS:
     _v = getattr(settings, _k, None)
