@@ -141,6 +141,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Stage 3: Request ID 中间件 (在所有其他中间件之前, 让后续中间件都能读到 rid)
+from app.middleware.http import RequestIDMiddleware  # noqa: E402
+app.add_middleware(RequestIDMiddleware)
+
 # ============================================================
 #  路由自动挂载 (Stage 2.7)
 # ============================================================
