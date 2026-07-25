@@ -23,6 +23,7 @@ from app.tasks.model.model_version import ModelVersion
 from app.tasks.model.training_job import TrainingJob
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
+from app.admin.service.stats_service import StatsService
 
 router = APIRouter()
 
@@ -38,32 +39,24 @@ async def stats_overview(
 ):
     """
     系统总览（Dashboard 顶部 4 个统计卡）
-    """
-    # 数据集数
-    ds_count = (await db.execute(select(func.count(Dataset.id)))).scalar() or 0
-    # 图片数
-    img_count = (await db.execute(select(func.count(Image.id)))).scalar() or 0
-    # 已标注数
-    labeled_count = (await db.execute(
-        select(func.count(Image.id)).where(
-            Image.status.in_(["human_confirmed", "human_corrected", "trained"])
-        )
-    )).scalar() or 0
-    # 模型版本数
-    mv_count = (await db.execute(select(func.count(ModelVersion.id)))).scalar() or 0
-    # 训练任务数 (统计 TrainingJob 表全部任务, 含失败/进行中)
-    # 旧实现误用 ModelVersion.is_active.isnot(None), 实际统计的是"模型版本数",
-    # 且 is_active 布尔字段 IS NOT NULL 几乎匹配所有行, 与训练任务数无关
-    train_count = (await db.execute(
-        select(func.count(TrainingJob.id))
-    )).scalar() or 0
 
+    v3.0.0 Phase D 修复: 委托 StatsService.global_overview
+    - 旧: 4 个独立 count() 查询 + 训练任务数误用 ModelVersion.is_active
+    - 新: 1 个 service 调用, 复用全局概览逻辑
+    """
+    overview = await StatsService.global_overview(db)
+    # 转换格式与旧版兼容 (前端 Dashboard 已依赖这些 key)
     return {
-        "datasets": ds_count,
-        "images": img_count,
-        "labeled_images": labeled_count,
-        "model_versions": mv_count,
-        "training_jobs": train_count,
+        "datasets": overview["datasets"]["total"],
+        "images": overview["images"]["total"],
+        "labeled_images": sum(
+            v for k, v in overview["images"]["by_status"].items()
+            if k in ("human_confirmed", "human_corrected", "trained")
+        ),
+        "model_versions": (
+            await db.execute(select(func.count(ModelVersion.id)))
+        ).scalar() or 0,
+        "training_jobs": overview["training_jobs"]["total"],
     }
 
 
