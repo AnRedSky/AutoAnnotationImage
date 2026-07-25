@@ -26,6 +26,9 @@
  * - view 编排 (模板 + 事件转发)
  */
 import { ElMessage } from 'element-plus'
+import { ref } from 'vue'
+import { annotationApi } from '@/api'
+import { REJECT_REASON_OPTIONS } from '@/utils/rejectReason'
 import { useDatasetDetail } from '@/composables/useDatasetDetail'
 import { useImageSelection } from '@/composables/useImageSelection'
 import { useImageBatchOps } from '@/composables/useImageBatchOps'
@@ -132,6 +135,60 @@ function onGridToggleCheckbox(id: number, checked: boolean) {
 function onUploaded(r: any) {
   ElMessage.success(`上传 ${r?.uploaded ?? 0}/${r?.total ?? 0} 张成功`)
 }
+
+// ============== v3.0.0: 不合格图片标记 ==============
+
+/** 批量标记弹窗 state */
+const batchMarkDialogVisible = ref(false)
+const batchRejectReason = ref<string>('')
+const batchCustomText = ref<string>('')
+
+/** 单图撤销不合格标记 (网格视图 hover 撤销按钮) */
+async function onUnmarkUnqualified(img: any) {
+  if (!img?.id) return
+  try {
+    await annotationApi.unmarkUnqualified(img.id)
+    ElMessage.success('已撤销不合格标记')
+    // 就地更新: 移除 quality_flag / reject_reason, 避免整页重拉
+    img.quality_flag = null
+    img.reject_reason = null
+  } catch (e: any) {
+    ElMessage.error('撤销失败: ' + (e?.response?.data?.detail || e?.message))
+  }
+}
+
+/** 打开批量标记弹窗 */
+function openBatchMarkDialog() {
+  if (selectedIds.value.length === 0) {
+    ElMessage.warning('请先选中要标记的图片')
+    return
+  }
+  batchRejectReason.value = ''
+  batchCustomText.value = ''
+  batchMarkDialogVisible.value = true
+}
+
+/** 确认批量标记 */
+async function confirmBatchMarkUnqualified() {
+  if (!batchRejectReason.value) {
+    ElMessage.warning('请选择不合格原因')
+    return
+  }
+  try {
+    await annotationApi.batchMarkUnqualified({
+      image_ids: selectedIds.value,
+      reason: batchRejectReason.value,
+      custom_text: batchCustomText.value || undefined,
+    })
+    ElMessage.success(`已标记 ${selectedIds.value.length} 张图片为不合格`)
+    batchMarkDialogVisible.value = false
+    // 清空选中 + 重新加载, 让不合格红色覆盖层显示出来
+    selectedIds.value = []
+    await load()
+  } catch (e: any) {
+    ElMessage.error('批量标记失败: ' + (e?.response?.data?.detail || e?.message))
+  }
+}
 </script>
 
 <template>
@@ -176,6 +233,7 @@ function onUploaded(r: any) {
       @batch-clear="batchClearAnnotation"
       @batch-delete="batchDelete"
       @toggle-select-all="toggleSelectAll"
+      @batch-mark-unqualified="openBatchMarkDialog"
     />
 
     <!-- 图像网格 / 列表 -->
@@ -195,6 +253,7 @@ function onUploaded(r: any) {
       @open-viewer="openViewer"
       @clear-annotation="clearOneAnnotation"
       @delete-one="deleteOne"
+      @unmark-unqualified="onUnmarkUnqualified"
     />
 
     <DatasetImageList
@@ -209,6 +268,7 @@ function onUploaded(r: any) {
       @open-viewer="openViewer"
       @clear-annotation="clearOneAnnotation"
       @delete-one="deleteOne"
+      @unmark-unqualified="onUnmarkUnqualified"
     />
 
     <!-- 分页: 始终可见 -->
@@ -267,6 +327,49 @@ function onUploaded(r: any) {
       :auto-labeling="autoLabeling"
       @apply="onPreviewApply"
     />
+
+    <!-- v3.0.0: 批量标记不合格弹窗 -->
+    <el-dialog
+      v-model="batchMarkDialogVisible"
+      title="批量标记不合格"
+      width="420px"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <el-form label-width="100px">
+        <el-form-item label="选中数量">
+          <el-tag type="warning">{{ selectedIds.length }} 张</el-tag>
+        </el-form-item>
+        <el-form-item label="不合格原因">
+          <el-select
+            v-model="batchRejectReason"
+            placeholder="请选择不合格原因"
+            style="width: 100%;"
+          >
+            <el-option
+              v-for="opt in REJECT_REASON_OPTIONS"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="batchRejectReason === 'other'" label="具体原因">
+          <el-input
+            v-model="batchCustomText"
+            placeholder="请输入具体原因"
+            maxlength="64"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchMarkDialogVisible = false">取消</el-button>
+        <el-button type="danger" @click="confirmBatchMarkUnqualified">
+          确认标记
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

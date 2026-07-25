@@ -8,6 +8,7 @@
  */
 import { View, Delete, RefreshLeft } from '@element-plus/icons-vue'
 import { imageApi } from '@/api'
+import { getRejectReasonLabel } from '@/utils/rejectReason'  // v3.0.0 新增
 
 const props = defineProps<{
   images: any[]
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   (e: 'openViewer', id: number): void
   (e: 'clearAnnotation', img: any): void
   (e: 'deleteOne', img: any): void
+  (e: 'unmarkUnqualified', img: any): void  // v3.0.0 新增
 }>()
 </script>
 
@@ -46,6 +48,21 @@ const emit = defineEmits<{
     <el-table-column prop="status" label="状态" width="120">
       <template #default="{ row }">
         <el-tag :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+      </template>
+    </el-table-column>
+    <!-- v3.0.0: 质量列 (不合格标记) -->
+    <el-table-column label="质量" width="120">
+      <template #default="{ row }">
+        <el-tooltip
+          v-if="row.quality_flag === 'unqualified'"
+          :content="`不合格: ${getRejectReasonLabel(row.reject_reason)}`"
+          placement="top"
+        >
+          <el-tag type="danger" size="small" effect="dark">
+            不合格 · {{ getRejectReasonLabel(row.reject_reason) }}
+          </el-tag>
+        </el-tooltip>
+        <el-tag v-else type="success" size="small" effect="plain">合格</el-tag>
       </template>
     </el-table-column>
     <el-table-column label="最终类别" width="140" show-overflow-tooltip>
@@ -81,7 +98,7 @@ const emit = defineEmits<{
         <span v-else class="dim">-</span>
       </template>
     </el-table-column>
-    <el-table-column label="操作" width="260" fixed="right">
+    <el-table-column label="操作" width="340" fixed="right">
       <template #default="{ row }">
         <el-button size="small" type="primary" :icon="View" @click.stop="emit('openViewer', row.id)">详情</el-button>
         <el-button
@@ -89,6 +106,12 @@ const emit = defineEmits<{
           size="small" type="warning" :icon="RefreshLeft"
           @click.stop="emit('clearAnnotation', row)"
         >清除标注</el-button>
+        <!-- v3.0.0: 撤销不合格标记 (仅不合格图显示) -->
+        <el-button
+          v-if="row.quality_flag === 'unqualified'"
+          size="small" type="success" :icon="RefreshLeft"
+          @click.stop="emit('unmarkUnqualified', row)"
+        >撤销不合格</el-button>
         <el-button size="small" type="danger" :icon="Delete" @click.stop="emit('deleteOne', row)" />
       </template>
     </el-table-column>
