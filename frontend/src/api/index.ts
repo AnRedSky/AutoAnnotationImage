@@ -166,7 +166,20 @@ export const annotationApi = {
    *   }]
    * }
    */
-  clear: (imageIds: number[]) => http.post('/annotations/clear', { image_ids: imageIds })
+  clear: (imageIds: number[]) => http.post('/annotations/clear', { image_ids: imageIds }),
+  // v3.0.0: 不合格图片标记 (正交于 status 状态机, 不修改原标注)
+  markUnqualified: (data: {
+    image_id: number
+    reason: string
+    custom_text?: string
+  }) => http.post('/annotations/mark-unqualified', data),
+  unmarkUnqualified: (image_id: number) =>
+    http.post('/annotations/unmark-unqualified', { image_id }),
+  batchMarkUnqualified: (data: {
+    image_ids: number[]
+    reason: string
+    custom_text?: string
+  }) => http.post('/annotations/batch-mark-unqualified', data),
 }
 
 // ============== AI 自动标注 ==============

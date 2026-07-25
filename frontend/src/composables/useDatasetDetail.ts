@@ -56,6 +56,8 @@ export function useDatasetDetail(options: UseDatasetDetailOptions = {}) {
     { value: 'ai_labeled', label: 'AI 已标', color: '#409eff' },
     { value: 'human_confirmed', label: '已确认', color: '#67c23a' },
     { value: 'human_corrected', label: '已修正', color: '#e6a23c' },
+    // v3.0.0: 不合格图片筛选 (正交维度, 后端按 quality_flag 查询)
+    { value: 'unqualified', label: '不合格', color: '#f56c6c' },
   ]
 
   // ============== 过滤后图像 (关键词筛选) ==============
@@ -203,6 +205,7 @@ export function useDatasetDetail(options: UseDatasetDetailOptions = {}) {
       human_confirmed: 'success',
       human_corrected: 'warning',
       trained: 'success',
+      unqualified: 'danger',  // v3.0.0: 不合格图片红色标签
     }
     return t[s] || 'info'
   }
@@ -213,6 +216,7 @@ export function useDatasetDetail(options: UseDatasetDetailOptions = {}) {
       human_confirmed: '已确认',
       human_corrected: '已修正',
       trained: '已训练',
+      unqualified: '不合格',  // v3.0.0
     }[s] || s
   }
 
