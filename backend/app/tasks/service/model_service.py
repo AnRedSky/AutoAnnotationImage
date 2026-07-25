@@ -10,7 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tasks.model.model_version import ModelVersion
@@ -62,23 +62,33 @@ class ModelService:
         *,
         commit: bool = True,
     ) -> ModelVersion:
-        """激活模型 (业务规则统一入口)"""
+        """激活模型 (幂等, 允许多激活并存)
+
+        v3.0.0 业务规则调整: 由「同 dataset 单激活不变量」改为「多激活并存」语义.
+        - 取消之前的「同 dataset 互斥」update, 直接置当前行 is_active=True
+        - 不影响其他模型的激活态, 用户可同时激活多个版本
+        - 推理/自动标注通过显式传入 model_version_id 选择具体模型, 不依赖单激活假设
+        - 兜底场景: get_active_for_dataset() / get_active_model() 仍按「第一个 active」
+          回退, 保持旧调用方兼容
+
+        Args:
+            db: Async DB session
+            model: 目标 ModelVersion 行 (调用方已加载)
+            commit: True=立即 commit, False=留给调用方在事务中处理
+
+        Returns:
+            更新后的 ModelVersion (is_active=True)
+        """
         if model.dataset_id is None:
             raise HTTPException(400, "Model has no associated dataset, cannot activate")
 
-        await db.execute(
-            update(ModelVersion)
-            .where(ModelVersion.dataset_id == model.dataset_id)
-            .where(ModelVersion.id != model.id)
-            .values(is_active=False)
-        )
         model.is_active = True
 
         if commit:
             await db.commit()
             await db.refresh(model)
         logger.info(
-            "Model %s (dataset=%s) activated; other models deactivated",
+            "Model %s (dataset=%s) activated (多激活并存语义)",
             model.id, model.dataset_id,
         )
         return model

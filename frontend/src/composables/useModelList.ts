@@ -7,15 +7,15 @@
  * 状态 / 表格渲染). 保持与 useTrainingListSSE / useSilentRefresh 一致的
  * composable 风格 (useXxx + return refs/cbs), 不破坏既有调用方式.
  */
-import { ref, computed } from 'vue'
+import { ref, computed, type Ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { modelApi } from '@/api'
 
 export interface UseModelListOptions {
   /** 数据列表响应式引用 (page 已声明, 这里只做内部赋值) */
-  data: ReturnType<typeof ref<any[]>>
+  data: Ref<any[]>
   /** loading 状态 */
-  loading: ReturnType<typeof ref<boolean>>
+  loading: Ref<boolean>
   /** 加载完成后回调 (如重置分页等) */
   onLoaded?: () => void
 }
@@ -64,12 +64,21 @@ export function useModelList(options: UseModelListOptions) {
 
   const onDeactivate = async (id: number) => {
     try {
-      await ElMessageBox.confirm('确认取消该模型的激活状态?', '取消激活', { type: 'warning' })
+      // v3.0.0 行高闪动修复 (3 处最小修复之一): lockScroll: false 避免 ElMessageBox
+      // 弹起时给 body 加 overflow:hidden, body 滚动条消失导致整页 -17px 宽度 reflow
+      await ElMessageBox.confirm('确认取消该模型的激活状态?', '取消激活', {
+        type: 'warning',
+        lockScroll: false,
+      })
     } catch { return }
     try {
       await modelApi.deactivate(id)
+      // v3.0.0 行高闪动修复 (3 处最小修复之一): 改为就地更新 row.is_active,
+      // 避免 await load() 整体重拉 data, 触发 el-table 整表 DOM 重建
+      // (即使有 row-key, 整表重拉仍会引发部分 cell 渲染 race condition)
+      const row = data.value.find((r) => r.id === id)
+      if (row) row.is_active = false
       ElMessage.success('已取消激活')
-      await load()
     } catch (e: any) {
       ElMessage.error('取消激活失败: ' + (e?.response?.data?.detail || e?.message))
     }

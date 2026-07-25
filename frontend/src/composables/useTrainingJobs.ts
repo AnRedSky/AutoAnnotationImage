@@ -256,6 +256,8 @@ export function useTrainingJobs() {
     if (data.message) next.message = data.message
     if (typeof data.current_epoch === 'number') next.current_epoch = data.current_epoch
     if (typeof data.total_epochs === 'number') next.total_epochs = data.total_epochs
+    if (data.started_at) next.started_at = data.started_at
+    if (data.finished_at) next.finished_at = data.finished_at
     jobs.value.splice(idx, 1, next)
   }
 

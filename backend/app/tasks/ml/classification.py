@@ -428,6 +428,30 @@ def run_training(
     cm = confusion_matrix(all_labels, all_preds) if all_labels else []
     report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
 
+    # 关键: 转换 numpy → python 原生类型, 否则 Celery 序列化 result 时
+    # 会报 "Object of type ndarray is not JSON serializable", 把已成功
+    # 的 task 标记为 FAILURE (前端看到红但 DB 实际 SUCCESS, 历史上最
+    # 容易让用户误判的 bug)
+    cm_json = cm.tolist() if hasattr(cm, "tolist") else (cm if isinstance(cm, list) else [])
+
+    # ---- 训练资源记录: 把设备信息 + GPU 峰值显存 (CUDA 时) 加到返回值 ----
+    # tasks.py 会把 device_type + device_info 写到 TrainingJob 表 (DB 持久化)
+    # 前端 Training.vue 通过 /api/training/jobs/{id} 拉到 device_info 后展示
+    # 必须在 model_saver 调用前完成 final_device_info 组装, 否则 model_saver 写入 DB
+    # 的 device_info 字段为空, 且会因为访问未定义变量 UnboundLocalError
+    final_device_info = dict(device_info)  # 浅拷贝避免污染外层
+    if device_info.get("device_type") == "cuda":
+        try:
+            peak_mb = round(torch.cuda.max_memory_allocated(0) / (1024 ** 2))
+            final_device_info["gpu_peak_mb"] = peak_mb
+        except Exception:
+            pass
+        # 重置 cuda 统计 (避免下次跑任务时复用旧 peak)
+        try:
+            torch.cuda.reset_peak_memory_stats(0)
+        except Exception:
+            pass
+
     # 持久化到数据库 (创建 ModelVersion 记录, is_active 默认为 False)
     # 激活操作由前端通过 POST /api/models/{id}/activate 触发, 保证互斥
     # v3.0.0 Phase 5: 委托给注入的 model_saver
@@ -443,28 +467,6 @@ def run_training(
         confusion_matrix=cm,
         device_info=final_device_info,
     )
-
-    # 关键: 转换 numpy → python 原生类型, 否则 Celery 序列化 result 时
-    # 会报 "Object of type ndarray is not JSON serializable", 把已成功
-    # 的 task 标记为 FAILURE (前端看到红但 DB 实际 SUCCESS, 历史上最
-    # 容易让用户误判的 bug)
-    cm_json = cm.tolist() if hasattr(cm, "tolist") else (cm if isinstance(cm, list) else [])
-
-    # ---- 训练资源记录: 把设备信息 + GPU 峰值显存 (CUDA 时) 加到返回值 ----
-    # tasks.py 会把 device_type + device_info 写到 TrainingJob 表 (DB 持久化)
-    # 前端 Training.vue 通过 /api/training/jobs/{id} 拉到 device_info 后展示
-    final_device_info = dict(device_info)  # 浅拷贝避免污染外层
-    if device_info.get("device_type") == "cuda":
-        try:
-            peak_mb = round(torch.cuda.max_memory_allocated(0) / (1024 ** 2))
-            final_device_info["gpu_peak_mb"] = peak_mb
-        except Exception:
-            pass
-        # 重置 cuda 统计 (避免下次跑任务时复用旧 peak)
-        try:
-            torch.cuda.reset_peak_memory_stats(0)
-        except Exception:
-            pass
 
     return {
         "model_path": str(model_path),

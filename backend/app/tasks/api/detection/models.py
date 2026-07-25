@@ -6,21 +6,20 @@ detection.models 模块 — 模型管理 + 跨图复制建议
 **职责**: detection 模型激活/取消激活 + 跨图 bbox 复制建议
 
 **路由清单** (3 个):
-- POST /models/{model_id}/activate    激活 detection 模型 (单激活不变量)
-- POST /models/{model_id}/deactivate  取消激活 detection 模型
+- POST /models/{model_id}/activate    激活 detection 模型 (多激活并存, 不互斥)
+- POST /models/{model_id}/deactivate  取消激活 detection 模型 (仅影响当前行)
 - GET  /copy-suggestion/{image_id}    跨图 bbox 复制建议
 
-**S4 模型激活约定**:
-- 沿用 v1.0.0 model.py 的 with_for_update() 行锁模式
-- 内部实现与 /api/models/{id}/activate 等价, 仅校验 task_type == "detection"
-- v2.5.35: 强制单激活不变量 — 同 dataset 其他 active 全部置 False
+**v3.0.0 业务规则变更**:
+- 由 v2.5.35「同 dataset 单激活不变量」改为「多激活并存」语义
+- 激活/取消激活只影响当前行, 不影响同 dataset 其他 ModelVersion
+- 推理/自动标注通过显式传入 model_version_id 选择具体模型
 
 **S9.3 跨图复制建议** (v2.2.0):
 - 目标图的 task_type='detection', 返回按 category_id 分组的平均 bbox
 - 仅返回 source_count >= min_source_count 的类别 (避免噪声)
 """
 from collections import defaultdict
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -37,17 +36,6 @@ from app.common.enums import TaskType
 router = APIRouter()
 
 
-# ============== 行锁工具 ==============
-
-async def _lock_dataset_models(db: AsyncSession, dataset_id: Optional[int]) -> None:
-    """锁住指定 dataset 的所有 ModelVersion 行 (SELECT ... FOR UPDATE)"""
-    stmt = select(ModelVersion)
-    if dataset_id is not None:
-        stmt = stmt.where(ModelVersion.dataset_id == dataset_id)
-    stmt = stmt.with_for_update()
-    (await db.execute(stmt)).scalars().all()
-
-
 # ============== 模型激活/取消 ==============
 
 @router.post("/models/{model_id}/activate")
@@ -57,9 +45,10 @@ async def activate_detection_model(
     current_user: User = Depends(get_current_user),
 ):
     """
-    激活 detection 模型 (语义化入口)
+    激活 detection 模型 (语义化入口, 允许多激活并存)
     - 校验 mv.task_type == "detection"
-    - v2.5.35: 单激活不变量 — 同 dataset 其他 active 全部置 False
+    - v3.0.0 业务规则调整: 不再强制同 dataset 单激活, 仅置当前行 is_active=True
+    - 推理/自动标注通过 model_version_id 显式选择, 不依赖单激活假设
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
@@ -72,17 +61,6 @@ async def activate_detection_model(
         )
 
     try:
-        await _lock_dataset_models(db, target.dataset_id)
-        # v2.5.35: 强制单激活 — 同 dataset 其他 active 全部置 False
-        siblings = (await db.execute(
-            select(ModelVersion).where(
-                ModelVersion.dataset_id == target.dataset_id,
-                ModelVersion.is_active == True,  # noqa: E712
-                ModelVersion.id != target.id,
-            )
-        )).scalars().all()
-        for sib in siblings:
-            sib.is_active = False
         target.is_active = True
         await db.commit()
     except Exception as e:
@@ -95,7 +73,6 @@ async def activate_detection_model(
         "task_type": target.task_type,
         "dataset_id": target.dataset_id,
         "is_active": target.is_active,
-        "deactivated_siblings": [s.id for s in siblings],
     }
 
 
@@ -106,7 +83,7 @@ async def deactivate_detection_model(
     current_user: User = Depends(get_current_user),
 ):
     """
-    取消激活 detection 模型
+    取消激活 detection 模型 (多激活语义下仅影响当前行, 不影响其他)
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
@@ -119,7 +96,8 @@ async def deactivate_detection_model(
         )
 
     try:
-        await _lock_dataset_models(db, target.dataset_id)
+        # v3.0.0 多激活语义: 单行 deactivation 不需要锁整个 dataset,
+        # 仅置当前行 is_active=False, 其他模型保持不变
         target.is_active = False
         await db.commit()
     except Exception as e:

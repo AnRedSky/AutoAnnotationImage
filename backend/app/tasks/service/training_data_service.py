@@ -147,9 +147,13 @@ class TrainingDataService:
         report: Dict[str, Any],
         history: Dict[str, Any],
         confusion_matrix: Any,
-        device_info: Optional[Dict[str, Any]] = None,
+        device_info: Optional[Dict[str, Any]] = None,  # noqa: ARG004 保留签名兼容 ml/classification.py
     ) -> int:
         """写入分类 ModelVersion 记录 (含 evaluation metrics)
+
+        设备信息 (device_type/device_name/device_info/gpu_peak_memory_mb) 由调用方
+        持久化到 TrainingJob (前端 TrainingDetailDialog.vue 直接读 job.device_*),
+        ModelVersion 表无这些列, 这里不重复写入, 仅保留入参签名兼容 ml/classification.py.
 
         Returns:
             ModelVersion.id
@@ -165,19 +169,6 @@ class TrainingDataService:
             confusion_matrix if isinstance(confusion_matrix, list) else []
         )
 
-        # 设备信息作为额外字段 (前端 Training.vue 详情页展示)
-        extra_fields: Dict[str, Any] = {}
-        if device_info:
-            extra_fields["device_info"] = device_info
-            if device_info.get("device_name"):
-                extra_fields["device_name"] = str(device_info["device_name"])[:128]
-            peak = device_info.get("gpu_peak_mb")
-            if isinstance(peak, (int, float)):
-                extra_fields["gpu_peak_memory_mb"] = int(peak)
-            dv_type = device_info.get("device_type")
-            if dv_type:
-                extra_fields["device_type"] = str(dv_type)[:16]
-
         async with AsyncSessionLocal() as db:
             mv = ModelVersion(
                 name=name,
@@ -192,7 +183,6 @@ class TrainingDataService:
                 training_log=history,
                 confusion_matrix=cm_json,
                 is_active=False,
-                **extra_fields,
             )
             db.add(mv)
             await db.commit()

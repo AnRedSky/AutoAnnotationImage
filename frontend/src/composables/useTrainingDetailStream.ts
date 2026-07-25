@@ -106,14 +106,20 @@ export function useTrainingDetailStream() {
         currentEpoch.value = data.current_epoch ?? null
         totalEpochs.value = data.total_epochs ?? totalEpochs.value
         message.value = data.message || message.value
-        // 实时同步 started_at / finished_at
+        // 实时同步 started_at / finished_at (宽松比较: 转时间戳比秒级精度, 避免 ISO 格式微差异)
         if (data.started_at && job.value) {
-          const _sa = String(data.started_at)
-          if (_sa && _sa !== job.value.started_at) job.value.started_at = _sa
+          const _tsNew = new Date(data.started_at).getTime()
+          const _tsOld = job.value.started_at ? new Date(job.value.started_at).getTime() : 0
+          if (_tsNew && Math.abs(_tsNew - _tsOld) > 1000) {
+            job.value.started_at = String(data.started_at)
+          }
         }
         if (data.finished_at && job.value) {
-          const _fa = String(data.finished_at)
-          if (_fa && _fa !== job.value.finished_at) job.value.finished_at = _fa
+          const _tsNew = new Date(data.finished_at).getTime()
+          const _tsOld = job.value.finished_at ? new Date(job.value.finished_at).getTime() : 0
+          if (_tsNew && Math.abs(_tsNew - _tsOld) > 1000) {
+            job.value.finished_at = String(data.finished_at)
+          }
         }
         // 数据集统计
         if (typeof data.data_total === 'number') dataTotal.value = data.data_total

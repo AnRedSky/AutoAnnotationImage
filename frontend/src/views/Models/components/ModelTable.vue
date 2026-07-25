@@ -52,6 +52,7 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
     <el-table
       v-loading="loading"
       :data="data"
+      :row-key="(row: any) => row.id"
       stripe
       class="data-table"
       height="100%"
@@ -206,6 +207,19 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
   font-size: 13px !important;
   font-weight: 600;
   background: var(--bg-soft) !important;
+}
+
+/* v3.0.0 行高闪动第三轮修复 (基于 class 列表截图反推根因):
+   根因: Element Plus 检测到 row class 变化后给 el-table 加
+         .el-table--enable-row-transition class, 让 <tr> 应用
+         transition: all 0.3s. 行高/列宽/padding 任何变化都有
+         0.3s 过渡动画 → 视觉上"行高闪动"
+   触发场景: row.is_active 切换 + is-scrolling-left 切换 +
+            fixed="right" 列对齐重算
+   修复: 覆盖 <tr> 的 transition, 禁用几何属性过渡,
+        只保留 hover 颜色过渡 (background-color/color/box-shadow) */
+.data-table :deep(.el-table--enable-row-transition .el-table__row) {
+  transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease !important;
 }
 
 .model-name-cell {
