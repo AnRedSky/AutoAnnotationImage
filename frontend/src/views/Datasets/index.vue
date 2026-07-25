@@ -76,7 +76,6 @@ const loadCategories = async (dsId: number) => {
   } catch (e) {}
 }
 
-load()
 onMounted(() => load())
 
 watch(catDs, (v) => { if (v) loadCategories(v.id) })
