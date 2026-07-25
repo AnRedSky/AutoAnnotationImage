@@ -149,12 +149,19 @@ async function onUnmarkUnqualified(img: any) {
   try {
     await annotationApi.unmarkUnqualified(img.id)
     ElMessage.success('已撤销不合格标记')
-    // 就地更新: 移除 quality_flag / reject_reason, 避免整页重拉
-    img.quality_flag = null
-    img.reject_reason = null
+    // v3.0.0: 撤销后必须刷新 stats (不合格数 -1) + 列表
+    // - 若当前筛选为 unqualified, 撤销后该图应从列表消失
+    // - 若为其他筛选, 重拉保证 stats 实时更新 (不合格指标卡数字同步变化)
+    await load()
   } catch (e: any) {
     ElMessage.error('撤销失败: ' + (e?.response?.data?.detail || e?.message))
   }
+}
+
+/** 点击「不合格」统计卡 → 切换到不合格筛选 (v3.0.0) */
+function onFilterUnqualified() {
+  if (statusFilter.value === 'unqualified') return
+  statusFilter.value = 'unqualified'
 }
 
 /** 打开批量标记弹窗 */
@@ -202,11 +209,12 @@ async function confirmBatchMarkUnqualified() {
       @export="(fmt: 'coco' | 'yolo' | 'csv') => handleExport(fmt)"
     />
 
-    <!-- 4 张统计卡 -->
+    <!-- 5 张统计卡 (v3.0.0: 含不合格指标, 同一行 flex 等分) -->
     <DatasetStatsRow
       :dataset="dataset"
       :stats="stats"
       :categories="categories"
+      @click-unqualified="onFilterUnqualified"
     />
 
     <!-- 过滤 + AI 选项 + 操作工具条 -->
