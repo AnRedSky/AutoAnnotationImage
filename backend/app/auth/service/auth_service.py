@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.model.user import User
 from app.admin.repository.user_queries import get_user_by_username
-from app.core.security import create_access_token, get_password_hash, verify_password
+from app.middleware.security.security import create_access_token, get_password_hash, verify_password
 
 logger = logging.getLogger(__name__)
 

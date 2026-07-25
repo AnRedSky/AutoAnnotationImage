@@ -24,8 +24,8 @@ os.environ["APP_DEBUG"] = "False"
 from app.main import app  # noqa: E402
 from app.database import get_db, Base  # noqa: E402
 from app.models.user import User  # noqa: E402
-from app.core.security import hash_password  # noqa: E402
-from app.config import settings  # noqa: E402
+from app.middleware.security.security import hash_password  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 
 @pytest.fixture(scope="session")
