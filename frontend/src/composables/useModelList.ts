@@ -68,16 +68,8 @@ export function useModelList(options: UseModelListOptions) {
 
   const onDeactivate = async (id: number) => {
     try {
-      // v3.0.0 行高闪动修复 (3 处最小修复之一): lockScroll: false 避免 ElMessageBox
-      // 弹起时给 body 加 overflow:hidden, body 滚动条消失导致整页 -17px 宽度 reflow
-      await ElMessageBox.confirm('确认取消该模型的激活状态?', '取消激活', {
-        type: 'warning',
-        lockScroll: false,
-      })
-    } catch { return }
-    try {
       await modelApi.deactivate(id)
-      // v3.0.0 行高闪动修复 (3 处最小修复之一): 改为就地更新 row.is_active,
+      // v3.0.0 行高闪动修复: 改为就地更新 row.is_active,
       // 避免 await load() 整体重拉 data, 触发 el-table 整表 DOM 重建
       // (即使有 row-key, 整表重拉仍会引发部分 cell 渲染 race condition)
       const row = data.value.find((r) => r.id === id)
