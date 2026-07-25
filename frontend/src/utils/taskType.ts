@@ -1,4 +1,10 @@
 /**
+ * 数据集任务类型联合类型 (供 composables / 组件使用)
+ * - 后端存储: classification | detection | segmentation
+ */
+export type TaskType = 'classification' | 'detection' | 'segmentation'
+
+/**
  * 数据集任务类型枚举的显示映射
  * 后端存储: classification | detection | segmentation (英文枚举值, 跨语言稳定)
  * 前端展示: 实际业务含义 (中文, 带图标)

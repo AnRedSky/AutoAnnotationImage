@@ -32,6 +32,9 @@ export function useDatasetDetail(options: UseDatasetDetailOptions = {}) {
   // ============== 路由派生的 datasetId ==============
   const datasetId = computed(() => Number(route.params.id))
 
+  // 同样暴露给父组件使用 (用于 UploadQueue 等需要纯数字 id 的子组件)
+  const datasetIdRef = computed(() => datasetId.value)
+
   // ============== 核心状态 ==============
   const dataset = ref<any>(null)
   const images = ref<any[]>([])
@@ -239,7 +242,7 @@ export function useDatasetDetail(options: UseDatasetDetailOptions = {}) {
 
   return {
     // 路由
-    datasetId,
+    datasetId, datasetIdRef,
     // 状态
     dataset, images, total, page, pageSize, pageSizes,
     statusFilter, keyword, loading, stats, categories, activeModel,
