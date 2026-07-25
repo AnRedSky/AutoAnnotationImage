@@ -210,3 +210,18 @@ app/database.py            (已被 app/database/ 包替代)
 ---
 
 **Phase 1 实施完成。准备进入 Phase 2 (Data 层重组: models/ → model/)。**
+
+---
+
+## 收尾: 兼容垫片 100% 清除 (2026-07-25)
+
+> 详见 [31-Phase1-兼容垫片清理报告](./31-Phase1-兼容垫片清理报告.md)
+
+Phase 1 落地时保留的 6 个 re-export 兼容垫片 (`app/config.py`, `app/cli.py`, `app/schemas/enums.py`, `app/core/{exceptions,security,deps}.py`), 在 Stage 2-5 全部完成后, 已于 2026-07-25 一次性清除:
+
+- ✅ 6 个垫片文件全部删除
+- ✅ 22 处 import 引用全部迁移到新路径
+- ✅ 7 步系统验证全过 (py_compile / 100 API 路由 / 旧路径 ImportError 兜底)
+- ✅ 100% 兼容垫片已清除, Phase 1 基础设施重组彻底落地
+
+至此 Phase 1 任务**完全闭环**, 无遗留技术债。
