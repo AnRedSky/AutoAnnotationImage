@@ -1,30 +1,32 @@
 """
-FastAPI Application Entry (v3.0.0 Stage 2.7 自动挂载)
-======================================================
+FastAPI Application Entry (v3.0.0 Stage 2.7 自动挂载 + Stage 5.2 中间件统一注册)
+==============================================================================
 
 **v3.0.0 Stage 2.7 重构**:
 - 路由注册从手写 14 行 `app.include_router()` 改为 `AppRegistry.iter_routes()` 自动挂载
 - lifespan 启动/关闭调用 `AppRegistry.startup_all()` / `shutdown_all()`
 - 业务应用 (admin / auth / tasks / annotation) 各自声明自己的路由条目, 0 硬编码
 
+**v3.0.0 Stage 5.2 重构**:
+- 中间件注册从内联 4 段 (CORS / RequestID / RequestTiming / 异常处理) 改为
+  `MiddlewareRegistry.discover()` + `MiddlewareRegistry.apply(app)` 一行调用
+- 中间件按 `order` 升序注册 (CORS 10 → error_handler 20 → request_id 30 → request_timing 40)
+- 跨应用基础设施: 数据库 init / 资源释放 / ultralytics 配置
+  (这些不属于单个应用, 而属于应用组合)
+
 **使用方式**:
 - 新增业务应用: 在 `app/{name}/__init__.py` 实现 `AppInterface` + `get_routes()`,
   main.py 0 修改即可自动挂载.
 - 调整路由 prefix: 修改对应应用的 `get_routes()` 返回值, 无需改 main.py.
-
-**保留的手动启动**:
-- 跨应用基础设施: CORS / 异常处理 / 数据库 init / 资源释放 / ultralytics 配置
-  (这些不属于单个应用, 而属于应用组合)
+- 新增中间件: 在 `app/middleware/http/` 添加 xxx_factory(app) 函数, 在
+  `app/middleware/http/__init__.py` 注册 `MiddlewareEntry`, main.py 0 修改即可生效.
 """
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from app.core.config import settings
-from app.common.exceptions import AppException, to_response_payload
 from app.database import init_db, engine
 from app.registry import AppRegistry
 
@@ -137,44 +139,19 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# 跨域配置（v2.5.15 P1-3: 含生产校验 + 互斥自动降级）
-_cors_origins = settings.CORS_ORIGINS_LIST
-_cors_allow_credentials = settings.CORS_ALLOW_CREDENTIALS
+# ============================================================
+#  Stage 5.2: 中间件统一注册 (替代原内联 CORS / RequestID / Timing / 异常处理)
+# ============================================================
+# - MiddlewareRegistry.discover() 触发 app.middleware.http.__init__ 导入,
+#   进而注册 4 个中间件条目 (cors / error_handler / request_id / request_timing)
+# - MiddlewareRegistry.apply(app) 按 order 升序调用各 factory(app),
+#   完成 add_middleware / add_exception_handler
+# - 顺序约定: 10 (CORS) → 20 (error_handler) → 30 (request_id) → 40 (request_timing)
+from app.registry import MiddlewareRegistry  # noqa: E402
 
-# 生产环境: '*' 是危险配置, 启动直接抛错
-if settings.APP_ENV == "production" and "*" in _cors_origins:
-    raise RuntimeError(
-        "[CORS] CORS_ORIGINS cannot be '*' in production. "
-        "Please set explicit origins via CORS_ORIGINS env var "
-        "(comma-separated, e.g. 'https://app.example.com,https://admin.example.com')."
-    )
-
-# 浏览器规范: '*' + credentials=True 互斥, 开发环境自动降级
-if "*" in _cors_origins and _cors_allow_credentials:
-    import warnings
-    warnings.warn(
-        "[CORS] '*' origin with credentials=True is invalid per CORS spec. "
-        "Auto-downgrading credentials to False. "
-        "Set explicit origins to use credentials.",
-        stacklevel=2,
-    )
-    _cors_allow_credentials = False
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=_cors_allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Stage 3: Request ID 中间件 (在所有其他中间件之前, 让后续中间件都能读到 rid)
-from app.middleware.http import RequestIDMiddleware  # noqa: E402
-app.add_middleware(RequestIDMiddleware)
-
-# Stage 3: Request Timing 中间件 (在 RequestID 之后, 业务之前)
-from app.middleware.http import RequestTimingMiddleware  # noqa: E402
-app.add_middleware(RequestTimingMiddleware)
+MiddlewareRegistry.discover()
+_mw_count = MiddlewareRegistry.apply(app)
+logger.info(f"Total {_mw_count} middlewares applied via MiddlewareRegistry.apply()")
 
 # ============================================================
 #  路由自动挂载 (Stage 2.7)
@@ -211,31 +188,6 @@ async def root():
 
 
 # 注：详细健康检查见 /api/health（含数据库/Redis/MinIO 状态）
-
-
-# ============================================================
-#  全局异常处理 (统一响应格式 + 防止内部堆栈泄漏)
-# ============================================================
-@app.exception_handler(AppException)
-async def app_exception_handler(request: Request, exc: AppException):
-    """业务异常: 转换为统一 {code, message} 响应"""
-    logging.getLogger("app.main").warning(
-        "AppException %s on %s %s: %s",
-        exc.code, request.method, request.url.path, exc.message,
-    )
-    return JSONResponse(status_code=exc.status_code, content=to_response_payload(exc))
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    """未捕获异常: 记录完整堆栈, 对前端仅返回脱敏的 500"""
-    logging.getLogger("app.main").exception(
-        "Unhandled exception on %s %s", request.method, request.url.path
-    )
-    return JSONResponse(
-        status_code=500,
-        content={"code": "INTERNAL_ERROR", "message": "内部错误，请联系管理员"},
-    )
 
 
 # ============================================================
