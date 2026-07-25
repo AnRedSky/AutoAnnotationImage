@@ -11,6 +11,10 @@ import * as echarts from 'echarts'
 // v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
 import TrainingParamsForm, { type TrainingParams } from './components/TrainingParamsForm.vue'
 import StateBadge from './components/StateBadge.vue'
+// v3.0.0 Phase G: 列表级 SSE 抽离到 composable, page 只剩业务编排
+import { useTrainingListSSE } from '@/composables/useTrainingListSSE'
+// v3.0.0 Phase G: 静默兜底刷新也抽离为 composable
+import { useSilentRefresh } from '@/composables/useSilentRefresh'
 
 interface EpochData {
   epoch: number
@@ -1347,87 +1351,14 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   cleanupDetail()
-  stopSilentRefresh()
-  // 清理所有列表级 SSE 订阅
-  for (const h of listStreams.values()) {
-    try { h.cancel() } catch {}
-  }
-  listStreams.clear()
+  // 列表级 SSE 由 useTrainingListSSE composable 自动清理
+  // 静默刷新由 useSilentRefresh composable 自动清理
 })
 
 // ============== 列表级 SSE: 跟踪活跃任务的进度, 替代整页轮询 ==============
-// 思路:
-// - 列表本身是按页拉的全量数据, 静默期不重拉整页
-// - 对当前页里所有 PROGRESS/PENDING 状态的 task 维护一条 SSE 订阅
-// - 收到帧时仅原地更新那一行的 (state, progress), 不触发 loadJobs()
-// - 任务进入终态 (SUCCESS/FAILURE/REVOKED) 时, 静默拉一次 loadJobs() 以刷新
-//   对应的 model_version 联动信息 (准确率/模型版本等后端字段)
-type ListStreamHandle = { cancel: () => void; taskId: string; jobId: number }
-const listStreams = new Map<number, ListStreamHandle>()  // key = jobId
-
-/**
- * 对当前页里所有 PENDING/PROGRESS 行建立 SSE 订阅.
- * - 同一 jobId 已存在订阅则跳过 (避免重复)
- * - 收到帧时通过 updateJobProgressInPlace 原地更新 rows
- * - 终态时主动断开流, 并触发一次静默 loadJobs() 拉取最新 DB 字段
- */
-const syncListStreams = () => {
-  const liveJobs = jobs.value.filter(
-    (j: any) => (j.state === 'PROGRESS' || j.state === 'PENDING') && j.celery_task_id
-  )
-  const liveIds = new Set(liveJobs.map((j: any) => j.id))
-
-  // 1) 清理已经不在活跃集合里的订阅 (被删除/翻页/状态变了)
-  for (const [jobId, h] of listStreams.entries()) {
-    if (!liveIds.has(jobId)) {
-      try { h.cancel() } catch {}
-      listStreams.delete(jobId)
-    }
-  }
-
-  // 2) 为新出现的活跃 job 建立订阅
-  for (const j of liveJobs) {
-    if (listStreams.has(j.id)) continue
-    const cancel = trainingApi.streamProgress(j.celery_task_id, {
-      onMessage: (data) => {
-        updateJobProgressInPlace(j.id, data)
-        // 终态: 断开 + 拉一次整页 (拿 model_version 关联等终态字段)
-        if (data.state === 'SUCCESS' || data.state === 'FAILURE' || data.state === 'REVOKED') {
-          const h = listStreams.get(j.id)
-          if (h) {
-            try { h.cancel() } catch {}
-            listStreams.delete(j.id)
-          }
-          // 静默拉整页, 状态/进度/模型版本等信息以 DB 为准
-          loadJobs()
-        }
-      },
-      onError: () => {
-        // 出错时保留订阅, 让后台重连 (EventSource 自动重连); 但防止死循环, 5s 后强切回轮询兜底
-        // 这里简单处理: 出错就断开, 走静默轮询
-        const h = listStreams.get(j.id)
-        if (h) {
-          try { h.cancel() } catch {}
-          listStreams.delete(j.id)
-        }
-        // v2.5.27 修复: SSE 出错时立即拉一次 DB, 防止"训练已失败但 SSE 断开后
-        // 列表一直显示训练中". 这是非常关键的兜底, 不能只依赖静默轮询,
-        // 否则用户要等 30s/60s 才能看到真实状态.
-        loadJobs()
-      },
-      onComplete: () => {
-        // 服务端主动 end 事件: 同上, 拉一次整页
-        const h = listStreams.get(j.id)
-        if (h) {
-          try { h.cancel() } catch {}
-          listStreams.delete(j.id)
-        }
-        loadJobs()
-      },
-    })
-    listStreams.set(j.id, { cancel, taskId: j.celery_task_id, jobId: j.id })
-  }
-}
+// v3.0.0 Phase G: 抽离到 useTrainingListSSE composable, page 只剩业务编排
+// 思路: 对当前页里所有 PROGRESS/PENDING 状态的 task 维护一条 SSE 订阅,
+// 收到帧时仅原地更新那一行的 (state, progress), 终态时静默拉整页
 
 /**
  * 原地更新一行 (jobs.value 中对应 jobId) 的 (state, progress, message)
@@ -1447,29 +1378,25 @@ const updateJobProgressInPlace = (jobId: number, data: any) => {
   jobs.value.splice(idx, 1, next)
 }
 
-// 监听列表变化 (loadJobs / 翻页 / 搜索), 自动同步活跃流的订阅集
-watch(jobs, () => { syncListStreams() }, { deep: false })
+useTrainingListSSE({
+  jobs,
+  onProgressUpdate: updateJobProgressInPlace,
+  onTerminalState: () => loadJobs(),
+  onError: () => loadJobs(),
+  onComplete: () => loadJobs(),
+})
 
 // ============== 静默兜底刷新 ==============
-// 之前的实现: 列表里有活跃任务时不做静默刷新, 完全依赖 SSE.
-// 问题: SSE 断连 (极快终态 / 后台节流 / 反代超时) 后, 列表状态卡在 PROGRESS,
-//       用户看不到真实的 FAILURE/SUCCESS (典型 3s 内失败的训练).
-// v2.5.27 修复:
-//   - 任何状态下 30s 拉一次 DB 兜底. SSE 仍负责高频行内更新,
-//     拉整页只在 SSE 断 / 终态 / 跨用户时触发, 频率很低, 开销可接受.
-//   - 一次额外 GET /jobs 的开销 (返回当前页 10 条记录) 远低于用户
-//     "盯着看却看不到失败"的体验损失.
-let silentRefreshTimer: any = null
-const startSilentRefresh = () => {
-  if (silentRefreshTimer) clearInterval(silentRefreshTimer)
-  silentRefreshTimer = setInterval(() => {
-    if (detailVisible.value) return  // 详情 dialog 打开时, 由详情 SSE 驱动
-    loadJobs()
-  }, 30000)
-}
-const stopSilentRefresh = () => {
-  if (silentRefreshTimer) { clearInterval(silentRefreshTimer); silentRefreshTimer = null }
-}
+// v3.0.0 Phase G: 抽离为 useSilentRefresh composable
+// 之前: 任何状态下 30s 拉一次 DB 兜底. SSE 仍负责高频行内更新,
+// 拉整页只在 SSE 断 / 终态 / 跨用户时触发, 频率很低, 开销可接受.
+// 一次额外 GET /jobs 的开销 (返回当前页 10 条记录) 远低于用户
+// "盯着看却看不到失败"的体验损失.
+const { start: startSilentRefresh, stop: stopSilentRefresh } = useSilentRefresh({
+  intervalMs: 30000,
+  skipWhen: () => detailVisible.value,  // 详情 dialog 打开时, 由详情 SSE 驱动
+  onTick: () => loadJobs(),
+})
 </script>
 
 <template>
