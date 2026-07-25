@@ -44,7 +44,12 @@ _CONFIRMED_STATUSES = ("human_confirmed", "human_corrected", "trained")
 def _filter_images_by_status(
     stmt, include_pending: bool
 ):
-    """根据 include_pending 应用 status 过滤"""
+    """根据 include_pending 应用 status 过滤 (始终排除不合格图片)
+
+    v3.0.0: 不合格图片 (quality_flag='unqualified') 不参与导出,
+    无论 include_pending 与否都排除, 避免脏数据进入导出包.
+    """
+    stmt = stmt.where(Image.quality_flag.is_(None))
     if not include_pending:
         stmt = stmt.where(Image.status.in_(_CONFIRMED_STATUSES))
     return stmt

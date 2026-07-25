@@ -71,6 +71,7 @@ class TrainingDataService:
                 .where(
                     Image.dataset_id == dataset_id,
                     Image.status.in_(["human_confirmed", "human_corrected", "ai_labeled"]),
+                    Image.quality_flag.is_(None),  # v3.0.0: 排除不合格图片, 避免脏数据进入训练集
                 )
             )
             results = (await db.execute(stmt)).all()

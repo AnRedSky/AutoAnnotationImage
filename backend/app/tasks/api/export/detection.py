@@ -127,12 +127,13 @@ async def export_coco_detection(
             f"Dataset task_type={dataset.task_type!r}, expected 'detection'",
         )
 
-    # 1) 拉 detection images
+    # 1) 拉 detection images (v3.0.0: 排除不合格图片)
     imgs = (await db.execute(
         select(Image)
         .where(
             Image.dataset_id == dataset_id,
             Image.task_type == TaskType.DETECTION.value,
+            Image.quality_flag.is_(None),  # v3.0.0: 排除不合格图片
         )
         .order_by(Image.id.asc())
     )).scalars().all()
