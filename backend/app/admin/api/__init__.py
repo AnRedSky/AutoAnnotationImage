@@ -8,12 +8,10 @@ Admin API Package (Stage 2.5 填充)
 - 已完整迁移: user, system
 - 过渡引用: stats
 """
-# Stage 2.5 完整迁移
+# Stage 2.5-2.8 完整迁移
 from app.admin.api.user import router as user_router
 from app.admin.api.system import router as system_router
-
-# 过渡: stats
-from app.api.stats import router as stats_router
+from app.admin.api.stats import router as stats_router
 
 # 命名导出
 user = user_router  # type: ignore

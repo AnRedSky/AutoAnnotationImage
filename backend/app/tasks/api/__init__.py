@@ -1,24 +1,20 @@
 """
-Tasks API Package (Stage 2.5 填充)
-=================================
+Tasks API Package (Stage 2.5-2.8 完整迁移)
+========================================
 
 **v3.0.0 Stage 2.5 迁移**: 从 app/api/* 迁入 tasks 应用
-
-**当前状态**:
-- 已完整迁移: 无 (待 Stage 5 重构完成)
-- 过渡引用: 大部分路由仍位于 app/api/*, 通过 re-export 提供
-  app.tasks.api.<name>.router 访问入口, 供 main.py 集中挂载.
+**v3.0.0 Stage 2.8 完成**: 全部 9 个 API 路由已完整迁入
 """
-# 过渡: re-export 老路径的 router, 让 app.tasks.api.<name> 可用
-from app.api.dataset import router as dataset_router
-from app.api.image import router as image_router
-from app.api.training import router as training_router
-from app.api.model import router as model_router
-from app.api.auto_annotate import router as auto_annotate_router
-from app.api.export import router as export_router
-from app.api.detection import router as detection_router
-from app.api.segmentation import router as segmentation_router
-from app.api.files import router as files_router
+# Stage 2.5-2.8 完整迁移
+from app.tasks.api.dataset import router as dataset_router
+from app.tasks.api.image import router as image_router
+from app.tasks.api.training import router as training_router
+from app.tasks.api.model import router as model_router
+from app.tasks.api.auto_annotate import router as auto_annotate_router
+from app.tasks.api.export import router as export_router
+from app.tasks.api.detection import router as detection_router
+from app.tasks.api.segmentation import router as segmentation_router
+from app.tasks.api.files import router as files_router
 
 
 # 命名导出 (供外部 import)

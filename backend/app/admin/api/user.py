@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.model.user import User
-from app.core.deps import require_admin
+from app.middleware.http.auth import require_admin
 from app.database import get_db
 
 router = APIRouter()
