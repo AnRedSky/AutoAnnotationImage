@@ -1,223 +1,40 @@
 """
-Celery Tasks: 目标检测训练 + 自动标注 (v3.0.0 Phase 5 薄化 / Stage 2.6 重定位)
-================================================================================
+workers.detection.auto_annotate 模块 — 自动标注任务
+==================================================
 
-- train_detection_task:        训练 YOLOv8 (委托 TrainingLifecycleService)
-- auto_annotate_detection_task: 用已训练模型批量预测
-- auto_annotate_pretrained_task: 用预训练 YOLOv8 批量预测
+**v3.0.0 Phase S4 拆分**: 从 workers/detection.py 抽离
+**职责**: 
+- auto_annotate_detection_task (用已训练 YOLOv8 模型批量预标注)
+- auto_annotate_pretrained_task (用预训练 yolov8n/s/m/l/x 批量预标注)
+- PREDEFINED_YOLO_MODELS (预训练模型白名单)
 
-**v3.0.0 Stage 2.6 迁移**: 原 app.tasks.workers.detection 重定位至 app.tasks.workers.detection.
-**v3.0.0 Phase 5 重构**:
-- 业务编排 (TrainingJob 状态机 / sticky_meta / 历史推送 / 失败清理) 全部下沉到
-  TrainingLifecycleService, worker 主体从 ~700 行减到 ~350 行
-- ML 模块 (yolo_train/yolo_dataset/yolo_predict) 保持纯计算
+**Celery 字符串路径**:
+- `app.tasks.workers.detection:auto_annotate_detection_task`
+- `app.tasks.workers.detection:auto_annotate_pretrained_task`
+
+注意: Phase S4 拆分后, 物理位置在 auto_annotate.py, 但 __init__.py 重新导出,
+保持字符串路径和外部 import 完全向后兼容.
+
+**流程** (与 train 不同, 不写 TrainingJob, 仅 Celery state):
+1. 加载 ModelVersion / 加载预训练权重
+2. 加载图片 + 类目 (worker 内联, 数据访问)
+3. predict_image_grouped 推理 (纯 ML)
+4. 写 BBoxAnnotation + AnnotationLog 审计
+5. SUCCESS / FAILURE 状态推送
+
+**pretrained 模式特殊点**:
+- 带 model_name 审计 (payload: {model: model_name, n_boxes})
+- 不需要 ModelVersion (走预训练)
+- class_index 是 COCO 索引 → 通过 YOLO.names 还原类名
 """
-from __future__ import annotations
-
-import os
-import shutil
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from app.tasks.workers.celery_app import celery_app
 from app.utils.async_helpers import run_async_in_worker as _run_async
 
-# 早期: 与 tasks.py 同样的 HF symlink + 缓存目录兜底
-_model_dir_env = os.getenv("MODEL_DIR", "./models")
-_cache_dir_env = os.getenv("PRETRAINED_CACHE_DIR", str(Path(_model_dir_env) / "cache"))
-os.environ.setdefault("HF_HOME", str(Path(_cache_dir_env) / "huggingface"))
-os.environ.setdefault("TORCH_HOME", str(Path(_cache_dir_env) / "torch"))
-os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytics"))
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
-from app.core.config import settings  # noqa: E402
+PREDEFINED_YOLO_MODELS = {"yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x"}
 
-# v2.5.29: ultralytics 路径强制覆盖
-from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
-configure_ultralytics()
-migrate_legacy_yolo_weights()
-
-
-# ============== 训练 ==============
-
-@celery_app.task(bind=True)
-def train_detection_task(
-    self,
-    dataset_id: int,
-    user_id: int,
-    model_name: str = "yolov8n",
-    model_alias: str = "yolov8n_run",
-    epochs: int = 10,
-    imgsz: int = 320,
-    batch: int = 8,
-    val_ratio: float = 0.2,
-    device: str = "cpu",
-):
-    """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)"""
-    from app.tasks.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
-    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
-
-    task_id = self.request.id
-    started_at = datetime.utcnow()
-
-    # ---- 1) 创建/复用 TrainingJob (委托 Service) ----
-    job_id = TrainingLifecycleService.create_or_reset_job_sync(
-        task_id=task_id,
-        user_id=user_id,
-        dataset_id=dataset_id,
-        base_model=model_name,
-        model_name=model_alias,
-        task_type="detection",
-        epochs=epochs,
-        batch_size=batch,
-        learning_rate=0.0,
-        started_at=started_at,
-    )
-
-    # ---- 2) 共享状态 ----
-    sticky_meta: dict = {}
-    history_buffer: list = []
-    workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
-
-    def _export_cb(stage, current, total, info=""):
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
-            "progress": round(current / max(total, 1) * 100, 2),
-            "msg": f"[{stage}] {info}",
-            "total_epochs": epochs,
-            **sticky_meta,
-        })
-
-    def _train_cb(stage, current_epoch, total_epochs, metrics):
-        history_buffer.append({
-            "epoch": current_epoch,
-            "total_epochs": total_epochs,
-            **metrics,
-        })
-        progress_pct = round(current_epoch / max(total_epochs, 1) * 100, 2)
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
-            "progress": progress_pct,
-            "msg": f"训练 epoch {current_epoch}/{total_epochs}",
-            "total_epochs": total_epochs,
-            "current_epoch": current_epoch,
-            **{f"train_{k}": v for k, v in metrics.items()
-               if isinstance(v, (int, float))},
-            **sticky_meta,
-        })
-        # 推历史曲线 (Redis + DB)
-        TrainingLifecycleService.push_history(
-            task_id, list(history_buffer),
-            job_id=job_id,
-            progress=progress_pct,
-            message=f"训练 epoch {current_epoch}/{total_epochs}",
-            current_epoch=current_epoch,
-        )
-
-    # ---- 3) 导 YOLO 数据集 ----
-    try:
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
-            "progress": 1.0,
-            "msg": "正在导出 YOLO 数据集...",
-            "total_epochs": epochs,
-        })
-
-        async def _export():
-            from app.database import AsyncSessionLocal
-            async with AsyncSessionLocal() as db:
-                return await export_yolo_dataset(
-                    db=db, dataset_id=dataset_id,
-                    workdir=workdir, val_ratio=val_ratio,
-                    progress_cb=_export_cb,
-                )
-
-        export_info = _run_async(_export())
-        sticky_meta["data_total"] = export_info["train_count"] + export_info["val_count"]
-        sticky_meta["data_train"] = export_info["train_count"]
-        sticky_meta["data_val"] = export_info["val_count"]
-        sticky_meta["num_classes"] = len(export_info["classes"])
-        sticky_meta["class_names"] = export_info["classes"]
-        # 跨函数透传 (失败路径也能拿到)
-        TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
-
-        # 数据集统计写库 + 推送
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
-            **sticky_meta,
-            "progress": 5.0,
-            "msg": f"数据集就绪: train={export_info['train_count']} val={export_info['val_count']}",
-            "total_epochs": epochs,
-        })
-        TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta)
-
-        # ---- 4) 跑训练 (纯 ML) ----
-        result = train_yolo(
-            data_yaml=export_info["data_yaml"],
-            model_name=f"{model_name}.pt",
-            epochs=epochs,
-            imgsz=imgsz,
-            batch=batch,
-            device=device,
-            project=str(settings.MODEL_DIR / "runs"),
-            name=model_alias,
-            progress_cb=_train_cb,
-        )
-
-        # ---- 5) 写 ModelVersion + TrainingJob SUCCESS (委托 Service) ----
-        mv_id = TrainingLifecycleService.create_model_version_sync(
-            name=model_alias,
-            base_model=model_name,
-            dataset_id=dataset_id,
-            task_type="detection",
-            num_classes=len(export_info["classes"]),
-            file_path=result["best_pt"],
-            metrics=result["metrics"],
-            history=history_buffer,
-        )
-        TrainingLifecycleService.mark_success_sync(
-            job_id=job_id,
-            started_at=started_at,
-            history_buffer=history_buffer,
-            message=f"训练完成 mAP50={result['metrics'].get('map_50', 0):.4f}",
-            model_version_id=mv_id,
-            sticky_meta=sticky_meta,
-        )
-        return {
-            "status": "SUCCESS", "job_id": job_id, "model_version_id": mv_id,
-            "best_pt": result["best_pt"], "metrics": result["metrics"],
-        }
-
-    except YoloTrainError as e:
-        _finish_failed(self, job_id, e, started_at, task_id)
-        return {"status": "FAILURE", "job_id": job_id, "error": str(e)[:500]}
-    except Exception as e:
-        _finish_failed(self, job_id, e, started_at, task_id)
-        return {"status": "FAILURE", "job_id": job_id, "error": str(e)[:500]}
-    finally:
-        # 清理临时数据集导出目录
-        shutil.rmtree(workdir, ignore_errors=True)
-
-
-def _finish_failed(self, job_id: int, exc: Exception, started_at: datetime, task_id: str):
-    """训练失败统一清理 (Phase 5: 委托 TrainingLifecycleService)"""
-    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
-
-    sticky_meta = TrainingLifecycleService.get_last_sticky_meta(task_id)
-    TrainingLifecycleService.mark_failure_sync(
-        job_id=job_id,
-        error=str(exc),
-        started_at=started_at,
-        exc_type=type(exc).__name__,
-        sticky_meta=sticky_meta,
-    )
-    TrainingLifecycleService.set_task_state(self, "FAILURE", {
-        "exc_type": type(exc).__name__,
-        "exc_message": str(exc)[:200],
-        "error": str(exc)[:500],
-        "job_id": job_id,
-    })
-
-
-# ============== 自动标注 (用已训练模型) ==============
 
 @celery_app.task(bind=True)
 def auto_annotate_detection_task(
@@ -358,11 +175,6 @@ def auto_annotate_detection_task(
             "error": str(e)[:500],
         })
         return {"status": "FAILURE", "error": str(e)[:500]}
-
-
-# ============== 自动标注 (用预训练模型) ==============
-
-PREDEFINED_YOLO_MODELS = {"yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x"}
 
 
 @celery_app.task(bind=True, name="detection.auto_annotate_pretrained")
