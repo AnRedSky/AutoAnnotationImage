@@ -1,32 +1,10 @@
-"""User Management API (Admin only)"""
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+"""
+兼容垫片 (Stage 2.5): user API
+=============================
 
-from app.database import get_db
-from app.model.user import User
-from app.core.deps import require_admin
-
-router = APIRouter()
+**v3.0.0 Stage 2.5 迁移**: user 路由已迁入 app.admin.api.user
+"""
+from app.admin.api.user import router  # noqa: F401
 
 
-@router.get("/")
-async def list_users(
-    db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
-):
-    result = await db.execute(select(User).order_by(User.id))
-    users = result.scalars().all()
-    return {
-        "items": [
-            {
-                "id": u.id,
-                "username": u.username,
-                "email": u.email,
-                "role": u.role,
-                "is_active": u.is_active,
-                "created_at": u.created_at.isoformat(),
-            }
-            for u in users
-        ]
-    }
+__all__ = ["router"]

@@ -1,7 +1,27 @@
-"""Admin API Package — 路由层
-
-Stage 2.5 后会从 app/api/{user,stats,system}.py 迁移至此.
 """
-# 兼容垫片: 允许外部继续 `from app.admin.api import user_router` 风格
-# (待 Stage 2.5 完成后激活)
-__all__: list[str] = []
+Admin API Package (Stage 2.5 填充)
+=================================
+
+**v3.0.0 Stage 2.5 迁移**: 从 app/api/* 迁入 admin 应用
+
+**当前状态**:
+- 已完整迁移: user, system
+- 过渡引用: stats
+"""
+# Stage 2.5 完整迁移
+from app.admin.api.user import router as user_router
+from app.admin.api.system import router as system_router
+
+# 过渡: stats
+from app.api.stats import router as stats_router
+
+# 命名导出
+user = user_router  # type: ignore
+system = system_router  # type: ignore
+stats = stats_router  # type: ignore
+
+
+__all__ = [
+    "user", "system", "stats",
+    "user_router", "system_router", "stats_router",
+]
