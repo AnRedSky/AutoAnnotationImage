@@ -107,6 +107,166 @@ class ClearAnnotationsRequest(BaseModel):
     image_ids: List[int]
 
 
+# ============== 不合格图片标记 (v3.0.0 新增, 正交于 status 状态机) ==============
+
+class MarkUnqualifiedRequest(BaseModel):
+    """标记单张图片为不合格"""
+    image_id: int
+    reason: str  # 预设枚举值 (见 REJECT_REASON_VALUES)
+    custom_text: Optional[str] = None  # reason="other" 时的自定义文本
+
+
+class UnmarkUnqualifiedRequest(BaseModel):
+    """撤销单张图片的不合格标记"""
+    image_id: int
+
+
+class BatchMarkUnqualifiedRequest(BaseModel):
+    """批量标记图片为不合格"""
+    image_ids: List[int]
+    reason: str
+    custom_text: Optional[str] = None
+
+
+@router.post("/mark-unqualified")
+async def mark_unqualified(
+    req: MarkUnqualifiedRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """标记单张图片为不合格
+
+    - 设置 Image.quality_flag / reject_reason / rejected_by / rejected_at
+    - 不修改 Image.status / final_label_id (保留原标注状态, 撤销可恢复)
+    - 写 AnnotationLog(action=mark_unqualified, payload={reason, custom_text}) 留痕
+    - 不扣减 Category.sample_count (标注信息保留, 仅作质量标记)
+    """
+    from app.common.enums import REJECT_REASON_VALUES
+    if req.reason not in REJECT_REASON_VALUES:
+        raise HTTPException(400, f"非法原因: {req.reason}, 可选: {list(REJECT_REASON_VALUES)}")
+
+    img = await db.get(Image, req.image_id)
+    if not img:
+        raise HTTPException(404, "Image not found")
+
+    if img.is_unqualified():
+        raise HTTPException(409, f"图片 {req.image_id} 已被标记为不合格")
+
+    img.mark_unqualified(current_user.id, req.reason)
+
+    payload: dict = {"reason": req.reason}
+    if req.custom_text:
+        payload["custom_text"] = req.custom_text
+    log = AnnotationLog(
+        image_id=req.image_id,
+        user_id=current_user.id,
+        action="mark_unqualified",
+        payload=payload,
+        time_spent_ms=0,
+    )
+    db.add(log)
+    await db.commit()
+
+    return {
+        "success": True,
+        "image_id": req.image_id,
+        "quality_flag": img.quality_flag,
+        "reject_reason": img.reject_reason,
+    }
+
+
+@router.post("/unmark-unqualified")
+async def unmark_unqualified(
+    req: UnmarkUnqualifiedRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """撤销单张图片的不合格标记
+
+    - 清空 Image.quality_flag / reject_reason / rejected_by / rejected_at
+    - 不恢复 (也不修改) Image.status (原标注状态一直保留, 无需恢复)
+    - 写 AnnotationLog(action=unmark_unqualified) 留痕
+    """
+    img = await db.get(Image, req.image_id)
+    if not img:
+        raise HTTPException(404, "Image not found")
+
+    if not img.is_unqualified():
+        raise HTTPException(409, f"图片 {req.image_id} 未被标记为不合格")
+
+    img.unmark_unqualified()
+
+    log = AnnotationLog(
+        image_id=req.image_id,
+        user_id=current_user.id,
+        action="unmark_unqualified",
+        time_spent_ms=0,
+    )
+    db.add(log)
+    await db.commit()
+
+    return {"success": True, "image_id": req.image_id, "quality_flag": None}
+
+
+@router.post("/batch-mark-unqualified")
+async def batch_mark_unqualified(
+    req: BatchMarkUnqualifiedRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """批量标记图片为不合格 (参考 /clear 的批量模式)
+
+    - 一次事务处理多张图, 任一不存在则跳过 (不回滚)
+    - 已标记为不合格的图跳过 (幂等)
+    - 每张图写一条 AnnotationLog(action=mark_unqualified)
+    """
+    from app.common.enums import REJECT_REASON_VALUES
+    if req.reason not in REJECT_REASON_VALUES:
+        raise HTTPException(400, f"非法原因: {req.reason}, 可选: {list(REJECT_REASON_VALUES)}")
+
+    ids = [int(x) for x in (req.image_ids or []) if x is not None]
+    if not ids:
+        raise HTTPException(400, "image_ids cannot be empty")
+    if len(ids) > 500:
+        raise HTTPException(400, "Too many ids (max 500)")
+
+    stmt = select(Image).where(Image.id.in_(ids))
+    images = (await db.execute(stmt)).scalars().all()
+
+    payload: dict = {"reason": req.reason}
+    if req.custom_text:
+        payload["custom_text"] = req.custom_text
+
+    marked = 0
+    skipped = 0
+    details: List[dict] = []
+    for img in images:
+        if img.is_unqualified():
+            skipped += 1
+            details.append({"image_id": img.id, "filename": img.filename, "result": "skipped", "reason": "already unqualified"})
+            continue
+        img.mark_unqualified(current_user.id, req.reason)
+        db.add(AnnotationLog(
+            image_id=img.id,
+            user_id=current_user.id,
+            action="mark_unqualified",
+            payload=payload,
+            time_spent_ms=0,
+        ))
+        marked += 1
+        details.append({"image_id": img.id, "filename": img.filename, "result": "marked"})
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "marked": marked,
+        "skipped": skipped,
+        "missing": len(ids) - len(images),
+        "items": details,
+    }
+
+
 @router.post("/clear")
 async def clear_annotations(
     req: ClearAnnotationsRequest,

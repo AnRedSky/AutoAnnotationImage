@@ -56,8 +56,14 @@ async def list_images(
 
     # base 查询
     base = select(Image).where(Image.dataset_id == dataset_id)
-    if status:
+    # v3.0.0: status="unqualified" 是正交维度, 转查 quality_flag
+    # 其它 status 值正常按 Image.status 过滤, 并额外排除不合格图片
+    # (标注工作台 loadNext 不应返回不合格图)
+    if status == "unqualified":
+        base = base.where(Image.quality_flag == "unqualified")
+    elif status:
         base = base.where(Image.status == status)
+        base = base.where(Image.quality_flag.is_(None))
 
     # 合并 exclude_id + exclude_ids, 统一用 NOT IN
     exclude_set: set = set()
@@ -137,6 +143,9 @@ async def list_images(
                 "file_url": f"/api/files/{img.id}",
                 "bbox_count": bbox_count_by_img.get(img.id, 0),
                 "has_mask": has_mask_by_img.get(img.id, False),
+                # v3.0.0: 不合格标记 (正交于 status)
+                "quality_flag": img.quality_flag,
+                "reject_reason": img.reject_reason,
             }
             for img in images
         ],
