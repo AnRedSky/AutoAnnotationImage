@@ -4,13 +4,15 @@ File Serving API
 为前端 Annotate.vue / DatasetDetail.vue 提供图片二进制流代理接口：
   GET /api/files/{image_id}
   GET /api/files/{image_id}/thumbnail?size=240
-前端 <img :src="imageApi.fileUrl(img.id)"> 直接可用。
+  GET /api/files/{image_id}/metadata
+前端 <img :src="imageApi.fileUrl(img.id, token)"> 直接可用。
 
-鉴权策略：可选鉴权（演示 / 内部系统）
-  - 带 Authorization Bearer xxx 或 ?token=xxx → 校验（验证失败仍 401）
-  - 都不带 → 允许访问（返回图片）
-  - 设计依据：<img> 标签无法附加 header，query token 也不是 100% 可靠
-  - 生产环境如需严格权限，可在 storage_service 后面再加 dataset 权限校验
+鉴权策略 (v3.0.0 全面审查修复 P0-2):
+  - 必须鉴权: 匿名用户不再允许访问任何文件
+  - Authorization Bearer 头优先, ?token=xxx 兜底 (EventSource/<img> 无法设 header)
+  - 鉴权成功后校验: current_user.can_access_dataset(image.dataset)
+  - 管理员可访问全部, 普通用户仅可访问自己拥有的数据集
+  - 跨用户访问 → 403
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -20,49 +22,12 @@ import logging
 
 from app.database import get_db
 from app.tasks.model.image import Image
+from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
-from app.core.security import decode_token
-from app.common.storage.storage_service import storage_service
+from app.middleware.http.auth import get_user_optional_for_query
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-async def get_user_optional(
-    request: Request,
-    token: str | None = Query(default=None, description="JWT token (for <img> tag)"),
-    db: AsyncSession = Depends(get_db),
-) -> User | None:
-    """可选鉴权：能拿到 user 就返回，拿不到返回 None
-    - Authorization header 优先
-    - 其次 query ?token=xxx
-    - 都没有 → None（调用方决定是否允许匿名）
-    - 有 token 但无效 → 抛 401（不能静默放行无效凭证）
-    """
-    if not token:
-        auth = request.headers.get("Authorization", "")
-        if auth.lower().startswith("bearer "):
-            token = auth[7:].strip()
-    if not token:
-        return None
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(
-            status_code=401,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
-    try:
-        result = await db.execute(select(User).where(User.id == int(user_id)))
-        user = result.scalar_one_or_none()
-    except Exception:
-        user = None
-    if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
-    return user
 
 
 # 常见图片 MIME 类型映射
@@ -76,24 +41,66 @@ _MIME_MAP = {
 }
 
 
+def _require_user(
+    user: User | None,
+    image: Image,
+) -> None:
+    """v3.0.0 全面审查修复 P0-2: 文件端点强制鉴权 + 数据集权限校验
+
+    流程:
+      1) 未登录 → 401
+      2) 已登录但无权限访问该数据集 → 403
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to access image files",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 权限检查: 管理员可访问全部, 否则只允许 owner
+    if not user.can_access_dataset(image.dataset):
+        logger.warning(
+            "Permission denied: user_id=%s attempted to access image_id=%s "
+            "(dataset_id=%s, owner_id=%s)",
+            user.id, image.id, image.dataset_id, image.dataset.owner_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to access this image",
+        )
+
+
 @router.get("/{image_id}")
 async def get_image_file(
     image_id: int,
     request: Request,
-    token: str | None = Query(default=None),
+    token: str | None = Query(default=None, description="JWT token (for <img> tag)"),
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(get_user_optional),
+    current_user: User | None = Depends(get_user_optional_for_query),
 ):
     """
     通过图片 ID 返回图片二进制流
-    - 鉴权可选：带 token 则校验 user，不带也允许（演示/内部使用）
+    - 必须鉴权 (Bearer header 或 ?token=xxx)
+    - 鉴权后校验数据集权限
     - 自动按文件后缀设置 Content-Type
     """
-    result = await db.execute(select(Image).where(Image.id == image_id))
-    img = result.scalar_one_or_none()
-    if not img:
+    # 1) 取图片 + 关联 dataset
+    result = await db.execute(
+        select(Image, Dataset)
+        .join(Dataset, Image.dataset_id == Dataset.id)
+        .where(Image.id == image_id)
+    )
+    row = result.first()
+    if not row:
         raise HTTPException(status_code=404, detail="Image not found")
+    img, dataset = row
 
+    # 2) 强制鉴权 + 权限校验
+    _require_user(current_user, img)
+
+    # 3) 取文件内容
+    from app.common.storage.storage_service import storage_service
     if not storage_service.exists(img.storage_path):
         raise HTTPException(status_code=404, detail="Image file missing on storage")
 
@@ -120,13 +127,28 @@ async def head_image_file(
     request: Request,
     token: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(get_user_optional),
+    current_user: User | None = Depends(get_user_optional_for_query),
 ):
-    """HEAD 方法：仅返回元数据，供前端做预检/缓存策略"""
-    result = await db.execute(select(Image).where(Image.id == image_id))
-    img = result.scalar_one_or_none()
-    if not img or not storage_service.exists(img.storage_path):
+    """HEAD 方法：仅返回元数据，供前端做预检/缓存策略
+
+    v3.0.0 P0-2: 同样需要鉴权, 否则暴露 image_id 是否存在
+    """
+    result = await db.execute(
+        select(Image, Dataset)
+        .join(Dataset, Image.dataset_id == Dataset.id)
+        .where(Image.id == image_id)
+    )
+    row = result.first()
+    if not row:
         raise HTTPException(status_code=404, detail="Image not found")
+    img, _ = row
+
+    _require_user(current_user, img)
+
+    from app.common.storage.storage_service import storage_service
+    if not storage_service.exists(img.storage_path):
+        raise HTTPException(status_code=404, detail="Image file missing on storage")
+
     return Response(
         content=None,
         media_type="image/jpeg",
@@ -141,18 +163,27 @@ async def get_image_thumbnail(
     request: Request = None,
     token: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(get_user_optional),
+    current_user: User | None = Depends(get_user_optional_for_query),
 ):
     """
     返回图片缩略图 (JPEG 格式, 最长边 = size)
-    - 鉴权可选
+    - 必须鉴权 + 校验数据集权限
     - 使用 PIL 实时缩放, 不缓存磁盘 (简单实现)
     - 缺失图片返回 404
     """
-    result = await db.execute(select(Image).where(Image.id == image_id))
-    img = result.scalar_one_or_none()
-    if not img:
+    result = await db.execute(
+        select(Image, Dataset)
+        .join(Dataset, Image.dataset_id == Dataset.id)
+        .where(Image.id == image_id)
+    )
+    row = result.first()
+    if not row:
         raise HTTPException(status_code=404, detail="Image not found")
+    img, _ = row
+
+    _require_user(current_user, img)
+
+    from app.common.storage.storage_service import storage_service
     if not storage_service.exists(img.storage_path):
         raise HTTPException(status_code=404, detail="Image file missing on storage")
 

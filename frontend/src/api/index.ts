@@ -4,15 +4,17 @@
 import http from './http'
 import { createSSEStream } from '@/utils/sse'
 
-// <img> 标签无法附加 Authorization header，但后端 /api/files 已支持可选鉴权。
+// <img> 标签无法附加 Authorization header，但后端 /api/files 已支持 query token。
 // 仍然拼 token query 主要是为了：
-//   1) 记录当前访问用户到访问日志
-//   2) 后端未来开启严格权限时无需改前端
-// token 不存在时返回空字符串（URL 仍能工作）
+//   1) 后端强制鉴权后, <img> 仍能加载 (EventSource/图片均无法设 header)
+//   2) 后端可基于 token 记录访问用户, 未来做权限审计
+// 始终返回以 '?' 或 '&' 开头的字符串, 调用方直接拼到 URL 末尾即可
 function authQuery(extra: string = ''): string {
   const t = localStorage.getItem('token')
-  if (!t) return extra
-  return extra ? `${extra}&token=${encodeURIComponent(t)}` : `token=${encodeURIComponent(t)}`
+  if (!t) return extra  // 没有 token 时透传 extra (供 URL 已有 ? 时的 & 兜底)
+  // extra 不为空说明 URL 已经有查询参数, 用 & 连接
+  // 始终以 ? 或 & 开头, 调用方无需额外加 '?'
+  return extra ? `&token=${encodeURIComponent(t)}` : `?token=${encodeURIComponent(t)}`
 }
 
 // ============== 认证 ==============
@@ -89,9 +91,16 @@ export const imageApi = {
   detail: (id: number) => http.get(`/images/${id}`),
   remove: (id: number) => http.delete(`/images/${id}`),
   batchRemove: (ids: number[]) => http.post('/images/batch-delete', ids),
-  fileUrl: (id: number) => `${http.defaults.baseURL}/files/${id}`,
+  /**
+   * v3.0.0 全面审查修复 P0-2: 文件端点改为强制鉴权
+   * - 旧: fileUrl 不带 token, 匿名可访问
+   * - 新: fileUrl 必须拼 ?token=xxx (因为 <img> 标签无法设 header)
+   * - token 缺失时降级返回无 token URL, 后端将返回 401, 前端 <img> 会 broken
+   *   此时通常意味着用户未登录, 应被路由守卫拦截
+   */
+  fileUrl: (id: number) => `${http.defaults.baseURL}/files/${id}${authQuery()}`,
   thumbnailUrl: (id: number, size = 240) =>
-    `${http.defaults.baseURL}/files/${id}/thumbnail?size=${size}`,
+    `${http.defaults.baseURL}/files/${id}/thumbnail?size=${size}${authQuery()}`,
   /**
    * 非破坏性测评: 对指定图片跑模型, 返回 top-1 置信度及在当前阈值下是否会被自动标注
    * - 不修改任何图片状态
