@@ -38,7 +38,7 @@ from app.schemas.segmentation import (
     SegmentationTrainRequest,
     SegmentationTrainResponse,
 )
-from app.schemas.enums import (
+from app.common.enums import (
     TaskType,
     TASK_TYPE_VALUES,
     TASK_TYPE_DEFAULT_BASE_MODEL,

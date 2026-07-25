@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.core.exceptions import AppException, to_response_payload
+from app.common.exceptions import AppException, to_response_payload
 from app.database import init_db, engine
 from app.registry import AppRegistry
 
@@ -246,5 +246,5 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 #  安装后可直接调用 `image-annotation-backend`，等价于 `python run.py`。
 def run() -> None:
     """Console-script entry: `image-annotation-backend`"""
-    from app.cli import main
+    from app.core.cli import main
     raise SystemExit(main())
