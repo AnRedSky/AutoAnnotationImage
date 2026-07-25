@@ -1,7 +1,7 @@
 """v2.0.0 S1 测试: 任务类型枚举 + 共享工具"""
 import pytest
 
-from app.schemas.enums import (
+from app.common.enums import (
     TaskType,
     TASK_TYPE_VALUES,
     TASK_TYPE_DEFAULT_BASE_MODEL,

@@ -7,7 +7,7 @@ warnings.filterwarnings('ignore')
 
 print('=== 测试 1: 从 backend/ 启动时, 路径是否锚定到项目根 ===')
 print('cwd:', os.getcwd())
-from app.config import settings
+from app.core.config import settings
 import os as _os
 print('os.environ[HF_HOME]        :', _os.environ.get('HF_HOME'))
 print('os.environ[TORCH_HOME]     :', _os.environ.get('TORCH_HOME'))

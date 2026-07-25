@@ -18,7 +18,7 @@ import pytest
 from PIL import Image as PILImage
 
 from app.models import ModelVersion
-from app.schemas.enums import TaskType
+from app.common.enums import TaskType
 
 
 # ============== 工具 ==============
