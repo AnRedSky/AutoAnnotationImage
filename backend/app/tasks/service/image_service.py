@@ -205,7 +205,7 @@ class ImageService:
         from sqlalchemy.orm import selectinload
         from sqlalchemy import case, update
         from app.tasks.model.dataset import Dataset
-        from app.tasks.service.storage_service import storage_service
+        from app.common.storage.storage_service import storage_service
 
         dataset_id = image.dataset_id
         was_annotated = image.status in ("human_confirmed", "human_corrected", "trained")
@@ -255,7 +255,7 @@ class ImageService:
         """批量删除图片 (业务下沉)"""
         from sqlalchemy import case, update, delete as sa_delete
         from app.tasks.model.dataset import Dataset
-        from app.tasks.service.storage_service import storage_service
+        from app.common.storage.storage_service import storage_service
 
         if not image_ids:
             raise HTTPException(400, "image_ids cannot be empty")

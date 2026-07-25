@@ -37,10 +37,23 @@ class ModelService:
 
     @staticmethod
     async def get_active_for_dataset(
-        db: AsyncSession, dataset_id: int
+        db: AsyncSession,
+        dataset_id: int,
+        task_type: Optional[str] = None,
     ) -> Optional[ModelVersion]:
-        """获取数据集的激活模型 (按 mAP50 desc, created_at desc)"""
-        return await get_active_model(db, dataset_id)
+        """获取数据集的激活模型 (按 mAP50/mIoU/accuracy desc, created_at desc)
+
+        v3.0.0 审查修复: task_type 改为可选, 与 list_active_models API 端点对齐
+        """
+        if task_type:
+            return await get_active_model(db, dataset_id, task_type)
+        # 跨任务类型时: 用 list_versions_by_dataset 内部排序
+        from app.tasks.repository.model_version_queries import list_versions_by_dataset
+        versions = await list_versions_by_dataset(db, dataset_id, task_type=None)
+        for v in versions:
+            if v.is_active:
+                return v
+        return versions[0] if versions else None
 
     @staticmethod
     async def activate(

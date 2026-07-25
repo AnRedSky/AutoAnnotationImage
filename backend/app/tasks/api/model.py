@@ -24,6 +24,8 @@ from app.tasks.model.training_job import TrainingJob
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.core.config import settings
+# v3.0.0 审查修复: API 层改用 ModelService 编排, 避免业务逻辑写在 controller
+from app.tasks.service.model_service import ModelService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -131,9 +133,6 @@ async def list_models(
                 "task_type": m.task_type,
                 "dataset_id": m.dataset_id,
                 "dataset_name": ds_map.get(m.dataset_id) if m.dataset_id else None,
-                # v2.5.16: 任务类型 (classification/detection/segmentation)
-                # 此前未返回, 前端兜底 "|| 'classification'" 把所有模型都显示为"图片分类"
-                "task_type": m.task_type,
                 "num_classes": m.num_classes,
                 "accuracy": float(m.accuracy or 0),
                 "precision": float(m.precision or 0),
@@ -156,53 +155,62 @@ async def list_models(
 
 @router.get("/active")
 async def list_active_models(
-    dataset_id: Optional[int] = Query(default=None, description="数据集 ID; 缺省=全局所有激活模型"),
+    dataset_id: Optional[int] = Query(default=None, description="数据集 ID; 缺省=全局所有数据集, 每个数据集返回 1 个最佳模型"),
+    task_type: Optional[str] = Query(default=None, description="任务类型过滤: classification|detection|segmentation"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     列出当前激活的模型版本 (供标注工作台 / 概览面板)
-    - 支持同 dataset 下多激活并存, 返回 list 而非 single
-    - dataset_id 指定: 查该 dataset 下 is_active 的全部
-    - dataset_id 缺省: 全局所有 is_active
 
-    返回: { items: [{id, name, base_model, dataset_id, dataset_name, accuracy, is_active, ...}] }
+    v3.0.0 审查修复: 严格遵循 memory 硬约束
+    - 每个 dataset 只返回 1 个最佳模型 (mAP50/mIoU/accuracy 降序, created_at 降序)
+    - dataset_id 缺省: 全局所有数据集各自的最优模型
+    - 委托 ModelService.get_active_for_dataset() 保证业务一致性
     """
-    stmt = select(ModelVersion).where(ModelVersion.is_active == True)  # noqa: E712
+    items: list[dict] = []
+
+    # 1) 决定要遍历的 dataset 列表
     if dataset_id is not None:
-        stmt = stmt.where(ModelVersion.dataset_id == dataset_id)
-    stmt = stmt.order_by(ModelVersion.id.desc())
-    rows = (await db.execute(stmt)).scalars().all()
+        ds_ids = [dataset_id]
+    else:
+        rows = (await db.execute(select(Dataset.id))).all()
+        ds_ids = [r[0] for r in rows]
 
-    # 预查 dataset_name
-    ds_ids = sorted({m.dataset_id for m in rows if m.dataset_id})
-    ds_map: dict[int, str] = {}
-    if ds_ids:
-        ds_rows = (await db.execute(
-            select(Dataset.id, Dataset.name).where(Dataset.id.in_(ds_ids))
-        )).all()
-        for r in ds_rows:
-            ds_map[r.id] = r.name
+    # 2) 逐 dataset 委托 ModelService (排序: mAP50/mIoU/accuracy DESC, created_at DESC)
+    for ds_id in ds_ids:
+        active = await ModelService.get_active_for_dataset(db, ds_id, task_type=task_type)
+        if not active:
+            continue
+        items.append({
+            "id": active.id,
+            "name": active.name,
+            "base_model": active.base_model,
+            "dataset_id": active.dataset_id,
+            "task_type": active.task_type,
+            "num_classes": active.num_classes,
+            "accuracy": float(active.accuracy or 0),
+            "f1_score": float(active.f1_score or 0),
+            "map_50": float(active.map_50) if active.map_50 is not None else None,
+            "miou": float(active.miou) if active.miou is not None else None,
+            "is_active": active.is_active,
+            "created_at": active.created_at.isoformat() if active.created_at else None,
+        })
 
-    return {
-        "items": [
-            {
-                "id": m.id,
-                "name": m.name,
-                "base_model": m.base_model,
-                "dataset_id": m.dataset_id,
-                "dataset_name": ds_map.get(m.dataset_id) if m.dataset_id else None,
-                # v2.5.16: 任务类型透出 (与 list_models 对齐)
-                "task_type": m.task_type,
-                "num_classes": m.num_classes,
-                "accuracy": float(m.accuracy or 0),
-                "f1_score": float(m.f1_score or 0),
-                "is_active": m.is_active,
-                "created_at": m.created_at.isoformat() if m.created_at else None,
-            }
-            for m in rows
-        ]
-    }
+    # 3) 预查 dataset_name (避免 N+1)
+    ds_name_map: dict[int, str] = {}
+    if items:
+        ds_ids2 = sorted({m["dataset_id"] for m in items if m["dataset_id"]})
+        if ds_ids2:
+            ds_rows = (await db.execute(
+                select(Dataset.id, Dataset.name).where(Dataset.id.in_(ds_ids2))
+            )).all()
+            for r in ds_rows:
+                ds_name_map[r[0]] = r[1]
+    for m in items:
+        m["dataset_name"] = ds_name_map.get(m["dataset_id"]) if m["dataset_id"] else None
+
+    return {"items": items}
 
 
 @router.post("/{model_id}/activate")
@@ -212,20 +220,22 @@ async def activate_model(
     current_user: User = Depends(get_current_user),
 ):
     """
-    激活指定模型版本 (v2 语义)
-    - 不再取消同 dataset 下其他激活 (允许多激活并存)
-    - 若目标当前已是激活状态, 视为幂等 (返回 success=True)
+    激活指定模型版本
+
+    v3.0.0 审查修复: 严格遵循 memory 硬约束
+    - 同一 dataset 下其他激活模型自动取消 (单激活语义)
+    - 委托 ModelService.activate() 保证业务一致性
+    - 幂等: 目标已是激活状态时也返回 success=True
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
         raise HTTPException(404, "Model not found")
 
+    if target.dataset_id is None:
+        raise HTTPException(400, "Model has no associated dataset, cannot activate")
+
     try:
-        # 仅锁目标行, 不动其他行
-        locked = await _lock_dataset_models(db, target.dataset_id)
-        _ = locked  # 加锁后立刻修改目标即可
-        target.is_active = True
-        await db.commit()
+        await ModelService.activate(db, target, commit=True)
     except Exception as e:
         await db.rollback()
         raise HTTPException(500, f"Failed to activate model: {e}")
@@ -248,16 +258,15 @@ async def deactivate_model(
     取消激活指定模型版本
     - 不影响其他模型的状态
     - 幂等: 已经是未激活的也返回 success=True
+
+    v3.0.0 审查修复: 委托 ModelService.deactivate() 保证业务一致性
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
         raise HTTPException(404, "Model not found")
 
     try:
-        locked = await _lock_dataset_models(db, target.dataset_id)
-        _ = locked
-        target.is_active = False
-        await db.commit()
+        await ModelService.deactivate(db, target, commit=True)
     except Exception as e:
         await db.rollback()
         raise HTTPException(500, f"Failed to deactivate model: {e}")
