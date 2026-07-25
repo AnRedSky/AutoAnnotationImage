@@ -1,6 +1,9 @@
-"""Auth Service Package — 业务编排层
-
-Stage 2.4 后会从 app/services/auth_service.py 迁移至此.
 """
-# 兼容垫片占位
-__all__: list[str] = []
+Auth Services Package (Stage 2.4 填充)
+====================================
+
+**v3.0.0 Stage 2.4 迁移**: 从 app/services/* 迁入 auth 应用
+"""
+from app.auth.service.auth_service import AuthService
+
+__all__ = ["AuthService"]

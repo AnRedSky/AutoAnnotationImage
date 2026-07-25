@@ -1,6 +1,10 @@
-"""Admin Service Package — 业务编排层
-
-Stage 2.4 后会从 app/services/{user_service,stats_service}.py 迁移至此.
 """
-# 兼容垫片占位
-__all__: list[str] = []
+Admin Services Package (Stage 2.4 填充)
+=======================================
+
+**v3.0.0 Stage 2.4 迁移**: 从 app/services/* 迁入 admin 应用
+"""
+from app.admin.service.user_service import UserService
+from app.admin.service.stats_service import StatsService
+
+__all__ = ["UserService", "StatsService"]
