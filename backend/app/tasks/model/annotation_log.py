@@ -24,6 +24,7 @@ class AnnotationLog(Base):
         Enum(
             "ai_predict", "confirm", "correct", "reject",
             "auto_annotate_pretrained", "auto_annotate_finetuned",
+            "mark_unqualified", "unmark_unqualified",
             name="annotation_action",
         ),
         nullable=False

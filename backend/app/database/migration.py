@@ -23,7 +23,7 @@ v3.0.0 迁移: 从 app.core.db_migration 迁入 app.database.migration (与 engi
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -45,7 +45,73 @@ MIGRATIONS = [
     ("model_version", "dice_score",      "FLOAT",       "NULL"),
     # image
     ("image", "task_type", "VARCHAR(32)", "'classification'"),
+    # v3.0.0 不合格图片标记 (正交于 status 状态机, 4 字段全 nullable)
+    ("image", "quality_flag",  "VARCHAR(16)", "NULL"),
+    ("image", "reject_reason", "VARCHAR(32)", "NULL"),
+    ("image", "rejected_by",   "INTEGER",     "NULL"),
+    ("image", "rejected_at",   "DATETIME",    "NULL"),
 ]
+
+
+# v3.0.0: annotation_log.action ENUM 扩展 (加 mark_unqualified / unmark_unqualified)
+# MySQL 需 MODIFY COLUMN; SQLite 用 VARCHAR 存储, 无需迁移
+_ANNOTATION_LOG_ACTION_TARGETS = (
+    "ai_predict", "confirm", "correct", "reject",
+    "auto_annotate_pretrained", "auto_annotate_finetuned",
+    "mark_unqualified", "unmark_unqualified",
+)
+
+
+async def _get_mysql_column_enum(conn: AsyncConnection, table: str, column: str) -> Optional[str]:
+    """查询 MySQL 列的 ENUM 定义 (返回形如 'enum(...)'); 非 MySQL 或查询失败返回 None"""
+    try:
+        rows = await conn.execute(text(
+            "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "  AND TABLE_NAME = :t AND COLUMN_NAME = :c LIMIT 1"
+        ), {"t": table, "c": column})
+        row = rows.first()
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _ensure_mysql_enum_has_values(
+    conn: AsyncConnection, table: str, column: str, targets: tuple, verbose: bool = False
+) -> str:
+    """幂等扩展 MySQL ENUM 列以包含 targets 中的所有值
+
+    Returns: "applied" | "skipped" | "unsupported"
+    """
+    current = await _get_mysql_column_enum(conn, table, column)
+    if current is None:
+        # 非 MySQL (SQLite 等) 或列不存在: 跳过
+        return "unsupported"
+    # 解析现有 ENUM 值, 判断是否已含全部目标值
+    current_lower = current.lower()
+    missing = [v for v in targets if f"'{v}'" not in current_lower]
+    if not missing:
+        return "skipped"
+    # 构造新 ENUM 定义 (包含原值 + 新值, 去重保序)
+    # 直接用 targets 全量重建 (比解析原值更可靠)
+    values_sql = ", ".join(f"'{v}'" for v in targets)
+    sql = (
+        f"ALTER TABLE `{table}` "
+        f"MODIFY COLUMN `{column}` ENUM({values_sql}) NOT NULL"
+    )
+    await conn.execute(text(sql))
+    if verbose:
+        print(f"  [add]  {table}.{column} ENUM 扩展: +{missing}")
+    return "applied"
+
+
+async def ensure_annotation_log_action_enum(
+    conn: AsyncConnection, *, verbose: bool = False
+) -> str:
+    """幂等扩展 annotation_log.action ENUM (加 mark_unqualified / unmark_unqualified)"""
+    return await _ensure_mysql_enum_has_values(
+        conn, "annotation_log", "action", _ANNOTATION_LOG_ACTION_TARGETS, verbose=verbose
+    )
 
 
 async def _get_existing_columns(conn: AsyncConnection, table: str) -> set:
@@ -159,5 +225,19 @@ async def ensure_v2_0_0_schema(
             errors.append(err)
             if verbose:
                 print(f"  [err]  {err}")
+
+    # v3.0.0: annotation_log.action ENUM 扩展 (幂等, MySQL 才需要)
+    try:
+        result = await ensure_annotation_log_action_enum(conn, verbose=verbose)
+        if result == "applied":
+            added.append("annotation_log.action ENUM 扩展")
+        elif result == "skipped":
+            skipped.append("annotation_log.action ENUM 已含目标值")
+        # result == "unsupported" (SQLite 等): 不记录
+    except Exception as e:  # noqa: BLE001
+        err = f"annotation_log.action ENUM 扩展失败: {e!r}"
+        errors.append(err)
+        if verbose:
+            print(f"  [err]  {err}")
 
     return {"added": added, "skipped": skipped, "errors": errors}

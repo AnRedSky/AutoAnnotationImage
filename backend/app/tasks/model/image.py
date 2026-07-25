@@ -9,6 +9,7 @@ from typing import Optional
 from sqlalchemy import String, Integer, DateTime, Enum, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.common.base_model import Base
+from app.common.enums import IMAGE_QUALITY_UNQUALIFIED
 
 
 # 图片状态枚举
@@ -57,6 +58,18 @@ class Image(Base):
     )
     annotated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # ============== 不合格标记 (v3.0.0 新增, 正交于 status 状态机) ==============
+    # quality_flag: NULL 或 "unqualified"; 不影响 status, 撤销时清空即可
+    quality_flag: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    # reject_reason: 预设枚举值 (blurry/wrong_category/duplicate/out_of_scope/violation/other)
+    reject_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # rejected_by: 标记人 (FK user.id); 撤销时清空
+    rejected_by: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("user.id"), nullable=True
+    )
+    # rejected_at: 标记时间; 撤销时清空
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     # Relationships (跨应用: 引用 tasks/annotation 下的模型)
     dataset = relationship("Dataset", back_populates="images")
@@ -116,6 +129,30 @@ class Image(Base):
         self.annotated_at = datetime.utcnow()
         if label_id is not None:
             self.final_label_id = label_id
+
+    # ============== 不合格标记 (正交于 status, 不修改原标注状态) ==============
+
+    def mark_unqualified(self, user_id: int, reason: str) -> None:
+        """标记为不合格图片 (设置 quality_flag, 不修改 status / final_label_id)
+
+        - 保留原标注状态, 撤销后可完整恢复
+        - reason: 预设枚举值 (见 RejectReason)
+        """
+        self.quality_flag = IMAGE_QUALITY_UNQUALIFIED
+        self.reject_reason = reason
+        self.rejected_by = user_id
+        self.rejected_at = datetime.utcnow()
+
+    def unmark_unqualified(self) -> None:
+        """撤销不合格标记 (清空 4 字段, 恢复为正常图片)"""
+        self.quality_flag = None
+        self.reject_reason = None
+        self.rejected_by = None
+        self.rejected_at = None
+
+    def is_unqualified(self) -> bool:
+        """是否被标记为不合格"""
+        return self.quality_flag == IMAGE_QUALITY_UNQUALIFIED
 
     def __repr__(self) -> str:
         return f"<Image {self.id} {self.filename!r} status={self.status}>"

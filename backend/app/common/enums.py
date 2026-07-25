@@ -58,6 +58,43 @@ ANNOTATION_SOURCE_VALUES: Final[Tuple[str, ...]] = tuple(
 )
 
 
+# ================== 不合格标记原因 ==================
+
+class RejectReason(str, Enum):
+    """图片不合格标记的预设原因
+
+    存储于 Image.reject_reason 字段;
+    "其他" 场景的自定义文本存 AnnotationLog.payload.custom_text
+    """
+    BLURRY: Final[str] = "blurry"              # 图片模糊
+    WRONG_CATEGORY: Final[str] = "wrong_category"  # 类别错误
+    DUPLICATE: Final[str] = "duplicate"        # 重复图片
+    OUT_OF_SCOPE: Final[str] = "out_of_scope"  # 非本数据集类别
+    VIOLATION: Final[str] = "violation"        # 内容违规
+    OTHER: Final[str] = "other"                # 其他 (需填自定义文本)
+
+
+REJECT_REASON_VALUES: Final[Tuple[str, ...]] = tuple(
+    r.value for r in RejectReason
+)
+
+# 中文标签映射 (供 API 返回 / 前端展示)
+REJECT_REASON_LABELS: Final[dict[str, str]] = {
+    RejectReason.BLURRY.value: "图片模糊",
+    RejectReason.WRONG_CATEGORY.value: "类别错误",
+    RejectReason.DUPLICATE.value: "重复图片",
+    RejectReason.OUT_OF_SCOPE.value: "非本数据集类别",
+    RejectReason.VIOLATION.value: "内容违规",
+    RejectReason.OTHER.value: "其他",
+}
+
+
+# ================== 图片质量标记 ==================
+
+# Image.quality_flag 字段的取值 (正交于 Image.status, 不影响状态机)
+IMAGE_QUALITY_UNQUALIFIED: Final[str] = "unqualified"
+
+
 # ================== 检测 / 分割 训练任务状态 ==================
 
 class DetectionTrainState(str, Enum):
