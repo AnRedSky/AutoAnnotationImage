@@ -3,6 +3,7 @@
 ==================================
 
 v3.0.0 新增 (Phase 1.10): 从 app.main 内联提取
+v3.0.0 Stage 5.2: 新增 error_handler_factory 工厂入口, 供 MiddlewareRegistry 调用
 """
 import logging
 from fastapi import FastAPI, Request
@@ -36,3 +37,15 @@ def register_error_handlers(app: FastAPI) -> None:
             status_code=500,
             content={"code": "INTERNAL_ERROR", "message": "内部错误，请联系管理员"},
         )
+
+
+# ============================================================
+#  Stage 5.2: MiddlewareRegistry 工厂入口
+# ============================================================
+def error_handler_factory(app: FastAPI) -> None:
+    """异常处理器工厂 (供 MiddlewareRegistry 调用)
+
+    Stage 5.2 新增: 与 register_error_handlers 等价, 仅作为工厂入口暴露.
+    注册到 MiddlewareRegistry 时, order 推荐 20 (在 RequestID 之后, 确保异常日志附带 rid).
+    """
+    register_error_handlers(app)

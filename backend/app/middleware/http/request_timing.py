@@ -9,6 +9,8 @@ Request Timing Middleware (HTTP Layer)
 
 **v3.0.0 Stage 3 新增**.
 
+**v3.0.0 Stage 5.2 新增**: request_timing_factory 工厂入口, 供 MiddlewareRegistry 调用.
+
 **阈值配置**:
 - 警告阈值: 500ms (默认, 可在 .env 中调整 REQUEST_SLOW_THRESHOLD_MS)
 - 总是输出 DEBUG 日志 (含 method/path/status/duration_ms)
@@ -21,6 +23,7 @@ import logging
 import time
 from typing import Optional
 
+from fastapi import FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -84,4 +87,20 @@ class RequestTimingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-__all__ = ["RequestTimingMiddleware", "DEFAULT_SLOW_THRESHOLD_MS"]
+# ============================================================
+#  Stage 5.2: MiddlewareRegistry 工厂入口
+# ============================================================
+def request_timing_factory(app: FastAPI) -> None:
+    """RequestTiming 中间件工厂 (供 MiddlewareRegistry 调用)
+
+    Stage 5.2 新增: 替代 main.py 内联的 app.add_middleware(RequestTimingMiddleware).
+    注册到 MiddlewareRegistry 时, order 推荐 40 (最外层, 记录整体耗时, 包括其他中间件开销).
+    """
+    app.add_middleware(RequestTimingMiddleware)
+
+
+__all__ = [
+    "RequestTimingMiddleware",
+    "DEFAULT_SLOW_THRESHOLD_MS",
+    "request_timing_factory",
+]

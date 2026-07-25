@@ -11,6 +11,10 @@
 - `MLBackendInterface`: ML 框架后端接口 (Stage 4 插件化)
 - `TaskQueueInterface`: 任务队列接口 (Stage 4 插件化)
 
+**核心数据结构**:
+- `RouteEntry`: 路由条目 (Stage 2.7)
+- `MiddlewareEntry`: 中间件条目 (Stage 5.2)
+
 **依赖方向**:
 - common/interfaces.py 不依赖任何业务代码
 - app/*/ 依赖 common/interfaces.py (实现 AppInterface)
@@ -18,11 +22,15 @@
 
 v3.0.0 Stage 2 新增
 v3.0.0 Stage 2.7: 新增 RouteEntry NamedTuple + AppInterface.get_routes() 默认实现
+v3.0.0 Stage 5.2: 新增 MiddlewareEntry NamedTuple (供 MiddlewareRegistry 使用)
 """
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional
 
 from fastapi import APIRouter
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 
 # ============== RouteEntry (Stage 2.7 新增) ==============
@@ -42,6 +50,43 @@ class RouteEntry(NamedTuple):
     router: APIRouter
     prefix: str = ""
     tags: List[str] = []
+
+
+# ============== MiddlewareEntry (Stage 5.2 新增) ==============
+
+class MiddlewareEntry(NamedTuple):
+    """中间件条目: (name, factory, order, description)
+
+    用于 MiddlewareRegistry 注册, main.py 用 apply() 统一应用.
+    一个中间件条目对应一个 app.add_middleware(...) 或
+    app.add_exception_handler(...) 的调用.
+
+    Attributes:
+        name: 唯一标识, 用于日志/调试, 重复注册时 warning 跳过.
+        factory: 工厂函数, 签名 (app: FastAPI) -> None.
+                 在工厂内部调用 app.add_middleware(...) 或
+                 app.add_exception_handler(...).
+        order: 加载顺序, **升序排列, 数字小的先 add_middleware**,
+               在 Starlette 中处于更内层 (后 add 的才是更外层).
+               推荐区间:
+                 - 10: CORS (最内层, 路由直接看到 CORS header)
+                 - 20: 异常处理 (在 RequestID 之后, 确保异常日志附带 rid)
+                 - 30: RequestID (让外层中间件能读到 rid)
+                 - 40: RequestTiming (最外层, 记录整体耗时)
+        description: 人类可读描述, 仅用于日志, 不参与运行时逻辑.
+
+    Example:
+        >>> entry = MiddlewareEntry(
+        ...     name="cors",
+        ...     factory=cors_factory,
+        ...     order=10,
+        ...     description="CORS 跨域配置",
+        ... )
+    """
+    name: str
+    factory: Callable[["FastAPI"], None]
+    order: int = 100
+    description: str = ""
 
 
 # ============== AppInterface ==============
@@ -233,6 +278,7 @@ EventHandler = Callable[[dict], Any]
 
 __all__ = [
     "RouteEntry",
+    "MiddlewareEntry",
     "AppInterface",
     "PluginInterface",
     "StorageInterface",

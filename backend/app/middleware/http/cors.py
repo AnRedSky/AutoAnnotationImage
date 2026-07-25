@@ -3,6 +3,7 @@ CORS 中间件配置 (Middleware Layer)
 ==================================
 
 v3.0.0 新增 (Phase 1.10): 从 app.main 内联提取
+v3.0.0 Stage 5.2: 新增 cors_factory 工厂入口, 供 MiddlewareRegistry 调用
 """
 import warnings
 from fastapi import FastAPI
@@ -44,3 +45,15 @@ def setup_cors(app: FastAPI) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+# ============================================================
+#  Stage 5.2: MiddlewareRegistry 工厂入口
+# ============================================================
+def cors_factory(app: FastAPI) -> None:
+    """CORS 中间件工厂 (供 MiddlewareRegistry 调用)
+
+    Stage 5.2 新增: 与 setup_cors 等价, 仅作为工厂入口暴露.
+    注册到 MiddlewareRegistry 时, order 推荐 10 (最内层, 让路由直接看到 CORS header).
+    """
+    setup_cors(app)

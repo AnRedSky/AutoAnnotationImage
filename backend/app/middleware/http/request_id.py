@@ -9,6 +9,8 @@ Request ID Middleware (HTTP Layer)
 
 **v3.0.0 Stage 3 新增**.
 
+**v3.0.0 Stage 5.2 新增**: request_id_factory 工厂入口, 供 MiddlewareRegistry 调用.
+
 **工作流程**:
 1. 收到请求时, 优先从 `X-Request-ID` header 取 (前端传入)
 2. 如果没有, 自动生成 `uuid4().hex`
@@ -32,6 +34,7 @@ import uuid
 from contextvars import ContextVar
 from typing import Optional
 
+from fastapi import FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -92,9 +95,22 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# ============================================================
+#  Stage 5.2: MiddlewareRegistry 工厂入口
+# ============================================================
+def request_id_factory(app: FastAPI) -> None:
+    """RequestID 中间件工厂 (供 MiddlewareRegistry 调用)
+
+    Stage 5.2 新增: 替代 main.py 内联的 app.add_middleware(RequestIDMiddleware).
+    注册到 MiddlewareRegistry 时, order 推荐 30 (在 error_handler 之后, 让外层中间件能读到 rid).
+    """
+    app.add_middleware(RequestIDMiddleware)
+
+
 __all__ = [
     "RequestIDMiddleware",
     "get_request_id",
     "set_request_id",
     "REQUEST_ID_HEADER",
+    "request_id_factory",
 ]
