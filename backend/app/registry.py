@@ -7,6 +7,8 @@
 - 提供应用路由的自动聚合 (main.py 用 iter_routes() 挂载)
 - 提供应用启动/关闭钩子的统一调用 (lifespan 用 startup_all / shutdown_all)
 - 提供按名查询单个应用 (e.g. AppRegistry.get("tasks"))
+- 注册所有插件 (PluginInterface 实现类) — Stage 4 新增
+- 提供插件的分类索引 (PluginRegistry.list_by_category) — Stage 4 新增
 
 **使用方式**:
 ```python
@@ -27,11 +29,23 @@ class TasksApp(AppInterface):
     async def shutdown(self): ...
 
 AppRegistry.register(TasksApp())
+
+# 在 plugin/storage_backends/local.py
+from app.registry import PluginRegistry
+class LocalStoragePlugin(PluginInterface):
+    name = "local_storage"
+    version = "1.0.0"
+    category = "storage"
+    def install(self): ...
+    def uninstall(self): ...
+
+PluginRegistry.register(LocalStoragePlugin())
 ```
 
 **自动发现**:
 main.py 调用 `AppRegistry.discover_apps(["admin", "auth", "tasks", "annotation"])`,
 会 import app/{name}/__init__.py 触发 register() 调用, 避免手写 import 列表.
+同理 `PluginRegistry.discover_plugins(["storage_backends", ...])` 自动发现插件.
 
 **路由挂载** (Stage 2.7):
 main.py 用 `for entry in AppRegistry.iter_routes(): app.include_router(entry.router, prefix=entry.prefix, tags=entry.tags)`,
@@ -39,12 +53,13 @@ main.py 用 `for entry in AppRegistry.iter_routes(): app.include_router(entry.ro
 
 v3.0.0 Stage 2 新增
 v3.0.0 Stage 2.7: 新增 iter_routes() 辅助方法
+v3.0.0 Stage 4: 新增 PluginRegistry
 """
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from app.common.interfaces import AppInterface, RouteEntry
+    from app.common.interfaces import AppInterface, PluginInterface, RouteEntry
 
 logger = logging.getLogger(__name__)
 
@@ -159,4 +174,188 @@ class AppRegistry:
         return {name: f"v{app.version}" for name, app in cls._apps.items()}
 
 
-__all__ = ["AppRegistry"]
+class PluginRegistry:
+    """插件注册中心 (单例, Stage 4 新增)
+
+    与 AppRegistry 类似, 但索引按 (category, name) 双重键.
+    用于管理可插拔的能力后端 (存储/ML/任务队列/通知渠道).
+
+    业务代码通过 `PluginRegistry.get(category, name)` 获取插件实例,
+    或通过 `PluginRegistry.get_default(category)` 获取分类下的默认插件.
+
+    示例:
+        >>> storage = PluginRegistry.get_default("storage")  # 默认 LocalStorage
+        >>> s3_storage = PluginRegistry.get("storage", "s3")  # 显式指定 S3
+    """
+
+    _plugins: Dict[str, Dict[str, "PluginInterface"]] = {}  # category -> {name -> plugin}
+    _defaults: Dict[str, str] = {}  # category -> default_name
+
+    @classmethod
+    def register(
+        cls,
+        plugin: "PluginInterface",
+        *,
+        make_default: bool = False,
+    ) -> None:
+        """注册一个插件
+
+        Args:
+            plugin: 实现 PluginInterface 的实例
+            make_default: 是否设为该 category 的默认插件 (仅当当前无默认)
+        """
+        cat = plugin.category
+        if cat not in cls._plugins:
+            cls._plugins[cat] = {}
+        if plugin.name in cls._plugins[cat]:
+            logger.warning(
+                f"PluginRegistry: plugin '{cat}/{plugin.name}' already registered, overwriting"
+            )
+        cls._plugins[cat][plugin.name] = plugin
+        logger.info(
+            f"PluginRegistry: registered plugin '{cat}/{plugin.name}' v{plugin.version}"
+        )
+
+        # 默认插件
+        if make_default and cat not in cls._defaults:
+            cls._defaults[cat] = plugin.name
+        elif cat not in cls._defaults:
+            # 第一个注册的插件自动成为默认
+            cls._defaults[cat] = plugin.name
+
+    @classmethod
+    def set_default(cls, category: str, name: str) -> None:
+        """设置分类的默认插件"""
+        if category not in cls._plugins:
+            raise KeyError(f"PluginRegistry: category '{category}' has no plugins")
+        if name not in cls._plugins[category]:
+            raise KeyError(
+                f"PluginRegistry: plugin '{category}/{name}' not registered"
+            )
+        cls._defaults[category] = name
+        logger.info(f"PluginRegistry: default for '{category}' set to '{name}'")
+
+    @classmethod
+    def get(cls, category: str, name: Optional[str] = None) -> Optional["PluginInterface"]:
+        """获取插件实例
+
+        Args:
+            category: 分类 (storage / ml_backend / task_queue / notification)
+            name: 插件名, None = 该分类的默认插件
+
+        Returns:
+            插件实例, 不存在则 None
+        """
+        if category not in cls._plugins:
+            return None
+        if name is None:
+            name = cls._defaults.get(category)
+            if name is None:
+                return None
+        return cls._plugins[category].get(name)
+
+    @classmethod
+    def get_default(cls, category: str) -> Optional["PluginInterface"]:
+        """获取分类的默认插件 (便捷方法)"""
+        return cls.get(category)
+
+    @classmethod
+    def list_by_category(cls, category: str) -> List["PluginInterface"]:
+        """列出分类下所有已注册插件"""
+        if category not in cls._plugins:
+            return []
+        return list(cls._plugins[category].values())
+
+    @classmethod
+    def all_categories(cls) -> List[str]:
+        """获取所有已注册分类"""
+        return list(cls._plugins.keys())
+
+    @classmethod
+    def summary(cls) -> Dict[str, Dict[str, str]]:
+        """获取注册摘要 (调试用)
+
+        Returns:
+            {category: {name: version}, ...}
+        """
+        return {
+            cat: {p.name: p.version for p in plugins.values()}
+            for cat, plugins in cls._plugins.items()
+        }
+
+    @classmethod
+    def clear(cls) -> None:
+        """清空注册 (主要用于测试)"""
+        cls._plugins.clear()
+        cls._defaults.clear()
+
+    @classmethod
+    def install_all(cls) -> int:
+        """对所有已注册插件调用 install() 钩子 (Stage 4 新增)
+
+        main.py 在 lifespan startup 中调用, 触发每个插件的 install() 钩子
+        (e.g. LocalStoragePlugin 验证存储路径, SSENotificationPlugin 验证 Redis 连接).
+
+        Returns:
+            成功 install 的插件数量
+        """
+        ok_count = 0
+        for cat, plugins in cls._plugins.items():
+            for pname, plugin in plugins.items():
+                try:
+                    plugin.install()
+                    ok_count += 1
+                    logger.debug(f"PluginRegistry: installed {cat}/{pname}")
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(
+                        f"PluginRegistry: install failed for {cat}/{pname}: {e!r}"
+                    )
+        logger.info(f"PluginRegistry: install_all completed ({ok_count} plugins)")
+        return ok_count
+
+    @classmethod
+    def uninstall_all(cls) -> int:
+        """对所有已注册插件调用 uninstall() 钩子 (Stage 4 新增)
+
+        main.py 在 lifespan shutdown 中调用, 触发每个插件的清理逻辑.
+
+        Returns:
+            成功 uninstall 的插件数量
+        """
+        ok_count = 0
+        for cat, plugins in cls._plugins.items():
+            for pname, plugin in plugins.items():
+                try:
+                    plugin.uninstall()
+                    ok_count += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(
+                        f"PluginRegistry: uninstall failed for {cat}/{pname}: {e!r}"
+                    )
+        logger.info(f"PluginRegistry: uninstall_all completed ({ok_count} plugins)")
+        return ok_count
+
+    @classmethod
+    def discover_plugins(cls, category_names: Optional[List[str]] = None) -> None:
+        """自动发现并导入插件 (触发 register 调用)
+
+        Args:
+            category_names: 要发现的分类目录列表 (None = 发现所有标准分类)
+                例如 ["storage_backends", "ml_backends", "task_queues", "notification_channels"]
+        """
+        if category_names is None:
+            category_names = [
+                "storage_backends",
+                "ml_backends",
+                "task_queues",
+                "notification_channels",
+            ]
+        for cat in category_names:
+            try:
+                __import__(f"plugin.{cat}", fromlist=["__init__"])
+                logger.debug(f"PluginRegistry: discovered category '{cat}'")
+            except ImportError as e:
+                logger.warning(f"PluginRegistry: category '{cat}' not found, skipped: {e}")
+
+
+__all__ = ["AppRegistry", "PluginRegistry"]

@@ -54,6 +54,12 @@ except Exception:
 # 调用, 之后 iter_routes() 即可拿到全部 14 个 RouteEntry.
 AppRegistry.discover_apps(["admin", "auth", "tasks", "annotation"])
 
+# ---- Stage 4: 自动发现 + 注册插件 ----
+# 触发 plugin/{storage_backends,ml_backends,task_queues,notification_channels}/__init__.py 的
+# PluginRegistry.register(...) 调用. 业务代码可通过 PluginRegistry.get_default(...) 获取.
+from app.registry import PluginRegistry as _PR  # noqa: E402
+_PR.discover_plugins(["storage_backends", "ml_backends", "task_queues", "notification_channels"])
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -80,6 +86,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("AppRegistry.startup_all failed")
         raise
+    # 调用各插件的 install 钩子 (Stage 4)
+    try:
+        from app.registry import PluginRegistry as _PR_install  # noqa: PLC0415
+        _PR_install.install_all()
+    except Exception:
+        logger.exception("PluginRegistry.install_all failed (non-fatal)")
     logger.info("Application started")
     yield
     # ---- 关闭 ----
@@ -88,6 +100,12 @@ async def lifespan(app: FastAPI):
         await AppRegistry.shutdown_all()
     except Exception:  # noqa: BLE001
         logger.exception("AppRegistry.shutdown_all failed")
+    # 调用各插件的 uninstall 钩子 (Stage 4)
+    try:
+        from app.registry import PluginRegistry as _PR_uninstall  # noqa: PLC0415
+        _PR_uninstall.uninstall_all()
+    except Exception:  # noqa: BLE001
+        logger.exception("PluginRegistry.uninstall_all failed (non-fatal)")
     # 优雅释放数据库连接池与 Redis 连接，避免热重启丢数据/泄漏连接
     logger.info("Shutting down, disposing resources...")
     try:
