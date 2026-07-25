@@ -148,6 +148,16 @@ class Settings(BaseSettings):
     # 慢请求阈值 (毫秒), 超过则 WARNING 日志
     REQUEST_SLOW_THRESHOLD_MS: int = int(os.getenv("REQUEST_SLOW_THRESHOLD_MS", "500"))
 
+    # ===== Stage 5: 业务缓存层 =====
+    # 缓存总开关 (生产可关闭, 开发默认开启)
+    CACHE_ENABLED: bool = os.getenv("CACHE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    # 默认 TTL (秒)
+    CACHE_DEFAULT_TTL: int = int(os.getenv("CACHE_DEFAULT_TTL", "300"))
+    # key 前缀 (避免多服务共用 Redis 时冲突)
+    CACHE_KEY_PREFIX: str = os.getenv("CACHE_KEY_PREFIX", "app:")
+    # 慢 SQL 阈值 (毫秒)
+    SQL_SLOW_THRESHOLD_MS: int = int(os.getenv("SQL_SLOW_THRESHOLD_MS", "200"))
+
     # ===== ML =====
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "efficientnet_b0")
     DEFAULT_BASE_MODEL: Optional[str] = None  # 兼容旧名

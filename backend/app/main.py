@@ -71,27 +71,36 @@ async def lifespan(app: FastAPI):
     - 保留: 数据库 init / 资源释放 / ultralytics 配置 (这些是跨应用基础设施)
     """
     # ---- 启动 ----
-    await init_db()
+    # Stage 5.1: 启动耗时分析
+    from app.core.startup_profiler import startup_profiler
+    startup_profiler.begin()
+    with startup_profiler.step("init_db"):
+        await init_db()
     # v2.5.29: ultralytics 路径集中配置 (与 worker 启动时一致)
     # 防止 API 进程第一次调用 YOLO(...) 时把 .pt 落到 cwd
-    try:
-        from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
-        configure_ultralytics()
-        migrate_legacy_yolo_weights()
-    except Exception as e:
-        logger.warning(f"ultralytics_setup 失败, 不影响 API 启动: {e}")
+    with startup_profiler.step("ultralytics_setup"):
+        try:
+            from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+            configure_ultralytics()
+            migrate_legacy_yolo_weights()
+        except Exception as e:
+            logger.warning(f"ultralytics_setup 失败, 不影响 API 启动: {e}")
     # 调用各应用的 startup 钩子 (Stage 2.7)
-    try:
-        await AppRegistry.startup_all()
-    except Exception:
-        logger.exception("AppRegistry.startup_all failed")
-        raise
+    with startup_profiler.step("app_startup"):
+        try:
+            await AppRegistry.startup_all()
+        except Exception:
+            logger.exception("AppRegistry.startup_all failed")
+            raise
     # 调用各插件的 install 钩子 (Stage 4)
-    try:
-        from app.registry import PluginRegistry as _PR_install  # noqa: PLC0415
-        _PR_install.install_all()
-    except Exception:
-        logger.exception("PluginRegistry.install_all failed (non-fatal)")
+    with startup_profiler.step("plugin_install"):
+        try:
+            from app.registry import PluginRegistry as _PR_install  # noqa: PLC0415
+            _PR_install.install_all()
+        except Exception:
+            logger.exception("PluginRegistry.install_all failed (non-fatal)")
+    # 启动完成后输出报告
+    startup_profiler.report()
     logger.info("Application started")
     yield
     # ---- 关闭 ----

@@ -1,9 +1,16 @@
 """
-System API: Health / Info (app/admin/api/)
-========================================
+System API: Health / Info / Metrics (app/admin/api/)
+====================================================
 
 **v3.0.0 Stage 2.5 迁移**: 从 app/api/system.py 迁入 admin 应用
 (system 端点属于系统级管理面, 归属 admin 应用)
+
+**v3.0.0 Stage 5.3 扩展**: 新增 /api/metrics 监控聚合端点
+- 启动耗时 (StartupProfiler)
+- 缓存 hit/miss 统计
+- 慢 SQL 监控 (前 10 条 + 累计计数)
+- 注册中心快照 (AppRegistry + PluginRegistry)
+- 进程级资源 (CPU/内存/线程数)
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
@@ -100,3 +107,96 @@ async def system_info():
         "upload_dir": str(settings.UPLOAD_DIR),
         "model_dir": str(settings.MODEL_DIR),
     }
+
+
+# ============== Stage 5.3: 监控聚合端点 ==============
+
+@router.get("/metrics")
+async def metrics():
+    """监控聚合端点 (无需鉴权, 但建议生产环境加白名单)
+
+    返回 4 大维度:
+    - apps/plugins: 注册中心快照
+    - cache: 缓存 hit/miss 统计
+    - sql: 慢 SQL 监控 (前 10 + 累计)
+    - process: 进程级资源 (CPU/内存/线程)
+
+    设计: 全部为只读操作, 单次响应 < 100ms
+    """
+    import os
+    import platform
+    import threading
+    import time
+
+    result: dict = {
+        "ts": int(time.time()),
+        "env": settings.APP_ENV,
+    }
+
+    # 1) 注册中心快照
+    try:
+        from app.registry import AppRegistry, PluginRegistry
+        result["apps"] = {
+            "count": len(AppRegistry.all_apps()),
+            "summary": AppRegistry.summary(),
+        }
+        result["plugins"] = {
+            "categories": PluginRegistry.all_categories(),
+            "summary": PluginRegistry.summary(),
+        }
+    except Exception as e:  # noqa: BLE001
+        result["registry_err"] = str(e)[:200]
+
+    # 2) 缓存统计
+    try:
+        from app.core.cache import cache
+        result["cache"] = cache.get_stats()
+    except Exception as e:  # noqa: BLE001
+        result["cache"] = {"err": str(e)[:200]}
+
+    # 3) 慢 SQL 监控
+    try:
+        from app.database.slow_sql import get_stats
+        result["sql"] = get_stats()
+    except Exception as e:  # noqa: BLE001
+        result["sql"] = {"err": str(e)[:200]}
+
+    # 4) 进程级资源
+    try:
+        proc_status: dict = {}
+        # 尝试 /proc/self/status (Linux/Mac)
+        try:
+            with open(f"/proc/{os.getpid()}/status") as f:
+                for line in f:
+                    if line.startswith(("VmRSS:", "VmSize:", "Threads:")):
+                        key, val = line.strip().split(":", 1)
+                        proc_status[key.strip()] = val.strip()
+        except (FileNotFoundError, OSError):
+            # Windows: 用 psutil (可选) 或退化为线程数
+            proc_status["threads"] = str(threading.active_count())
+
+        # 通用字段
+        result["process"] = {
+            "pid": os.getpid(),
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "threads_alive": threading.active_count(),
+            "proc_status": proc_status,
+        }
+    except Exception as e:  # noqa: BLE001
+        result["process"] = {"err": str(e)[:200]}
+
+    # 5) 数据库连接池状态 (Stage 5.3 新增)
+    try:
+        from app.database import engine
+        pool = engine.pool
+        result["db_pool"] = {
+            "size": pool.size(),
+            "checked_in": pool.checkedin(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+        }
+    except Exception as e:  # noqa: BLE001
+        result["db_pool"] = {"err": str(e)[:200]}
+
+    return result

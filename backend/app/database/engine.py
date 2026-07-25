@@ -45,5 +45,15 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+# Stage 5.4: 绑定慢 SQL 监控 (event listener)
+# 必须在 engine 创建后立即绑定, 后续会话才生效
+try:
+    from app.database.slow_sql import setup_slow_sql_monitor
+    setup_slow_sql_monitor(engine)
+except Exception as e:  # noqa: BLE001
+    import logging
+    logging.getLogger(__name__).warning(f"setup_slow_sql_monitor failed: {e!r}")
+
+
 # Re-export for convenience
 __all__ = ["engine", "AsyncSessionLocal"]
