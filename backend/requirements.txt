@@ -12,8 +12,9 @@ alembic==1.13.1
 
 # Auth & Security
 python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
 bcrypt==4.1.2
+# v3.0.0 审查修复 P2-8: 移除未用的 passlib (1.7.4 自 2020 未维护, 与 bcrypt 4.x 有兼容警告)
+# passlib[bcrypt]==1.7.4
 
 # Pydantic
 pydantic==2.6.1
@@ -42,6 +43,8 @@ redis==5.0.3
 
 # Storage
 minio==7.2.4
+# v3.0.0 审查修复 P1-1: 异步文件 IO, 避免阻塞 FastAPI event loop
+aiofiles==23.2.1
 
 # Config
 python-dotenv==1.0.1
