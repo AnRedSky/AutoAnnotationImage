@@ -1,45 +1,13 @@
 """
-Celery Configuration
-====================
-异步任务队列, 用于模型训练、批量推理
+兼容垫片 (Stage 2.6): celery_app
+================================
+
+**v3.0.0 Stage 2.6 迁移**: Celery 实例已迁入 app.tasks.workers.celery_app,
+本文件 re-export 同一对象, 避免任务重复注册 (Celery 任务注册是模块级的,
+新旧路径都引用同一个 celery_app, 注册只发生一次).
 """
-from celery import Celery
-from app.config import settings
+from app.tasks.workers.celery_app import celery_app  # noqa: F401
+from app.tasks.workers.celery_app import celery_app as _celery_app  # noqa: F401
 
 
-celery_app = Celery(
-    "image_annotation",
-    broker=settings.CELERY_BROKER,
-    backend=settings.CELERY_BACKEND,
-    # include 让 worker 启动时自动 import 任务模块，
-    # 这样 @celery_app.task 装饰器就会运行并把任务注册到 celery_app.tasks
-    # v2.5.15 P0-3 修复: 增加 segmentation_tasks, 否则 worker 启动时不会自动 import
-    # 分割任务, 调 train_segmentation_task / auto_annotate_segmentation_task 会报 NotRegistered
-    include=[
-        "app.workers.tasks",
-        "app.workers.detection_tasks",  # v2.0.0 目标检测
-        "app.workers.segmentation_tasks",  # v2.0.0 图像分割 (v2.5.15 补)
-    ],
-)
-
-celery_app.conf.update(
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-    timezone="Asia/Shanghai",
-    enable_utc=False,
-    task_time_limit=3600,        # 1 hour hard limit
-    task_soft_time_limit=3300,    # 55 min soft limit
-    worker_max_tasks_per_child=10,
-    worker_prefetch_multiplier=1,
-    # 快速失败: Redis 不可用时不要长时间阻塞 .delay() 调用
-    broker_connection_retry_on_startup=True,
-    broker_connection_max_retries=2,
-    broker_transport_options={"visibility_timeout": 30},
-    result_backend_transport_options={"visibility_timeout": 30},
-    # ===== Worker 并发默认值 (CLI --pool/--concurrency 可覆盖) =====
-    # solo 池下 worker_concurrency 被忽略, threads 池下表示同时跑的线程数
-    # Windows 上 prefork 不可用, 推荐 threads
-    worker_pool=settings.CELERY_WORKER_POOL,
-    worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,
-)
+__all__ = ["celery_app", "_celery_app"]
