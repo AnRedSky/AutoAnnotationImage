@@ -7,8 +7,8 @@ Detection ML Package (v2.0.0 目标检测 / v3.0.0 Stage 2.6 重定位)
 - yolo_train: YOLOv8 微调 (返回 best.pt + 指标)
 - yolo_predict: 单图/批量推理 (输出归一化 bbox)
 
-**v3.0.0 Stage 2.6 迁移**: 原 app.ml.detection 重定位至 app.tasks.ml.detection,
-app.ml.detection 转为兼容垫片.
+**v3.0.0 Stage 2.6 迁移**: 原 app.tasks.ml.detection 重定位至 app.tasks.ml.detection,
+app.tasks.ml.detection 转为兼容垫片.
 
 约定:
 - ultralytics 全部 lazy import, 模块导入无需装 ultralytics

@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from PIL import Image as PILImage
 from torchvision import transforms
 
-from app.services.storage_service import storage_service
+from app.common.storage.storage_service import storage_service
 
 
 def _build_model_for_predict(backbone: str, num_classes: int) -> nn.Module:

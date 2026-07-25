@@ -3,11 +3,11 @@ Celery Configuration (v3.0.0 Stage 2.6 重定位)
 ================================================
 异步任务队列, 用于模型训练、批量推理.
 
-**v3.0.0 Stage 2.6 迁移**: 原 app.workers.celery_app 重定位至 app.tasks.workers.celery_app,
-app.workers.celery_app 转为兼容垫片 (re-export 同一对象, 避免 task 重复注册).
+**v3.0.0 Stage 2.6 迁移**: 原 app.tasks.workers.celery_app 重定位至 app.tasks.workers.celery_app,
+app.tasks.workers.celery_app 转为兼容垫片 (re-export 同一对象, 避免 task 重复注册).
 """
 from celery import Celery
-from app.config import settings
+from app.core.config import settings
 
 
 celery_app = Celery(
@@ -16,11 +16,11 @@ celery_app = Celery(
     backend=settings.CELERY_BACKEND,
     # include 让 worker 启动时自动 import 任务模块，
     # 这样 @celery_app.task 装饰器就会运行并把任务注册到 celery_app.tasks
-    # v3.0.0 Stage 2.6 迁移: include 路径全部从 app.workers.* 改为 app.tasks.workers.*
+    # v3.0.0 Stage 2.6 迁移: include 路径全部从 app.tasks.workers.* 改为 app.tasks.workers.*
     include=[
-        "app.tasks.workers.classification",  # 原 app.workers.tasks
-        "app.tasks.workers.detection",       # 原 app.workers.detection_tasks
-        "app.tasks.workers.segmentation",    # 原 app.workers.segmentation_tasks
+        "app.tasks.workers.classification",  # 原 app.tasks.workers.classification
+        "app.tasks.workers.detection",       # 原 app.tasks.workers.detection
+        "app.tasks.workers.segmentation",    # 原 app.tasks.workers.segmentation
     ],
 )
 

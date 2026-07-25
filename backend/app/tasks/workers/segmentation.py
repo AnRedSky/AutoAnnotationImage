@@ -5,7 +5,7 @@ Celery Tasks: 图像分割训练 + 自动标注 (v3.0.0 Phase 5 薄化 / Stage 2
 - train_segmentation_task:        训练 DeepLabV3+ (委托 TrainingLifecycleService)
 - auto_annotate_segmentation_task: 用已训练模型批量预测, 结果入库 SegmentationMask
 
-**v3.0.0 Stage 2.6 迁移**: 原 app.workers.segmentation_tasks 重定位至 app.tasks.workers.segmentation.
+**v3.0.0 Stage 2.6 迁移**: 原 app.tasks.workers.segmentation 重定位至 app.tasks.workers.segmentation.
 **v3.0.0 Phase 5 重构**:
 - 业务编排 (TrainingJob 状态机 / sticky_meta / 历史推送 / 失败清理) 全部下沉到
   TrainingLifecycleService, worker 主体从 ~470 行减到 ~280 行
@@ -29,7 +29,7 @@ os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytic
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
-from app.config import settings  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 # v2.5.29: ultralytics 路径强制覆盖
 from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
@@ -55,7 +55,7 @@ def train_segmentation_task(
     """启动分割训练 (DeepLabV3+, Phase 5: 编排下沉到 TrainingLifecycleService)"""
     from app.tasks.ml.segmentation.seg_dataset import collect_segmentation_pairs
     from app.tasks.ml.segmentation.seg_train import train_segmentation
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
     started_at = datetime.utcnow()
@@ -88,7 +88,7 @@ def train_segmentation_task(
     async def _load_categories():
         from sqlalchemy import select
         from app.database import AsyncSessionLocal
-        from app.model.category import Category
+        from app.tasks.model.category import Category
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(
                 select(Category).where(Category.dataset_id == dataset_id)
@@ -146,7 +146,7 @@ def train_segmentation_task(
         async def _count_classes():
             from sqlalchemy import select
             from app.database import AsyncSessionLocal
-            from app.model.category import Category
+            from app.tasks.model.category import Category
             async with AsyncSessionLocal() as db:
                 rows = (await db.execute(
                     select(Category).where(Category.dataset_id == dataset_id)
@@ -216,7 +216,7 @@ def train_segmentation_task(
 
 def _finish_failed(self, job_id: int, error_msg: str, started_at: datetime, task_id: str):
     """训练失败统一清理 (Phase 5: 委托 TrainingLifecycleService)"""
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     sticky_meta = TrainingLifecycleService.get_last_sticky_meta(task_id)
     TrainingLifecycleService.mark_failure_sync(
@@ -247,17 +247,17 @@ def auto_annotate_segmentation_task(
     device: str = "cpu",
 ):
     """用训练好的分割模型对 dataset 全部图跑推理, 写 SegmentationMask (Phase 5: 编排下沉)"""
-    from app.ml.segmentation.seg_predict import (
+    from app.tasks.ml.segmentation.seg_predict import (
         load_model, predict_to_mask_image, save_mask_pil,
     )
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
 
     # ---- 1) 加载 ModelVersion + state_dict ----
     async def _load_mv():
         from app.database import AsyncSessionLocal
-        from app.model.model_version import ModelVersion
+        from app.tasks.model.model_version import ModelVersion
         async with AsyncSessionLocal() as db:
             mv = await db.get(ModelVersion, model_version_id)
             if not mv or not mv.file_path:
@@ -282,7 +282,7 @@ def auto_annotate_segmentation_task(
     async def _load_images():
         from sqlalchemy import select
         from app.database import AsyncSessionLocal
-        from app.model.image import Image as ImageModel
+        from app.tasks.model.image import Image as ImageModel
         async with AsyncSessionLocal() as db:
             return (await db.execute(
                 select(ImageModel).where(
@@ -296,7 +296,7 @@ def auto_annotate_segmentation_task(
         return {"status": "FAILURE"}
 
     # ---- 3) 推理 ----
-    from app.services.storage_service import storage_service
+    from app.common.storage.storage_service import storage_service
     base = Path(storage_service.base_dir)
     image_paths = [str((base / im.storage_path).resolve()) for im in images]
     try:
@@ -313,7 +313,7 @@ def auto_annotate_segmentation_task(
     import io
     from sqlalchemy import select
     from app.database import AsyncSessionLocal
-    from app.model.segmentation_mask import SegmentationMask
+    from app.annotation.model.segmentation_mask import SegmentationMask
 
     saved = 0
     skipped = 0

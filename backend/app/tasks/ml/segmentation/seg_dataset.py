@@ -19,9 +19,9 @@ from torch.utils.data import Dataset
 import torch
 from torchvision import transforms
 
-from app.model.image import Image as ImageModel
-from app.model.segmentation_mask import SegmentationMask
-from app.services.storage_service import storage_service
+from app.tasks.model.image import Image as ImageModel
+from app.annotation.model.segmentation_mask import SegmentationMask
+from app.common.storage.storage_service import storage_service
 
 
 def _resolve_path(rel: str) -> Path:

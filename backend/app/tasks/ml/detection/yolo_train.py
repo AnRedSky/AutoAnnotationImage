@@ -88,7 +88,7 @@ def train_yolo(
         raise YoloTrainError(f"epochs 必须 >= 1, 实际 {epochs}")
 
     if project is None:
-        from app.config import settings
+        from app.core.config import settings
         project = str(settings.MODEL_DIR / "runs")
 
     started = datetime.utcnow()
@@ -112,7 +112,7 @@ def train_yolo(
     # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
     # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.core.ultralytics_setup.
     if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
-        from app.config import settings
+        from app.core.config import settings
         candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"
         if candidate.exists():
             try:
@@ -210,7 +210,7 @@ def cleanup_old_runs(keep_last: int = 3) -> int:
     保留最近 N 次训练 run, 清理更早的 (节省磁盘)
     返回被清理的 run 数量
     """
-    from app.config import settings
+    from app.core.config import settings
     base = settings.MODEL_DIR / "runs"
     if not base.exists():
         return 0

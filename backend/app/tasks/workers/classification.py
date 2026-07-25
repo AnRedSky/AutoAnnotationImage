@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from app.workers.celery_app import celery_app
+from app.tasks.workers.celery_app import celery_app
 from app.utils.async_helpers import run_async_in_worker as _run_async
 from app.core.redis_client import redis_client
 
@@ -30,7 +30,7 @@ try:
     import huggingface_hub.constants as _hf_const
     _hf_const.HF_HUB_DISABLE_SYMLINKS = True
     _hf_const.HF_HUB_DISABLE_SYMLINKS_WARNING = True
-    from app.config import settings as _settings
+    from app.core.config import settings as _settings
     if _settings.HF_ENDPOINT:
         _hf_const.HF_ENDPOINT = _settings.HF_ENDPOINT
         _hf_const.HUGGINGFACE_HUB_ENDPOINT = _settings.HUGGINGFACE_HUB_ENDPOINT
@@ -39,7 +39,7 @@ try:
 except Exception:
     pass
 
-from app.config import settings  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 # ---- v2.5.29: ultralytics 路径强制覆盖 ----
 from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
@@ -62,7 +62,8 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     - 写入 TrainingJob 任务历史
     """
     from app.tasks.ml.classification import run_training, TrainingPaused
-    from app.services import TrainingLifecycleService, TrainingDataService
+    from app.tasks.service.training_data_service import TrainingDataService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
     started_at = datetime.utcnow()
@@ -163,7 +164,7 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             """关联 ModelVersion (取 file_path 最新的)"""
             from sqlalchemy import select
             from app.database import AsyncSessionLocal
-            from app.model.model_version import ModelVersion
+            from app.tasks.model.model_version import ModelVersion
             if not result.get("model_path"):
                 return None
             async with AsyncSessionLocal() as db:
@@ -270,7 +271,8 @@ def auto_annotate_task(self, dataset_id: int, model_name: str,
     - base model 输出过滤到只含项目类目, 无匹配则不标注
     - 返回 { total, auto_labeled, need_human, no_match }
     """
-    from app.services import AutoAnnotateService, TrainingLifecycleService
+    from app.tasks.service.auto_annotate_service import AutoAnnotateService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
     TrainingLifecycleService.set_task_state(self, "PROGRESS", {
@@ -302,16 +304,16 @@ def auto_annotate_task(self, dataset_id: int, model_name: str,
 
 
 # ============== 兼容垫片 (Phase 5.6 清理) ==============
-# 旧 detection/segmentation worker 通过 `from app.workers.tasks import _update_training_history`
+# 旧 detection/segmentation worker 通过 `from app.tasks.workers.classification import _update_training_history`
 # 调用. Phase 5 重构后这些函数已迁移到 TrainingLifecycleService, 这里保留导入转发避免破坏.
 
 def _update_training_history(task_id: str, history: list) -> None:
     """兼容垫片: 委托给 TrainingLifecycleService.push_history"""
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
     TrainingLifecycleService.push_history(task_id, history)
 
 
 def _persist_dataset_stats(task_id: str, extra: dict) -> None:
     """兼容垫片: 委托给 TrainingLifecycleService.persist_dataset_stats_sync"""
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
     TrainingLifecycleService.persist_dataset_stats_sync(task_id, extra)

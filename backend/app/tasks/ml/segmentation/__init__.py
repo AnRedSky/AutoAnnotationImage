@@ -8,7 +8,7 @@ Segmentation ML Package (v2.0.0 图像分割 / v3.0.0 Stage 2.6 完整迁移)
 - 训练函数接受 progress_cb 回调, 写 TrainingJob.progress
 - 推理输出 PIL 索引图 (P-mode), 像素值 = 类别索引
 
-**v3.0.0 Stage 2.6**: 内容从原 app.ml.segmentation 迁入, app.ml.segmentation 转为
+**v3.0.0 Stage 2.6**: 内容从原 app.tasks.ml.segmentation 迁入, app.tasks.ml.segmentation 转为
 兼容垫片. 在本 __init__ 中聚合导出常用 API, 简化 `from app.tasks.ml.segmentation import X`.
 """
 from app.tasks.ml.segmentation.seg_dataset import (

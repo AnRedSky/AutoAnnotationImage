@@ -6,7 +6,7 @@ Celery Tasks: 目标检测训练 + 自动标注 (v3.0.0 Phase 5 薄化 / Stage 2
 - auto_annotate_detection_task: 用已训练模型批量预测
 - auto_annotate_pretrained_task: 用预训练 YOLOv8 批量预测
 
-**v3.0.0 Stage 2.6 迁移**: 原 app.workers.detection_tasks 重定位至 app.tasks.workers.detection.
+**v3.0.0 Stage 2.6 迁移**: 原 app.tasks.workers.detection 重定位至 app.tasks.workers.detection.
 **v3.0.0 Phase 5 重构**:
 - 业务编排 (TrainingJob 状态机 / sticky_meta / 历史推送 / 失败清理) 全部下沉到
   TrainingLifecycleService, worker 主体从 ~700 行减到 ~350 行
@@ -32,7 +32,7 @@ os.environ.setdefault("ULTRALYTICS_HOME", str(Path(_cache_dir_env) / "ultralytic
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
-from app.config import settings  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 # v2.5.29: ultralytics 路径强制覆盖
 from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
@@ -56,8 +56,8 @@ def train_detection_task(
     device: str = "cpu",
 ):
     """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)"""
-    from app.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
-    from app.services import TrainingLifecycleService
+    from app.tasks.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
     started_at = datetime.utcnow()
@@ -199,7 +199,7 @@ def train_detection_task(
 
 def _finish_failed(self, job_id: int, exc: Exception, started_at: datetime, task_id: str):
     """训练失败统一清理 (Phase 5: 委托 TrainingLifecycleService)"""
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     sticky_meta = TrainingLifecycleService.get_last_sticky_meta(task_id)
     TrainingLifecycleService.mark_failure_sync(
@@ -233,7 +233,7 @@ def auto_annotate_detection_task(
 ):
     """用已训练好的 YOLOv8 模型批量预标注 (Phase 5: 编排下沉)"""
     from app.tasks.ml.detection import predict_image_grouped, YoloTrainError
-    from app.services import TrainingLifecycleService
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
 
@@ -241,7 +241,7 @@ def auto_annotate_detection_task(
         # ---- 1) 加载 ModelVersion ----
         async def _load_mv():
             from app.database import AsyncSessionLocal
-            from app.model.model_version import ModelVersion
+            from app.tasks.model.model_version import ModelVersion
             async with AsyncSessionLocal() as db:
                 return await db.get(ModelVersion, model_version_id)
         mv = _run_async(_load_mv())
@@ -252,9 +252,9 @@ def auto_annotate_detection_task(
         async def _load_data():
             from sqlalchemy import select
             from app.database import AsyncSessionLocal
-            from app.model.image import Image as ImageModel
-            from app.model.category import Category
-            from app.services.storage_service import storage_service
+            from app.tasks.model.image import Image as ImageModel
+            from app.tasks.model.category import Category
+            from app.common.storage.storage_service import storage_service
             async with AsyncSessionLocal() as db:
                 imgs = (await db.execute(
                     select(ImageModel).where(
@@ -297,8 +297,8 @@ def auto_annotate_detection_task(
         )
 
         # ---- 4) 写 BBoxAnnotation (worker 内联, 数据访问) ----
-        from app.model.bbox_annotation import BBoxAnnotation
-        from app.model.annotation_log import AnnotationLog
+        from app.annotation.model.bbox_annotation import BBoxAnnotation
+        from app.tasks.model.annotation_log import AnnotationLog
         from sqlalchemy import select, delete as sa_delete
         from app.database import AsyncSessionLocal
 
@@ -378,8 +378,8 @@ def auto_annotate_pretrained_task(
     overwrite_existing: bool = False,
 ):
     """用 ultralytics 预训练 YOLOv8n/s/m/l/x 做 detection 数据集预标注 (Phase 5: 编排下沉)"""
-    from app.ml.detection import predict_image_grouped, YoloTrainError
-    from app.services import TrainingLifecycleService
+    from app.tasks.ml.detection import predict_image_grouped, YoloTrainError
+    from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
 
@@ -394,9 +394,9 @@ def auto_annotate_pretrained_task(
         async def _load_data():
             from sqlalchemy import select
             from app.database import AsyncSessionLocal
-            from app.model.image import Image as ImageModel
-            from app.model.category import Category
-            from app.services.storage_service import storage_service
+            from app.tasks.model.image import Image as ImageModel
+            from app.tasks.model.category import Category
+            from app.common.storage.storage_service import storage_service
             async with AsyncSessionLocal() as db:
                 imgs = (await db.execute(
                     select(ImageModel).where(
@@ -450,8 +450,8 @@ def auto_annotate_pretrained_task(
         )
 
         # ---- 4) 写 BBoxAnnotation (pretrained 模式带 model_name 审计) ----
-        from app.model.bbox_annotation import BBoxAnnotation
-        from app.model.annotation_log import AnnotationLog
+        from app.annotation.model.bbox_annotation import BBoxAnnotation
+        from app.tasks.model.annotation_log import AnnotationLog
         from sqlalchemy import delete as sa_delete
         from app.database import AsyncSessionLocal
 

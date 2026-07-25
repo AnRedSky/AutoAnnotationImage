@@ -33,11 +33,11 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.model import Image as ImageModel
-from app.model import Category
-from app.model.bbox_annotation import BBoxAnnotation
-from app.services.bbox_service import bbox_to_yolo_line, validate_normalized_bbox
-from app.services.storage_service import storage_service
+from app.tasks.model.image import Image as ImageModel
+from app.tasks.model.category import Category
+from app.annotation.model.bbox_annotation import BBoxAnnotation
+from app.common.geometry.bbox_service import bbox_to_yolo_line, validate_normalized_bbox
+from app.common.storage.storage_service import storage_service
 
 
 ProgressCallback = Optional[Callable[[str, int, int, str], None]]
