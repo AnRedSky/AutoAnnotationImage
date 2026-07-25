@@ -89,7 +89,7 @@ const goTraining = () => router.push('/training')
       <!-- ===== 过滤组 ===== -->
       <div class="filter-group filter-group--filter">
         <el-select v-model="localStatusFilter" size="default" placeholder="状态"
-          class="filter-cell filter-cell--select app-select app-select--medium">
+          class="filter-cell filter-cell--select app-select app-select--medium filter-cell--status">
           <el-option
             v-for="opt in statusOptions" :key="opt.value"
             :label="opt.label" :value="opt.value"
@@ -173,17 +173,18 @@ const goTraining = () => router.push('/training')
       <div class="filter-group filter-group--aux">
         <el-button
           plain
+          size="small"
           :type="allOnPageSelected ? 'primary' : 'default'"
           :icon="allOnPageSelected ? Minus : Check"
           @click="emit('toggleSelectAll')"
           class="filter-cell filter-cell--btn"
         >{{ allOnPageSelected ? '取消' : '全选' }}</el-button>
-        <el-tag v-if="selectedCount > 0" type="warning" effect="dark" size="default" class="batch-count">
+        <el-tag v-if="selectedCount > 0" type="warning" effect="dark" size="small" class="batch-count">
           {{ selectedCount }}
         </el-tag>
-        <el-button :disabled="selectedCount === 0" type="warning"
+        <el-button size="small" :disabled="selectedCount === 0" type="warning"
           :icon="RefreshLeft" @click="emit('batchClear')" class="filter-cell filter-cell--btn">清除标注</el-button>
-        <el-button :disabled="selectedCount === 0" type="danger"
+        <el-button size="small" :disabled="selectedCount === 0" type="danger"
           :icon="Delete" @click="emit('batchDelete')" class="filter-cell filter-cell--btn">删除</el-button>
         <div class="view-mode-switch" :title="viewMode === 'grid' ? '网格视图' : '列表视图'">
           <button
@@ -241,31 +242,36 @@ const goTraining = () => router.push('/training')
 }
 .filter-card :deep(.el-card__body) { padding: 12px 16px; }
 
-/* 单行紧凑布局: flex + flex-wrap */
+/* 单行紧凑布局: flex + flex-wrap (内容超出时换行) */
 .filter-row--single {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px;
   width: 100%;
 }
 .filter-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .filter-group:not(:last-child) {
   border-right: 1px solid var(--border-soft);
-  padding-right: 12px;
+  padding-right: 8px;
 }
-.filter-group--filter { flex: 1 1 280px; min-width: 240px; }
-.filter-group--ai     { flex: 1 1 360px; min-width: 320px; }
+.filter-group--filter { flex: 0 1 260px; min-width: 260px; }
+.filter-group--ai     { flex: 0 1 auto; min-width: 0; }
 .filter-group--ops    { flex: 0 0 auto; }
-.filter-group--aux    { flex: 0 0 auto; margin-left: auto; }
+.filter-group--aux    { flex: 0 0 auto; margin-left: auto; gap: 4px; }
 
 .filter-cell { flex: 0 0 auto; }
-.filter-cell--search { flex: 1 1 180px; min-width: 160px; }
+.filter-cell--status { flex: 0 0 88px; min-width: 88px; }
+.filter-cell--search { flex: 1 1 140px; min-width: 120px; max-width: 180px; }
+
+/* AI 组内: 模型下拉允许收缩, 阈值行紧凑 */
+.filter-group--ai .app-select { min-width: 0; flex: 0 0 200px; }
+.filter-group--ai > .el-tooltip:first-child { flex: 0 0 200px; min-width: 0; }
 
 /* 模型选项行内三段: 名称 + 灰字基础模型 + 绿字准确率 */
 .model-option-row { display: flex; align-items: center; gap: 6px; }
@@ -273,11 +279,11 @@ const goTraining = () => router.push('/training')
 .model-option-acc { margin-left: auto; color: #67c23a; font-size: 12px; }
 
 /* 阈值行内联: 紧凑模式 */
-.threshold-row--inline { display: flex; align-items: center; gap: 4px; }
-.threshold-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
-.threshold-slider--inline { margin: 0 4px; }
+.threshold-row--inline { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; min-width: 0; }
+.threshold-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; flex: 0 0 auto; }
+.threshold-slider--inline { margin: 0 4px; flex: 0 0 120px; min-width: 120px; }
 .threshold-slider--inline :deep(.el-slider__runway) { margin: 0 6px; }
-.threshold-value { font-weight: 600; min-width: 44px; text-align: center; flex: 0 0 auto; }
+.threshold-value { font-weight: 600; min-width: 40px; text-align: center; flex: 0 0 auto; font-size: 12px; }
 
 .batch-count { font-weight: 600; }
 
@@ -291,7 +297,7 @@ const goTraining = () => router.push('/training')
 .mode-btn {
   background: transparent;
   border: 0;
-  padding: 6px 8px;
+  padding: 4px 6px;
   cursor: pointer;
   color: var(--text-secondary);
   display: inline-flex;
@@ -342,9 +348,11 @@ const goTraining = () => router.push('/training')
     border-right: none;
     padding-right: 0;
   }
-  .filter-group--aux { margin-left: 0; }
+  .filter-group--aux { margin-left: 0; flex-basis: 100%; justify-content: flex-end; }
   .filter-group { flex-basis: 100%; }
   .filter-group--ai { flex-basis: 100%; }
   .filter-cell--search { width: 100%; flex: 1 1 100%; }
+  .threshold-row--inline { flex: 1 1 100%; min-width: 0; }
+  .threshold-slider--inline { flex: 1 1 auto; min-width: 100px; }
 }
 </style>
