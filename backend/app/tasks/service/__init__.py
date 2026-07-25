@@ -30,7 +30,9 @@ from app.tasks.service.training_data_service import TrainingDataService
 from app.tasks.service.auto_annotate_service import (
     AutoAnnotateService, AutoAnnotateResult, ASYNC_THRESHOLD,
 )
-from app.tasks.service.annotation_service import AnnotationService
+# v3.0.0 审查修复: AnnotationService 已迁入 annotation 应用
+# 业务方应 `from app.annotation.service import AnnotationService`
+# 此处不再 re-export 以避免循环导入 (annotation 反向 import tasks 数据服务)
 from app.tasks.service.detection_service import DetectionService
 from app.tasks.service.segmentation_service import SegmentationService
 
@@ -59,7 +61,7 @@ __all__ = [
     "TrainingLifecycleService",
     "TrainingDataService",
     "AutoAnnotateService", "AutoAnnotateResult", "ASYNC_THRESHOLD",
-    "AnnotationService",
+    # AnnotationService 已迁入 annotation 应用, 不再在此 re-export
     "DetectionService",
     "SegmentationService",
     # 跨应用工具
