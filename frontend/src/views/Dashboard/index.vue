@@ -291,7 +291,7 @@ const updateEfficiencyChart = () => {
 
 <template>
   <div class="dashboard">
-    <!-- 顶部 hero 欢迎区: 渐变背景 + 时间感知问候 + 关键数据 -->
+    <!-- 顶部 hero 欢迎区: 渐变背景 + 时间感知问候 (v3.0.0 精简: 移除重复统计, 7 指标统一在下方一行展示) -->
     <div class="hero-banner" :class="greeting.gradient">
       <div class="hero-banner__bg" />
       <div class="hero-banner__content">
@@ -306,22 +306,6 @@ const updateEfficiencyChart = () => {
             <span class="hero-banner__sep">·</span>
             <span>图像智能标注工作台</span>
           </div>
-          <div class="hero-banner__stats">
-            <div class="hero-banner__stat">
-              <span class="hero-banner__stat-num text-number">{{ overview.datasets || 0 }}</span>
-              <span class="hero-banner__stat-label">数据集</span>
-            </div>
-            <div class="hero-banner__divider" />
-            <div class="hero-banner__stat">
-              <span class="hero-banner__stat-num text-number">{{ overview.images || 0 }}</span>
-              <span class="hero-banner__stat-label">图片</span>
-            </div>
-            <div class="hero-banner__divider" />
-            <div class="hero-banner__stat">
-              <span class="hero-banner__stat-num text-number">{{ overview.model_versions || 0 }}</span>
-              <span class="hero-banner__stat-label">模型</span>
-            </div>
-          </div>
         </div>
         <div class="hero-banner__right">
           <div class="hero-banner__chart-icon">
@@ -331,75 +315,59 @@ const updateEfficiencyChart = () => {
       </div>
     </div>
 
-    <!-- 顶部 4 个统计卡: 渐变顶部色条 + 右侧图标 -->
-    <el-row :gutter="16">
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card stat-card--blue">
-          <div class="stat-icon"><el-icon><Folder /></el-icon></div>
-          <el-statistic title="数据集" :value="overview.datasets || 0" />
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card stat-card--green">
-          <div class="stat-icon"><el-icon><Picture /></el-icon></div>
-          <el-statistic title="图片总数" :value="overview.images || 0" />
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card stat-card--orange">
-          <div class="stat-icon"><el-icon><CircleCheck /></el-icon></div>
-          <el-statistic title="已标注" :value="overview.labeled_images || 0" />
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card stat-card--red">
-          <div class="stat-icon"><el-icon><Grid /></el-icon></div>
-          <el-statistic title="模型版本" :value="overview.model_versions || 0" />
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <!-- AI 节省时间核心数据 -->
-    <el-row v-if="datasetStats" :gutter="16" style="margin-top: 16px;">
-      <el-col :span="8">
-        <el-card shadow="hover" class="stat-card stat-card--green">
-          <div class="stat-icon"><el-icon><Promotion /></el-icon></div>
-          <el-statistic
-            title="AI 节省时间估算"
-            :value="datasetStats.annotation?.estimated_saved_seconds || 0"
-            suffix="秒"
-            :value-style="{ color: '#00c48c' }"
-          />
-          <div class="stat-meta">
-            节省比例 {{ ((datasetStats.annotation?.estimated_saved_ratio || 0) * 100).toFixed(1) }}%
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :span="8">
-        <el-card shadow="hover" class="stat-card stat-card--purple">
-          <div class="stat-icon"><el-icon><CollectionTag /></el-icon></div>
-          <el-statistic
-            title="平均标注耗时"
-            :value="datasetStats.annotation?.avg_seconds_per_image || 0"
-            suffix="秒/张"
-          />
-        </el-card>
-      </el-col>
-      <el-col :span="8">
-        <el-card shadow="hover" class="stat-card stat-card--blue">
-          <div class="stat-icon"><el-icon><CircleCheck /></el-icon></div>
-          <el-statistic
-            title="AI 命中"
-            :value="datasetStats.annotation?.ai_labeled_count || 0"
-            suffix="张"
-            :value-style="{ color: '#4f7cff' }"
-          />
-          <div class="stat-meta">
-            待人工 {{ datasetStats.annotation?.human_corrected_count || 0 }} 张
-          </div>
-        </el-card>
-      </el-col>
-    </el-row>
+    <!-- 7 个核心指标同一行 (v3.0.0 重构: 合并原 4+3 两行为 flex 等分布局)
+         前 4 个: 全局资源 (数据集/图片/已标注/模型版本) - 始终显示
+         后 3 个: AI 效率 (节省时间/平均耗时/AI命中) - 依赖 datasetStats, 选中数据集后显示 -->
+    <div class="stats-row">
+      <el-card shadow="hover" class="stat-card stat-card--blue">
+        <div class="stat-icon"><el-icon><Folder /></el-icon></div>
+        <el-statistic title="数据集" :value="overview.datasets || 0" />
+      </el-card>
+      <el-card shadow="hover" class="stat-card stat-card--green">
+        <div class="stat-icon"><el-icon><Picture /></el-icon></div>
+        <el-statistic title="图片总数" :value="overview.images || 0" />
+      </el-card>
+      <el-card shadow="hover" class="stat-card stat-card--orange">
+        <div class="stat-icon"><el-icon><CircleCheck /></el-icon></div>
+        <el-statistic title="已标注" :value="overview.labeled_images || 0" />
+      </el-card>
+      <el-card shadow="hover" class="stat-card stat-card--red">
+        <div class="stat-icon"><el-icon><Grid /></el-icon></div>
+        <el-statistic title="模型版本" :value="overview.model_versions || 0" />
+      </el-card>
+      <el-card v-if="datasetStats" shadow="hover" class="stat-card stat-card--green">
+        <div class="stat-icon"><el-icon><Promotion /></el-icon></div>
+        <el-statistic
+          title="AI 节省时间"
+          :value="datasetStats.annotation?.estimated_saved_seconds || 0"
+          suffix="秒"
+          :value-style="{ color: '#00c48c' }"
+        />
+        <div class="stat-meta">
+          节省 {{ ((datasetStats.annotation?.estimated_saved_ratio || 0) * 100).toFixed(1) }}%
+        </div>
+      </el-card>
+      <el-card v-if="datasetStats" shadow="hover" class="stat-card stat-card--purple">
+        <div class="stat-icon"><el-icon><CollectionTag /></el-icon></div>
+        <el-statistic
+          title="平均标注耗时"
+          :value="datasetStats.annotation?.avg_seconds_per_image || 0"
+          suffix="秒/张"
+        />
+      </el-card>
+      <el-card v-if="datasetStats" shadow="hover" class="stat-card stat-card--blue">
+        <div class="stat-icon"><el-icon><CircleCheck /></el-icon></div>
+        <el-statistic
+          title="AI 命中"
+          :value="datasetStats.annotation?.ai_labeled_count || 0"
+          suffix="张"
+          :value-style="{ color: '#4f7cff' }"
+        />
+        <div class="stat-meta">
+          待人工 {{ datasetStats.annotation?.human_corrected_count || 0 }} 张
+        </div>
+      </el-card>
+    </div>
 
     <!-- 数据集 + 任务类型筛选 (与标注工作台 AnnotationToolbar 对齐)
          - 任务类型默认 "图片分类" (持久化于 localStorage)
@@ -488,7 +456,28 @@ const updateEfficiencyChart = () => {
 </template>
 
 <style scoped>
-/* 统计卡: 渐变顶部色条 + 右侧图标 */
+/* v3.0.0: 7 个统计卡同一行 flex 等分布局 (替代原 4+3 两行 el-row)
+   - flex: 1 1 0 让所有卡片等分容器宽度
+   - min-width: 0 防止内容溢出导致卡片撑开
+   - gap: 12px 替代 el-row gutter (gutter 在 flex 下无效)
+   - 窄屏 (≤1200px) 自动换行成 3-4 列, 移动端 (≤768px) 2 列 */
+.stats-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.stats-row > .el-card {
+  flex: 1 1 0;
+  min-width: 0;
+}
+@media (max-width: 1200px) {
+  .stats-row > .el-card { flex: 1 1 calc(33.333% - 8px); }
+}
+@media (max-width: 768px) {
+  .stats-row > .el-card { flex: 1 1 calc(50% - 6px); }
+}
+
+/* 统计卡: 渐变顶部色条 + 右侧图标 (v3.0.0: 尺寸收紧适应 7 列窄宽度) */
 .stat-card {
   position: relative;
   overflow: hidden;
@@ -497,9 +486,6 @@ const updateEfficiencyChart = () => {
   background: #fff !important;
   height: 100%;
 }
-/* 同行卡片等高: el-col 强制 stretch, 卡片宽度填满 */
-:deep(.el-row) > [class*="el-col"] { display: flex; }
-:deep(.el-row) > [class*="el-col"] > .el-card { width: 100%; }
 .stat-card::before {
   content: '';
   position: absolute;
@@ -515,34 +501,40 @@ const updateEfficiencyChart = () => {
 .stat-card--red::before { background: linear-gradient(135deg, #ff4d4f 0%, #cf1322 100%); }
 .stat-card--purple::before { background: linear-gradient(135deg, #722ed1 0%, #531dab 100%); }
 
+/* v3.0.0: padding/字号收紧 (原 22px 24px/28px → 16px 18px/22px)
+   7 列布局下单卡宽度约 220-260px, 需要更紧凑的内边距 */
 .stat-card :deep(.el-card__body) {
-  padding: 22px 24px;
+  padding: 16px 18px;
   position: relative;
 }
 .stat-card :deep(.el-statistic__head) {
   color: var(--text-secondary) !important;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stat-card :deep(.el-statistic__content) {
-  font-size: 28px;
+  font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
+/* v3.0.0: 图标尺寸收紧 (44x44 → 36x36) 适应窄卡片 */
 .stat-icon {
   position: absolute;
-  right: 18px;
-  top: 18px;
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  right: 14px;
+  top: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-.stat-icon :deep(.el-icon) { font-size: 22px; }
+.stat-icon :deep(.el-icon) { font-size: 18px; }
 .stat-card--blue .stat-icon { background: rgba(79, 124, 255, 0.1); color: #4f7cff; }
 .stat-card--green .stat-icon { background: rgba(0, 196, 140, 0.1); color: #00c48c; }
 .stat-card--orange .stat-icon { background: rgba(255, 138, 76, 0.1); color: #ff8a4c; }
@@ -551,8 +543,8 @@ const updateEfficiencyChart = () => {
 
 .stat-meta {
   color: var(--text-placeholder);
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 6px;
+  font-size: 11px;
 }
 
 .selector-card {
@@ -684,31 +676,7 @@ const updateEfficiencyChart = () => {
 }
 .hero-banner__date { color: rgba(255, 255, 255, 0.95); }
 .hero-banner__sep { opacity: 0.5; }
-.hero-banner__stats {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-.hero-banner__stat {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-}
-.hero-banner__stat-num {
-  font-size: 22px;
-  line-height: 1;
-  color: #fff;
-}
-.hero-banner__stat-label {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.85);
-}
-.hero-banner__divider {
-  width: 1px;
-  height: 26px;
-  background: rgba(255, 255, 255, 0.3);
-}
+/* v3.0.0: hero-banner__stats/stat/divider 已移除 (与下方 7 指标重复) */
 .hero-banner__right {
   flex: 0 0 auto;
 }
