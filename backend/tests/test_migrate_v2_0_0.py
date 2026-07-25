@@ -2,7 +2,7 @@
 v2.0.0 迁移脚本幂等性测试
 ==========================
 
-测试目标: app.core.db_migration.ensure_v2_0_0_schema
+测试目标: app.database.migration.ensure_v2_0_0_schema
 (init_db 启动自动调用, 也可手动 python scripts/migrate_v2_0_0.py)
 
 模拟 v1.0.0 -> v2.0.0 升级: 先建完整 v2.0.0 表, 再用 SQLAlchemy 删掉部分
@@ -20,7 +20,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from sqlalchemy import text  # noqa: E402
 
-from app.core.db_migration import (  # noqa: E402
+from app.database.migration import (  # noqa: E402
     MIGRATIONS, _get_existing_columns, ensure_v2_0_0_schema,
 )
 

@@ -34,7 +34,7 @@ async def init_db():
     import app.tasks.model  # noqa: F401
     import app.admin.model  # noqa: F401
     import app.annotation.model  # noqa: F401
-    import app.core.db_migration as dbm  # noqa: PLC0415
+    import app.database.migration as dbm  # noqa: PLC0415
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # 补 v2.0.0 新增列 (训练任务 / 模型版本 / 图像的任务类型 + 任务专属指标)

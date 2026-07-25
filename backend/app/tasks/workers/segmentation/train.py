@@ -43,7 +43,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 from app.core.config import settings  # noqa: E402
 
 # v2.5.29: ultralytics 路径强制覆盖
-from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
+from app.tasks.ml.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
 configure_ultralytics()
 migrate_legacy_yolo_weights()
 

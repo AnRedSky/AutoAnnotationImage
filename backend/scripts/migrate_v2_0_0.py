@@ -1,5 +1,5 @@
 """
-v2.0.0 迁移脚本 (thin wrapper, 业务逻辑在 app.core.db_migration)
+v2.0.0 迁移脚本 (thin wrapper, 业务逻辑在 app.database.migration)
 ================================================================
 
 应用启动时 (init_db) 会自动调用 ensure_v2_0_0_schema, 无需手动跑本脚本.
@@ -21,7 +21,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
-from app.core.db_migration import MIGRATIONS, ensure_v2_0_0_schema  # noqa: E402
+from app.database.migration import MIGRATIONS, ensure_v2_0_0_schema  # noqa: E402
 
 
 def get_url() -> str:

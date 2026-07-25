@@ -16,7 +16,7 @@ from typing import Optional
 
 from app.tasks.workers.celery_app import celery_app
 from app.utils.async_helpers import run_async_in_worker as _run_async
-from app.core.redis_client import redis_client
+from app.database.redis import redis_client
 
 # ---- 在最早期禁用 HF symlink + 设置缓存目录 ----
 _model_dir_env = os.getenv("MODEL_DIR", "./models")
@@ -42,7 +42,7 @@ except Exception:
 from app.core.config import settings  # noqa: E402
 
 # ---- v2.5.29: ultralytics 路径强制覆盖 ----
-from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
+from app.tasks.ml.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights  # noqa: E402
 configure_ultralytics()
 migrate_legacy_yolo_weights()
 

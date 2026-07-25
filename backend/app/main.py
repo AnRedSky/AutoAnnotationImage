@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
     # 防止 API 进程第一次调用 YOLO(...) 时把 .pt 落到 cwd
     with startup_profiler.step("ultralytics_setup"):
         try:
-            from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+            from app.tasks.ml.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
             configure_ultralytics()
             migrate_legacy_yolo_weights()
         except Exception as e:
@@ -122,7 +122,7 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("engine.dispose() failed")
     try:
-        from app.core.redis_client import redis_client  # noqa: PLC0415
+        from app.database.redis import redis_client  # noqa: PLC0415
         redis_client.close()
     except Exception:  # noqa: BLE001
         logger.exception("redis_client.close() failed")

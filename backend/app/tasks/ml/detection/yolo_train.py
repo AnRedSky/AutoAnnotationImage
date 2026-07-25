@@ -110,7 +110,7 @@ def train_yolo(
 
     # ---- v2.5.29: 防御性兜底 - 如果 model_name 是裸名 (如 "yolov8n") 且 weights_dir
     # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
-    # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.core.ultralytics_setup.
+    # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.tasks.ml.ultralytics_setup.
     if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
         from app.core.config import settings
         candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"

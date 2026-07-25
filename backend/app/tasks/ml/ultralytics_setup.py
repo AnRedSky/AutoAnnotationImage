@@ -2,6 +2,9 @@
 v2.5.29: ultralytics 路径集中配置
 =================================
 
+**v3.0.0 迁移**: 从 app.core.ultralytics_setup 迁入 app.tasks.ml.ultralytics_setup
+(与 detection/segmentation/classification 平级, 属于 ML 训练基础设施).
+
 为什么需要:
 - ultralytics 8.x 不读 ULTRALYTICS_HOME 来定位 weights_dir, 而是读
   $YOLO_CONFIG_DIR/settings.yaml (默认 %APPDATA%/Ultralytics/settings.yaml).
@@ -18,7 +21,7 @@ v2.5.29: ultralytics 路径集中配置
 3. YOLO("yolov8n.pt") 找不到时会自动下载到 weights_dir (项目内), 不再落到 cwd.
 
 使用:
-    from app.core.ultralytics_setup import configure_ultralytics
+    from app.tasks.ml.ultralytics_setup import configure_ultralytics
     configure_ultralytics()  # 必须在 import ultralytics 之前调用
 """
 from __future__ import annotations
@@ -97,6 +100,9 @@ def migrate_legacy_yolo_weights(backend_root: Path | None = None) -> int:
     v2.5.30: 增量兼容 - 既扫 backend/ 根, 也扫 backend/models/cache/ultralytics/weights/
             (旧版本配置时, ultralytics 会把 .pt 落到这两个位置之一).
 
+    **v3.0.0 适配**: 文件位置从 app/core/ 变为 app/tasks/ml/, 路径计算从
+    `.parent.parent.parent` (3 层回退) 改为 `.parent.parent.parent.parent` (4 层回退).
+
     Returns:
         实际迁移的文件数
     """
@@ -106,8 +112,8 @@ def migrate_legacy_yolo_weights(backend_root: Path | None = None) -> int:
     target.mkdir(parents=True, exist_ok=True)
     # 默认 backend/ 根目录
     if backend_root is None:
-        # app/core/ultralytics_setup.py → backend/
-        backend_root = Path(__file__).resolve().parent.parent.parent
+        # app/tasks/ml/ultralytics_setup.py → app/tasks/ml → app/tasks → app → backend
+        backend_root = Path(__file__).resolve().parent.parent.parent.parent
 
     moved = 0
     # 1) backend/ 根目录下的 yolov8*.pt

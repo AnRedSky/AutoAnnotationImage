@@ -45,7 +45,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.utils.async_helpers import check_celery_available
-from app.core.redis_client import redis_client
+from app.database.redis import redis_client
 from app.database import AsyncSessionLocal
 from app.tasks.model.training_job import (
     TrainingJob,

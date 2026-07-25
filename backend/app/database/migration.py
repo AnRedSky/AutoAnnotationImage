@@ -1,6 +1,8 @@
 """
-v2.0.0 数据库迁移 (app 内核版, init_db 启动自动调用)
-====================================================
+v2.0.0 数据库迁移 (database 子包, init_db 启动自动调用)
+=====================================================
+
+v3.0.0 迁移: 从 app.core.db_migration 迁入 app.database.migration (与 engine/session 同级, 属于 DB 基础设施)
 
 背景:
   v2.0.0 在 3 张已有表 (training_jobs / model_version / image) 加了列,
@@ -15,7 +17,7 @@ v2.0.0 数据库迁移 (app 内核版, init_db 启动自动调用)
   - 启动自动: app.database.init_db() 在 create_all 后自动调用
 
 调用:
-  from app.core.db_migration import ensure_v2_0_0_schema
+  from app.database.migration import ensure_v2_0_0_schema
   async with engine.begin() as conn:
       await ensure_v2_0_0_schema(conn)
 """

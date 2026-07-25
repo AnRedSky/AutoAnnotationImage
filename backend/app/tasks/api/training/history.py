@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.core.redis_client import redis_client
+from app.database.redis import redis_client
 from app.admin.model.user import User
 from app.middleware.http.auth import get_user_optional_for_query
 from app.tasks.model.training_job import TrainingJob

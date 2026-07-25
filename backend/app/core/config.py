@@ -343,7 +343,7 @@ settings.YOLO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---- 在最早时机同步关键环境变量到 os.environ ----
 # config.py 是 app 启动时第一个被 import 的模块，pydantic-settings 自动从 .env
-# 加载到这里，但很多子模块（如 app.core.redis_client, app.core.minio_client）
+# 加载到这里，但很多子模块（如 app.database.redis, app.database.minio_client）
 # 直接用 os.getenv(...) 读 OS 环境变量，如果 OS 环境没有 9770 就会用默认 6379。
 # 这里把 .env 的关键端口/host 写回 os.environ，让所有子模块看到一致配置。
 import os as _os

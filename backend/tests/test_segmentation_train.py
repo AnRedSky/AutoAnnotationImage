@@ -160,7 +160,7 @@ async def test_seg_train_redis_down_503(
     )
 
     with patch(
-        "app.core.redis_client.redis_client.ping",
+        "app.database.redis.redis_client.ping",
         side_effect=ConnectionError("redis down"),
     ):
         r = await client.post(

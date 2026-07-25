@@ -149,7 +149,7 @@ async def metrics():
 
     # 2) 缓存统计
     try:
-        from app.core.cache import cache
+        from app.common.cache import cache
         result["cache"] = cache.get_stats()
     except Exception as e:  # noqa: BLE001
         result["cache"] = {"err": str(e)[:200]}

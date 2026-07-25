@@ -20,7 +20,7 @@ print('settings.ULTRALYTICS_RUNS_DIR   :', settings.ULTRALYTICS_RUNS_DIR)
 print()
 
 print('=== 测试 2: 启动时扫描并迁移 yolov8*.pt ===')
-from app.core.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
+from app.tasks.ml.ultralytics_setup import configure_ultralytics, migrate_legacy_yolo_weights
 configure_ultralytics()
 moved = migrate_legacy_yolo_weights()
 print(f'本次启动迁移文件数: {moved} (应为 0, 证明已干净)')

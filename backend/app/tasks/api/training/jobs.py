@@ -23,7 +23,7 @@ from sqlalchemy import func as sa_func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.core.redis_client import redis_client
+from app.database.redis import redis_client
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.model.training_job import TrainingJob

@@ -92,7 +92,7 @@ def _log_slow_sql(statement: str, parameters: Any, duration_ms: float) -> None:
 def _record_slow_sql(statement: str, duration_ms: float) -> None:
     """记录慢 SQL 到 Redis (ZSET, 供 metrics 读取)"""
     try:
-        from app.core.redis_client import redis_client  # noqa: PLC0415
+        from app.database.redis import redis_client  # noqa: PLC0415
         ts = time.time()
         # entry: timestamp + duration + sql 截断
         entry = f"{ts:.3f}|{duration_ms:.1f}|{statement[:200]}"
@@ -117,7 +117,7 @@ def get_slow_sql_log(limit: int = 50) -> List[Dict[str, Any]]:
         List of {"ts": float, "duration_ms": float, "sql": str}
     """
     try:
-        from app.core.redis_client import redis_client  # noqa: PLC0415
+        from app.database.redis import redis_client  # noqa: PLC0415
         # ZRANGE 按 score (ts) 升序, 取最近 limit 条
         entries = redis_client.zrange("sql:slow_log", -limit, -1)
         out: List[Dict[str, Any]] = []
@@ -141,7 +141,7 @@ def get_slow_sql_log(limit: int = 50) -> List[Dict[str, Any]]:
 def get_slow_sql_count() -> int:
     """获取累计慢 SQL 计数"""
     try:
-        from app.core.redis_client import redis_client  # noqa: PLC0415
+        from app.database.redis import redis_client  # noqa: PLC0415
         return int(redis_client.get("sql:slow_count") or 0)
     except Exception:  # noqa: BLE001
         return 0
@@ -150,7 +150,7 @@ def get_slow_sql_count() -> int:
 def reset_slow_sql_stats() -> None:
     """重置慢 SQL 统计 (主要用于测试)"""
     try:
-        from app.core.redis_client import redis_client  # noqa: PLC0415
+        from app.database.redis import redis_client  # noqa: PLC0415
         redis_client.delete("sql:slow_log", "sql:slow_count")
     except Exception:  # noqa: BLE001
         pass

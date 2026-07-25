@@ -10,7 +10,7 @@ Server-Sent Events 实时推送插件. Stage 4 第三个具体插件实现.
 - 业务代码通过 `PluginRegistry.get_default("notification")` 获取
 
 **依赖方向**:
-- plugin/notification_channels/sse.py → app.core.redis_client (复用 Redis pubsub)
+- plugin/notification_channels/sse.py → app.database.redis (复用 Redis pubsub)
 - plugin → 不直接依赖任何 app/* 业务代码
 
 **当前实现**:
@@ -55,7 +55,7 @@ class SSENotificationPlugin(PluginInterface):
     def install(self) -> None:
         """插件安装: 验证 Redis 可用"""
         try:
-            from app.core.redis_client import redis_client  # noqa: PLC0415
+            from app.database.redis import redis_client  # noqa: PLC0415
             # 健康检查: ping 一下, 但不抛异常
             try:
                 redis_client.ping()
@@ -102,7 +102,7 @@ class SSENotificationPlugin(PluginInterface):
         }
 
         try:
-            from app.core.redis_client import redis_client  # noqa: PLC0415
+            from app.database.redis import redis_client  # noqa: PLC0415
             # 同步 publish, 在独立线程执行避免阻塞 event loop
             await asyncio.to_thread(redis_client.publish, channel, json.dumps(message))
             logger.debug(f"SSENotificationPlugin: push {event} -> {channel}")
@@ -138,7 +138,7 @@ class SSENotificationPlugin(PluginInterface):
         })
 
         try:
-            from app.core.redis_client import redis_client  # noqa: PLC0415
+            from app.database.redis import redis_client  # noqa: PLC0415
             redis_client.publish(channel, message)
             return True
         except Exception as e:

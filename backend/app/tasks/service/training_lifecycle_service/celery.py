@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from app.core.redis_client import redis_client  # noqa: F401  (兼容旧 re-export)
+from app.database.redis import redis_client  # noqa: F401  (兼容旧 re-export)
 
 logger = logging.getLogger(__name__)
 

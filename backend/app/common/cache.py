@@ -1,28 +1,28 @@
 """
-Cache Layer (Core Layer)
-========================
+Cache Layer (Common Layer)
+==========================
 
 Redis-backed 缓存层, 提供装饰器和上下文两种使用方式.
 
-**Stage 5.2 新增**.
+**v3.0.0 迁移**: 从 app.core.cache 迁入 app.common.cache (与枚举/异常/事件同级, 属于业务可复用横切组件).
 
 **使用方式**:
 ```python
 # 1) 装饰器
-from app.core.cache import cached
+from app.common.cache import cached
 
 @cached("user:{user_id}", ttl=300)
 async def get_user_profile(user_id: int) -> dict:
     return await db.query(...)
 
 # 2) 直接调用
-from app.core.cache import cache
+from app.common.cache import cache
 await cache.get("datasets:list:page=1")
 await cache.set("datasets:list:page=1", data, ttl=60)
 await cache.delete("datasets:*")  # 模式删除
 
 # 3) 失效便捷
-from app.core.cache import invalidate
+from app.common.cache import invalidate
 await invalidate("datasets:*", "categories:*")  # 多模式失效
 ```
 
@@ -32,18 +32,15 @@ await invalidate("datasets:*", "categories:*")  # 多模式失效
 - CACHE_KEY_PREFIX (env, default="app:")
 
 **降级**: Redis 不可用时所有调用降级为 noop, 不影响业务.
-
-v3.0.0 Stage 5.2
 """
 import functools
 import hashlib
 import json
 import logging
-import time
 from typing import Any, Callable, Optional
 
 from app.core.config import settings
-from app.core.redis_client import redis_client
+from app.database.redis import redis_client
 
 logger = logging.getLogger(__name__)
 
