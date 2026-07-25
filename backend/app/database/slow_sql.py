@@ -20,7 +20,7 @@ v3.0.0 Stage 5.4
 """
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine

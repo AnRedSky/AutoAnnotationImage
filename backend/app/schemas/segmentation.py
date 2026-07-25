@@ -6,7 +6,7 @@
 - 调色板: 前端按 Category.color 实时渲染
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict
 from pydantic import BaseModel, ConfigDict, Field
 
 

@@ -2,7 +2,7 @@
 
 数据导出 / 模型下载相关 schema.
 """
-from typing import Optional, List
+from typing import Optional
 from pydantic import BaseModel, Field
 
 

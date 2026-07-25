@@ -40,7 +40,7 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 from app.core.config import settings
 from app.core.redis_client import redis_client

@@ -7,7 +7,7 @@
 - 列表: BBoxListOut
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from pydantic import BaseModel, ConfigDict, Field
 
 

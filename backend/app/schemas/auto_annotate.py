@@ -2,7 +2,7 @@
 
 AI 预标注 / 自动标注的请求/响应 schema, 集中管理.
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from pydantic import BaseModel, ConfigDict, Field
 
 
