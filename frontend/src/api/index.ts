@@ -8,13 +8,23 @@ import { createSSEStream } from '@/utils/sse'
 // 仍然拼 token query 主要是为了：
 //   1) 后端强制鉴权后, <img> 仍能加载 (EventSource/图片均无法设 header)
 //   2) 后端可基于 token 记录访问用户, 未来做权限审计
-// 始终返回以 '?' 或 '&' 开头的字符串, 调用方直接拼到 URL 末尾即可
-function authQuery(extra: string = ''): string {
+//
+// v3.0.0 全面审查修复: 改用 withToken(url) — 自动检测 URL 是否已有 query 参数,
+// 选择 '?' 或 '&' 追加 token. 旧 authQuery(extra) 设计需要调用方拼前缀,
+// 容易写出 "?size=320?token=xxx" 双 ? 的 422 错误.
+//
+// 行为对比:
+//   旧: thumbnailUrl = `${BASE}/files/1/thumbnail?size=320${authQuery()}`
+//       → http://.../thumbnail?size=320?token=xxx ❌ FastAPI 422
+//   新: thumbnailUrl = withToken(`${BASE}/files/1/thumbnail?size=320`)
+//       → http://.../thumbnail?size=320&token=xxx ✅
+//
+// 无 token 时: withToken 直接返回原 URL, 不会污染 (? 不再孤立)
+function withToken(url: string): string {
   const t = localStorage.getItem('token')
-  if (!t) return extra  // 没有 token 时透传 extra (供 URL 已有 ? 时的 & 兜底)
-  // extra 不为空说明 URL 已经有查询参数, 用 & 连接
-  // 始终以 ? 或 & 开头, 调用方无需额外加 '?'
-  return extra ? `&token=${encodeURIComponent(t)}` : `?token=${encodeURIComponent(t)}`
+  if (!t) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(t)}`
 }
 
 // ============== 认证 ==============
@@ -98,9 +108,9 @@ export const imageApi = {
    * - token 缺失时降级返回无 token URL, 后端将返回 401, 前端 <img> 会 broken
    *   此时通常意味着用户未登录, 应被路由守卫拦截
    */
-  fileUrl: (id: number) => `${http.defaults.baseURL}/files/${id}${authQuery()}`,
+  fileUrl: (id: number) => withToken(`${http.defaults.baseURL}/files/${id}`),
   thumbnailUrl: (id: number, size = 240) =>
-    `${http.defaults.baseURL}/files/${id}/thumbnail?size=${size}${authQuery()}`,
+    withToken(`${http.defaults.baseURL}/files/${id}/thumbnail?size=${size}`),
   /**
    * 非破坏性测评: 对指定图片跑模型, 返回 top-1 置信度及在当前阈值下是否会被自动标注
    * - 不修改任何图片状态
@@ -352,9 +362,9 @@ export const modelApi = {
 
 // ============== 导出 ==============
 export const exportApi = {
-  coco: (datasetId: number) => `${http.defaults.baseURL}/export/coco/${datasetId}?${authQuery()}`,
-  yolo: (datasetId: number) => `${http.defaults.baseURL}/export/yolo/${datasetId}?${authQuery()}`,
-  csv: (datasetId: number) => `${http.defaults.baseURL}/export/csv/${datasetId}?${authQuery()}`
+  coco: (datasetId: number) => withToken(`${http.defaults.baseURL}/export/coco/${datasetId}`),
+  yolo: (datasetId: number) => withToken(`${http.defaults.baseURL}/export/yolo/${datasetId}`),
+  csv: (datasetId: number) => withToken(`${http.defaults.baseURL}/export/csv/${datasetId}`)
 }
 
 // ============== 统计分析 ==============
@@ -522,12 +532,14 @@ export const segmentationApi = {
  */
 export const exportApiV2 = {
   yoloDet: (datasetId: number, valRatio = 0.2) =>
-    `${http.defaults.baseURL}/export/yolo-det/${datasetId}?val_ratio=${valRatio}&${authQuery()}`,
+    withToken(`${http.defaults.baseURL}/export/yolo-det/${datasetId}?val_ratio=${valRatio}`),
   cocoDet: (datasetId: number, includePending = false) =>
-    `${http.defaults.baseURL}/export/coco-det/${datasetId}?include_pending=${includePending}&${authQuery()}`,
+    withToken(`${http.defaults.baseURL}/export/coco-det/${datasetId}?include_pending=${includePending}`),
   vocSeg: (datasetId: number, valRatio = 0.2, includePending = false) =>
-    `${http.defaults.baseURL}/export/voc-seg/${datasetId}?val_ratio=${valRatio}` +
-    `&include_pending=${includePending}&${authQuery()}`,
+    withToken(
+      `${http.defaults.baseURL}/export/voc-seg/${datasetId}?val_ratio=${valRatio}` +
+      `&include_pending=${includePending}`
+    ),
   cocoSeg: (datasetId: number, includePending = false) =>
-    `${http.defaults.baseURL}/export/coco-seg/${datasetId}?include_pending=${includePending}&${authQuery()}`,
+    withToken(`${http.defaults.baseURL}/export/coco-seg/${datasetId}?include_pending=${includePending}`),
 }
