@@ -73,14 +73,25 @@ async def dataset_stats(
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
-    # 1. 各状态图片数（饼图数据）
+    # 1. 各状态图片数（饼图数据, v3.0.0: 排除不合格图片, 不合格单独统计）
     stmt = (
         select(Image.status, func.count(Image.id))
-        .where(Image.dataset_id == dataset_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            Image.quality_flag.is_(None),  # v3.0.0: 不合格不计入状态饼图
+        )
         .group_by(Image.status)
     )
     status_rows = (await db.execute(stmt)).all()
     status_counts = {row[0]: row[1] for row in status_rows}
+
+    # v3.0.0: 不合格图片单独统计 (供前端展示)
+    unqualified_count = (await db.execute(
+        select(func.count(Image.id)).where(
+            Image.dataset_id == dataset_id,
+            Image.quality_flag == "unqualified",
+        )
+    )).scalar() or 0
 
     # 2. 类别分布（柱状图数据）
     stmt = (
@@ -122,6 +133,7 @@ async def dataset_stats(
 
     return {
         "status_counts": status_counts,
+        "unqualified_count": unqualified_count,  # v3.0.0: 不合格图片数 (正交维度, 不计入 status_counts)
         "category_distribution": category_distribution,
         "annotation": {
             "total_annotations": total_annos or 0,

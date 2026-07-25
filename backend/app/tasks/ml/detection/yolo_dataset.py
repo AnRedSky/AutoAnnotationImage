@@ -188,12 +188,13 @@ async def export_yolo_dataset(
     (workdir / "labels" / "train").mkdir(parents=True)
     (workdir / "labels" / "val").mkdir(parents=True)
 
-    # 1) 拉所有 Image (仅 detection)
+    # 1) 拉所有 Image (仅 detection, v3.0.0: 排除不合格图片)
     images = (await db.execute(
         select(ImageModel)
         .where(
             ImageModel.dataset_id == dataset_id,
             ImageModel.task_type == "detection",
+            ImageModel.quality_flag.is_(None),  # v3.0.0: 排除不合格图片
         )
         .order_by(ImageModel.id.asc())
     )).scalars().all()

@@ -97,6 +97,7 @@ async def export_voc_segmentation(
         .where(
             Image.dataset_id == dataset_id,
             Image.task_type == TaskType.SEGMENTATION.value,
+            Image.quality_flag.is_(None),  # v3.0.0: 排除不合格图片
         )
         .order_by(Image.id.asc())
     )).scalars().all()
@@ -244,6 +245,7 @@ async def export_coco_segmentation(
         .where(
             Image.dataset_id == dataset_id,
             Image.task_type == TaskType.SEGMENTATION.value,
+            Image.quality_flag.is_(None),  # v3.0.0: 排除不合格图片
         )
         .order_by(Image.id.asc())
     )).scalars().all()
