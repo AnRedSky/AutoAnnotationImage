@@ -57,7 +57,7 @@ from app.schemas.detection import (
     BBoxBatchCreate, BBoxBatchSaveResult,
     DetectionTrainRequest, DetectionTrainResponse,
 )
-from app.schemas.enums import TaskType, AnnotationSource
+from app.common.enums import TaskType, AnnotationSource
 from app.common.geometry.bbox_service import validate_normalized_bbox
 # v3.0.0 Phase 4: 业务编排下沉到 Service
 from app.tasks.service.detection_service import DetectionService

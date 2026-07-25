@@ -31,7 +31,7 @@ from app.annotation.model.bbox_annotation import BBoxAnnotation
 from app.annotation.model.segmentation_mask import SegmentationMask
 from app.middleware.http.auth import get_current_user
 from app.tasks.ml.detection.yolo_dataset import export_yolo_dataset
-from app.schemas.enums import TaskType
+from app.common.enums import TaskType
 
 router = APIRouter()
 

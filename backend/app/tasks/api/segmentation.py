@@ -46,7 +46,7 @@ from app.annotation.model.segmentation_mask import SegmentationMask
 from app.tasks.model.dataset import Dataset
 from app.tasks.model.model_version import ModelVersion
 from app.tasks.model.training_job import TrainingJob
-from app.schemas.enums import TaskType, AnnotationSource
+from app.common.enums import TaskType, AnnotationSource
 from app.common.storage.storage_service import storage_service
 # v3.0.0 Phase 4: 业务编排下沉到 Service
 from app.tasks.service.segmentation_service import SegmentationService
@@ -269,7 +269,7 @@ async def start_segmentation_train(
     from app.tasks.model.dataset import Dataset
     from app.tasks.model.training_job import TrainingJob
     from app.schemas.detection import DetectionTrainRequest  # 复用 schema 结构
-    from app.schemas.enums import TaskType
+    from app.common.enums import TaskType
 
     _check_celery_available()
 
@@ -326,7 +326,7 @@ async def start_segmentation_auto_annotate(
     current_user: User = Depends(get_current_user),
 ):
     """启动自动分割标注"""
-    from app.schemas.enums import TaskType
+    from app.common.enums import TaskType
     _check_celery_available()
 
     ds = await db.get(Dataset, dataset_id)
