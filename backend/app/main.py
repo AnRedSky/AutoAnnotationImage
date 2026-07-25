@@ -145,6 +145,10 @@ app.add_middleware(
 from app.middleware.http import RequestIDMiddleware  # noqa: E402
 app.add_middleware(RequestIDMiddleware)
 
+# Stage 3: Request Timing 中间件 (在 RequestID 之后, 业务之前)
+from app.middleware.http import RequestTimingMiddleware  # noqa: E402
+app.add_middleware(RequestTimingMiddleware)
+
 # ============================================================
 #  路由自动挂载 (Stage 2.7)
 # ============================================================

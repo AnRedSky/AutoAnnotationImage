@@ -5,6 +5,7 @@ FastAPI 依赖注入 / 中间件 / 异常处理
 
 **Stage 3 新增**:
 - `RequestIDMiddleware`: 注入/透传 X-Request-ID, 用于跨服务追踪
+- `RequestTimingMiddleware`: 记录请求耗时, 慢请求自动告警
 """
 from app.middleware.http.auth import (  # noqa: F401
     get_current_user,
@@ -19,6 +20,10 @@ from app.middleware.http.request_id import (  # noqa: F401
     get_request_id,
     set_request_id,
 )
+from app.middleware.http.request_timing import (  # noqa: F401
+    RequestTimingMiddleware,
+    DEFAULT_SLOW_THRESHOLD_MS,
+)
 
 __all__ = [
     "get_current_user",
@@ -30,4 +35,6 @@ __all__ = [
     "RequestIDMiddleware",
     "get_request_id",
     "set_request_id",
+    "RequestTimingMiddleware",
+    "DEFAULT_SLOW_THRESHOLD_MS",
 ]

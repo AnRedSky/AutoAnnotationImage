@@ -144,6 +144,10 @@ class Settings(BaseSettings):
     )
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 
+    # ===== Stage 3: 请求耗时中间件 =====
+    # 慢请求阈值 (毫秒), 超过则 WARNING 日志
+    REQUEST_SLOW_THRESHOLD_MS: int = int(os.getenv("REQUEST_SLOW_THRESHOLD_MS", "500"))
+
     # ===== ML =====
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "efficientnet_b0")
     DEFAULT_BASE_MODEL: Optional[str] = None  # 兼容旧名
