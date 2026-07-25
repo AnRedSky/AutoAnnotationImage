@@ -1,22 +1,34 @@
 """
-FastAPI Application Entry
-=========================
-基于深度学习的图像分类自动标注与人工修正系统
+FastAPI Application Entry (v3.0.0 Stage 2.7 自动挂载)
+======================================================
+
+**v3.0.0 Stage 2.7 重构**:
+- 路由注册从手写 14 行 `app.include_router()` 改为 `AppRegistry.iter_routes()` 自动挂载
+- lifespan 启动/关闭调用 `AppRegistry.startup_all()` / `shutdown_all()`
+- 业务应用 (admin / auth / tasks / annotation) 各自声明自己的路由条目, 0 硬编码
+
+**使用方式**:
+- 新增业务应用: 在 `app/{name}/__init__.py` 实现 `AppInterface` + `get_routes()`,
+  main.py 0 修改即可自动挂载.
+- 调整路由 prefix: 修改对应应用的 `get_routes()` 返回值, 无需改 main.py.
+
+**保留的手动启动**:
+- 跨应用基础设施: CORS / 异常处理 / 数据库 init / 资源释放 / ultralytics 配置
+  (这些不属于单个应用, 而属于应用组合)
 """
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
-from app.api import (
-    auth, user, dataset, image, annotation,
-    training, model as model_api, files,
-    auto_annotate, export, stats, system,
-    detection,  # v2.0.0 目标检测
-    segmentation,  # v2.0.0 图像分割
-)
+
 from app.config import settings
-from app.database import init_db, engine
 from app.core.exceptions import AppException, to_response_payload
+from app.database import init_db, engine
+from app.registry import AppRegistry
+
+logger = logging.getLogger("app.main")
 
 # ---- 在最早期强制禁用 HF symlink (Windows [WinError 14007] 根因) ----
 # config.py 已经把 env 写入了 os.environ, 但 huggingface_hub 内部有时会缓存
@@ -37,12 +49,22 @@ except Exception:
     pass
 
 
+# ---- Stage 2.7: 自动发现 + 注册 4 个业务应用 ----
+# 触发 app/{admin,auth,tasks,annotation}/__init__.py 的 AppRegistry.register(...)
+# 调用, 之后 iter_routes() 即可拿到全部 14 个 RouteEntry.
+AppRegistry.discover_apps(["admin", "auth", "tasks", "annotation"])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动/关闭时执行"""
-    import logging  # noqa: PLC0415
-    logger = logging.getLogger("app.main")
-    # 启动
+    """应用生命周期：启动/关闭时执行
+
+    **Stage 2.7 变更**:
+    - 启动时调用 `AppRegistry.startup_all()` 让每个应用执行自己的 startup 钩子
+    - 关闭时调用 `AppRegistry.shutdown_all()` 让每个应用执行自己的 shutdown 钩子
+    - 保留: 数据库 init / 资源释放 / ultralytics 配置 (这些是跨应用基础设施)
+    """
+    # ---- 启动 ----
     await init_db()
     # v2.5.29: ultralytics 路径集中配置 (与 worker 启动时一致)
     # 防止 API 进程第一次调用 YOLO(...) 时把 .pt 落到 cwd
@@ -52,9 +74,21 @@ async def lifespan(app: FastAPI):
         migrate_legacy_yolo_weights()
     except Exception as e:
         logger.warning(f"ultralytics_setup 失败, 不影响 API 启动: {e}")
+    # 调用各应用的 startup 钩子 (Stage 2.7)
+    try:
+        await AppRegistry.startup_all()
+    except Exception:
+        logger.exception("AppRegistry.startup_all failed")
+        raise
     logger.info("Application started")
     yield
-    # 关闭: 优雅释放数据库连接池与 Redis 连接，避免热重启丢数据/泄漏连接
+    # ---- 关闭 ----
+    # 调用各应用的 shutdown 钩子 (Stage 2.7)
+    try:
+        await AppRegistry.shutdown_all()
+    except Exception:  # noqa: BLE001
+        logger.exception("AppRegistry.shutdown_all failed")
+    # 优雅释放数据库连接池与 Redis 连接，避免热重启丢数据/泄漏连接
     logger.info("Shutting down, disposing resources...")
     try:
         await engine.dispose()
@@ -107,24 +141,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 路由注册
-app.include_router(auth.router, prefix="/api/auth", tags=["用户认证"])
-app.include_router(user.router, prefix="/api/users", tags=["用户管理"])
-app.include_router(dataset.router, prefix="/api/datasets", tags=["数据集管理"])
-app.include_router(image.router, prefix="/api/images", tags=["图像管理"])
-app.include_router(annotation.router, prefix="/api/annotations", tags=["标注管理"])
-app.include_router(auto_annotate.router, prefix="/api/auto-annotate", tags=["AI预标注"])
-app.include_router(training.router, prefix="/api/training", tags=["模型训练"])
-app.include_router(model_api.router, prefix="/api/models", tags=["模型管理"])
-app.include_router(export.router, prefix="/api/export", tags=["标注导出"])
-app.include_router(stats.router, prefix="/api/stats", tags=["统计分析"])
-app.include_router(files.router, prefix="/api/files", tags=["文件服务"])
-# v2.0.0 目标检测: bbox 标注 CRUD + 训练 (S3+ 训练) 端点
-app.include_router(detection.router, prefix="/api/detection", tags=["目标检测"])
-# v2.0.0 图像分割: mask CRUD (S5)
-app.include_router(segmentation.router, prefix="/api/segmentation", tags=["图像分割"])
-# system router 暴露 /api/health, /api/system/info 两个无鉴权端点
-app.include_router(system.router, prefix="/api", tags=["系统"])
+# ============================================================
+#  路由自动挂载 (Stage 2.7)
+# ============================================================
+# 替代原来的 14 行手写 include_router:
+#   app.include_router(auth.router, prefix="/api/auth", tags=["用户认证"])
+#   app.include_router(user.router, prefix="/api/users", tags=["用户管理"])
+#   ...
+# 现在由 AppRegistry.iter_routes() 自动产出 14 个 RouteEntry,
+# 每个应用通过 AppInterface.get_routes() 声明自己的 prefix + tags.
+_mounted: list[tuple[str, str, list[str]]] = []
+for app_name, entry in AppRegistry.iter_routes():
+    app.include_router(
+        entry.router,
+        prefix=entry.prefix,
+        tags=entry.tags or None,
+    )
+    _mounted.append((app_name, entry.prefix, entry.tags or []))
+    logger.info(
+        f"Auto-mounted: app={app_name} prefix={entry.prefix!r} "
+        f"tags={entry.tags or []} routes={len(entry.router.routes)}"
+    )
+logger.info(f"Total {len(_mounted)} route groups mounted via AppRegistry.iter_routes()")
 
 
 @app.get("/")
@@ -146,7 +184,6 @@ async def root():
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
     """业务异常: 转换为统一 {code, message} 响应"""
-    import logging  # noqa: PLC0415
     logging.getLogger("app.main").warning(
         "AppException %s on %s %s: %s",
         exc.code, request.method, request.url.path, exc.message,
@@ -157,7 +194,6 @@ async def app_exception_handler(request: Request, exc: AppException):
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """未捕获异常: 记录完整堆栈, 对前端仅返回脱敏的 500"""
-    import logging  # noqa: PLC0415
     logging.getLogger("app.main").exception(
         "Unhandled exception on %s %s", request.method, request.url.path
     )

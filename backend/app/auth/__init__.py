@@ -28,10 +28,11 @@ Auth Application — 业务应用 2/4
 - Token 生成/校验委托 middleware/security/jwt (Stage 3 完善)
 
 **v3.0.0 Stage 2 新增**: 多应用架构骨架
+**v3.0.0 Stage 2.7**: get_routes() 返回单条路由
 """
 from fastapi import APIRouter
 
-from app.common.interfaces import AppInterface
+from app.common.interfaces import AppInterface, RouteEntry
 from app.registry import AppRegistry
 
 
@@ -50,18 +51,21 @@ class AuthApp(AppInterface):
     def router(self) -> APIRouter:
         return _auth_router
 
+    def get_routes(self) -> list[RouteEntry]:
+        """返回 1 个路由条目: auth"""
+        from app.auth.api import auth as auth_api
+        return [
+            RouteEntry(auth_api, "/api/auth", ["用户认证"]),
+        ]
+
     def register_events(self) -> list[str]:
         return [
             "user.deleted",  # 清理该用户的所有 token/session
         ]
 
 
-# ============== 根路由 (Stage 2.5 之后会聚合 auth 路由) ==============
+# ============== 根路由 (兼容旧 default get_routes 实现) ==============
 _auth_router = APIRouter()
-
-# Stage 2.5 完成后, 这里会类似:
-# from app.auth.api.auth import router as auth_router
-# _auth_router.include_router(auth_router, tags=["用户认证"])
 
 
 # ============== 应用注册 ==============

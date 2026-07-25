@@ -17,11 +17,31 @@
 - plugin/*/ 依赖 common/interfaces.py (实现 PluginInterface)
 
 v3.0.0 Stage 2 新增
+v3.0.0 Stage 2.7: 新增 RouteEntry NamedTuple + AppInterface.get_routes() 默认实现
 """
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, NamedTuple, Optional
 
 from fastapi import APIRouter
+
+
+# ============== RouteEntry (Stage 2.7 新增) ==============
+
+class RouteEntry(NamedTuple):
+    """应用路由条目: (router, prefix, tags)
+
+    用于 AppInterface.get_routes() 返回值, main.py 用它批量挂载.
+    一个应用可以返回多个 RouteEntry, 对应多个前缀的路由组.
+
+    Example:
+        >>> entries = [
+        ...     RouteEntry(user_router, "/api/users", ["用户管理"]),
+        ...     RouteEntry(stats_router, "/api/stats", ["统计分析"]),
+        ... ]
+    """
+    router: APIRouter
+    prefix: str = ""
+    tags: List[str] = []
 
 
 # ============== AppInterface ==============
@@ -35,9 +55,12 @@ class AppInterface(ABC):
     必填属性:
     - name: 应用名 (e.g. "admin", "auth", "tasks", "annotation")
     - version: 应用版本 (语义化版本)
-    - router: FastAPI APIRouter, 包含本应用所有路由
+    - router: FastAPI APIRouter, 包含本应用所有路由 (默认聚合根)
 
-    可选钩子:
+    可选方法 (Stage 2.7 增强):
+    - get_routes: 返回 (router, prefix, tags) 三元组列表, 用于多 prefix 场景
+      默认实现: 返回 [(self.router, "", [])]
+      子类可 override 返回多个条目.
     - register_events: 返回本应用订阅的领域事件列表
     - startup: 应用启动时执行 (e.g. 预热缓存, 注册定时任务)
     - shutdown: 应用关闭时执行 (e.g. 释放资源)
@@ -56,7 +79,18 @@ class AppInterface(ABC):
     @property
     @abstractmethod
     def router(self) -> APIRouter:
-        """FastAPI 路由 (本应用全部端点)"""
+        """FastAPI 路由 (本应用全部端点的聚合根)"""
+
+    def get_routes(self) -> List[RouteEntry]:
+        """返回本应用的所有路由条目 (router, prefix, tags)
+
+        默认实现: 单一 router, 无 prefix, 无 tags.
+        子类可 override 返回多个条目, 例如 admin:
+            [(user_router, "/api/users", ["用户管理"]),
+             (stats_router, "/api/stats", ["统计分析"]),
+             (system_router, "/api", ["系统"])]
+        """
+        return [RouteEntry(router=self.router, prefix="", tags=[])]
 
     def register_events(self) -> List[str]:
         """本应用订阅的领域事件名列表 (用于 EventBus.subscribe)"""
@@ -198,6 +232,7 @@ EventHandler = Callable[[dict], Any]
 
 
 __all__ = [
+    "RouteEntry",
     "AppInterface",
     "PluginInterface",
     "StorageInterface",

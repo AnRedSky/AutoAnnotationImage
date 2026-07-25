@@ -36,10 +36,11 @@ Tasks Application — 业务应用 3/4
 - 文件存储 (MinIO/Local) 在 service 层使用, 通过 storage_service 抽象
 
 **v3.0.0 Stage 2 新增**: 多应用架构骨架
+**v3.0.0 Stage 2.7**: get_routes() 返回 9 个路由条目
 """
 from fastapi import APIRouter
 
-from app.common.interfaces import AppInterface
+from app.common.interfaces import AppInterface, RouteEntry
 from app.registry import AppRegistry
 
 
@@ -57,6 +58,31 @@ class TasksApp(AppInterface):
     @property
     def router(self) -> APIRouter:
         return _tasks_router
+
+    def get_routes(self) -> list[RouteEntry]:
+        """返回 9 个路由条目: tasks 应用的全部 API"""
+        from app.tasks.api import (
+            dataset as dataset_api,
+            image as image_api,
+            training as training_api,
+            model as model_api,
+            auto_annotate as auto_annotate_api,
+            export as export_api,
+            detection as detection_api,
+            segmentation as segmentation_api,
+            files as files_api,
+        )
+        return [
+            RouteEntry(dataset_api, "/api/datasets", ["数据集管理"]),
+            RouteEntry(image_api, "/api/images", ["图像管理"]),
+            RouteEntry(training_api, "/api/training", ["模型训练"]),
+            RouteEntry(model_api, "/api/models", ["模型管理"]),
+            RouteEntry(auto_annotate_api, "/api/auto-annotate", ["AI预标注"]),
+            RouteEntry(export_api, "/api/export", ["标注导出"]),
+            RouteEntry(detection_api, "/api/detection", ["目标检测"]),
+            RouteEntry(segmentation_api, "/api/segmentation", ["图像分割"]),
+            RouteEntry(files_api, "/api/files", ["文件服务"]),
+        ]
 
     def register_events(self) -> list[str]:
         return [
@@ -76,29 +102,8 @@ class TasksApp(AppInterface):
         ]
 
 
-# ============== 根路由 (Stage 2.5 之后会聚合 9 个子模块) ==============
+# ============== 根路由 (兼容旧 default get_routes 实现) ==============
 _tasks_router = APIRouter()
-
-# Stage 2.5 完成后, 这里会类似:
-# from app.tasks.api.dataset import router as dataset_router
-# from app.tasks.api.image import router as image_router
-# from app.tasks.api.training import router as training_router
-# from app.tasks.api.model import router as model_router
-# from app.tasks.api.auto_annotate import router as auto_annotate_router
-# from app.tasks.api.export import router as export_router
-# from app.tasks.api.detection import router as detection_router
-# from app.tasks.api.segmentation import router as segmentation_router
-# from app.tasks.api.files import router as files_router
-#
-# _tasks_router.include_router(dataset_router, prefix="/datasets", tags=["数据集管理"])
-# _tasks_router.include_router(image_router, prefix="/images", tags=["图像管理"])
-# _tasks_router.include_router(training_router, prefix="/training", tags=["模型训练"])
-# _tasks_router.include_router(model_router, prefix="/models", tags=["模型管理"])
-# _tasks_router.include_router(auto_annotate_router, prefix="/auto-annotate", tags=["AI预标注"])
-# _tasks_router.include_router(export_router, prefix="/export", tags=["标注导出"])
-# _tasks_router.include_router(detection_router, prefix="/detection", tags=["目标检测"])
-# _tasks_router.include_router(segmentation_router, prefix="/segmentation", tags=["图像分割"])
-# _tasks_router.include_router(files_router, prefix="/files", tags=["文件服务"])
 
 
 # ============== 应用注册 ==============

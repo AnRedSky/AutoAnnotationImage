@@ -17,8 +17,8 @@ Annotation Application — 业务应用 4/4
 
 **目录约定**:
 - api/        路由层 (annotation.py)
-- service/    业务编排 (AnnotationService, BBoxService)
-- schema/     Pydantic DTO (AnnotationAction, BBoxIn, MaskIn)
+- service/ 业务编排 (AnnotationService, BBoxService)
+- schema/ Pydantic DTO (AnnotationAction, BBoxIn, MaskIn)
 - repository/ 复杂查询 (annotation_repo, bbox_repo, mask_repo)
 
 **重要约束**:
@@ -27,10 +27,11 @@ Annotation Application — 业务应用 4/4
 - 不持有 Image/Category 的写逻辑, 只持有标注本身的写逻辑
 
 **v3.0.0 Stage 2 新增**: 多应用架构骨架
+**v3.0.0 Stage 2.7**: get_routes() 返回单条路由
 """
 from fastapi import APIRouter
 
-from app.common.interfaces import AppInterface
+from app.common.interfaces import AppInterface, RouteEntry
 from app.registry import AppRegistry
 
 
@@ -49,17 +50,20 @@ class AnnotationApp(AppInterface):
     def router(self) -> APIRouter:
         return _annotation_router
 
+    def get_routes(self) -> list[RouteEntry]:
+        """返回 1 个路由条目: annotation"""
+        from app.annotation.api import annotation as annotation_api
+        return [
+            RouteEntry(annotation_api, "/api/annotations", ["标注管理"]),
+        ]
+
     def register_events(self) -> list[str]:
         # Annotation 是被订阅方 (上游), 主动发布事件
         return []
 
 
-# ============== 根路由 (Stage 2.5 之后会聚合 annotation 路由) ==============
+# ============== 根路由 (兼容旧 default get_routes 实现) ==============
 _annotation_router = APIRouter()
-
-# Stage 2.5 完成后, 这里会类似:
-# from app.annotation.api.annotation import router as annotation_router
-# _annotation_router.include_router(annotation_router, tags=["标注管理"])
 
 
 # ============== 应用注册 ==============

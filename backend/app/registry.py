@@ -4,7 +4,7 @@
 
 **职责**:
 - 注册所有业务应用 (AppInterface 实现类)
-- 提供应用路由的自动聚合 (main.py 用 all_routers() 挂载)
+- 提供应用路由的自动聚合 (main.py 用 iter_routes() 挂载)
 - 提供应用启动/关闭钩子的统一调用 (lifespan 用 startup_all / shutdown_all)
 - 提供按名查询单个应用 (e.g. AppRegistry.get("tasks"))
 
@@ -12,13 +12,16 @@
 ```python
 # 在 app/tasks/__init__.py
 from app.registry import AppRegistry
+from app.common.interfaces import RouteEntry
 from app.tasks.api import router
 
-class TasksApp:
+class TasksApp(AppInterface):
     name = "tasks"
     version = "1.0.0"
     @property
     def router(self): return router
+    def get_routes(self):
+        return [RouteEntry(dataset_router, "/api/datasets", ["数据集管理"]), ...]
     def register_events(self): return ["task.started", "task.completed"]
     async def startup(self): ...
     async def shutdown(self): ...
@@ -30,13 +33,18 @@ AppRegistry.register(TasksApp())
 main.py 调用 `AppRegistry.discover_apps(["admin", "auth", "tasks", "annotation"])`,
 会 import app/{name}/__init__.py 触发 register() 调用, 避免手写 import 列表.
 
+**路由挂载** (Stage 2.7):
+main.py 用 `for entry in AppRegistry.iter_routes(): app.include_router(entry.router, prefix=entry.prefix, tags=entry.tags)`,
+无需手写 14 行 include_router.
+
 v3.0.0 Stage 2 新增
+v3.0.0 Stage 2.7: 新增 iter_routes() 辅助方法
 """
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from app.common.interfaces import AppInterface
+    from app.common.interfaces import AppInterface, RouteEntry
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +79,36 @@ class AppRegistry:
 
     @classmethod
     def all_routers(cls):
-        """获取所有应用路由 (供 main.py 挂载)"""
+        """获取所有应用路由 (供 main.py 挂载, 旧 API 兼容)
+
+        Deprecated: 推荐使用 iter_routes() 携带 prefix + tags.
+        """
         return [app.router for app in cls._apps.values()]
+
+    @classmethod
+    def iter_routes(cls) -> List[Tuple[str, "RouteEntry"]]:
+        """获取所有应用的路由条目 (app_name, RouteEntry) 列表
+
+        Stage 2.7 新增: 返回 (应用名, RouteEntry) 元组, main.py 循环挂载.
+        每个应用通过 AppInterface.get_routes() 返回自己的路由条目.
+
+        Returns:
+            List[(app_name, RouteEntry)]: 例如
+              [("admin", RouteEntry(user_router, "/api/users", ["用户管理"])),
+               ("admin", RouteEntry(stats_router, "/api/stats", ["统计分析"])),
+               ("auth", RouteEntry(auth_router, "/api/auth", ["用户认证"])),
+               ...]
+        """
+        result: List[Tuple[str, "RouteEntry"]] = []
+        for app in cls._apps.values():
+            try:
+                entries = app.get_routes()
+            except Exception:  # noqa: BLE001
+                logger.exception(f"AppRegistry: app '{app.name}' get_routes() failed, skip")
+                continue
+            for entry in entries:
+                result.append((app.name, entry))
+        return result
 
     @classmethod
     async def startup_all(cls) -> None:

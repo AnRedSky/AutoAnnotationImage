@@ -22,10 +22,11 @@ Admin Application — 业务应用 1/4
 - events.py 订阅领域事件 (UserCreated → 初始化默认数据集)
 
 **v3.0.0 Stage 2 新增**: 多应用架构骨架
+**v3.0.0 Stage 2.7**: get_routes() 返回多 prefix 路由条目, main.py 自动挂载
 """
 from fastapi import APIRouter
 
-from app.common.interfaces import AppInterface
+from app.common.interfaces import AppInterface, RouteEntry
 from app.registry import AppRegistry
 
 
@@ -42,8 +43,25 @@ class AdminApp(AppInterface):
 
     @property
     def router(self) -> APIRouter:
-        # Stage 2.3-2.5 后, 这里会合并 user/stats/system 的子路由
+        # 默认聚合根 (空), Stage 2.7 推荐使用 get_routes() 多 prefix 方案
         return _admin_router
+
+    def get_routes(self) -> list[RouteEntry]:
+        """返回 3 个路由条目: user / stats / system
+
+        system 路由挂在 /api (而不是 /api/admin), 因为它是无鉴权的系统级端点.
+
+        注意: app.{name}.api 包的 __init__ 已经把每个子 router 重新导出为同名属性
+        (user / system / stats), 因此 user_api 本身就是 APIRouter, 无需 .router
+        """
+        from app.admin.api import user as user_api
+        from app.admin.api import stats as stats_api
+        from app.admin.api import system as system_api
+        return [
+            RouteEntry(user_api, "/api/users", ["用户管理"]),
+            RouteEntry(stats_api, "/api/stats", ["统计分析"]),
+            RouteEntry(system_api, "/api", ["系统"]),
+        ]
 
     def register_events(self) -> list[str]:
         return [
@@ -53,16 +71,8 @@ class AdminApp(AppInterface):
         ]
 
 
-# ============== 根路由 (Stage 2.5 之后会聚合子模块) ==============
+# ============== 根路由 (兼容旧 default get_routes 实现) ==============
 _admin_router = APIRouter()
-
-# Stage 2.3-2.5 完成后, 这里会类似:
-# from app.admin.api.user import router as user_router
-# from app.admin.api.stats import router as stats_router
-# from app.admin.api.system import router as system_router
-# _admin_router.include_router(user_router, prefix="/users", tags=["用户管理"])
-# _admin_router.include_router(stats_router, prefix="/stats", tags=["统计分析"])
-# _admin_router.include_router(system_router, tags=["系统"])
 
 
 # ============== 应用注册 ==============
