@@ -20,6 +20,8 @@ import {
 import AnnotationViewer from './components/AnnotationViewer.vue'
 import UploadQueue from '../Datasets/components/UploadQueue.vue'  // 与 Datasets 列表页共享同一组件 (同模块复用)
 import PreviewList from './components/PreviewList.vue'
+// v3.0.0 Phase H: 预览弹窗抽离为子组件, page 只剩 <PreviewDialog />
+import PreviewDialog from './components/PreviewDialog.vue'
 import { getTaskTypeMeta } from '@/utils/taskType'
 
 const route = useRoute()
@@ -341,36 +343,9 @@ async function onPreviewConfidence() {
   }
 }
 
-/** 按 reason 分组, 用于弹窗内 Tab 切换 */
-const previewGroups = computed(() => {
-  const r = previewResult.value
-  if (!r) return { would: [] as any[], human: [] as any[], none: [] as any[] }
-  return {
-    would: r.items.filter((x: any) => x.would_label),
-    human: r.items.filter((x: any) => !x.would_label && x.reason !== 'no_match'),
-    none:  r.items.filter((x: any) => x.reason === 'no_match'),
-  }
-})
-const previewActiveTab = ref('would')
-
-function previewReasonLabel(reason: string): string {
-  return {
-    would_label: '≥ 阈值, 会被自动标注',
-    below_threshold: '低于阈值, 保留待人工',
-    not_in_categories: '不在项目类目',
-    no_match: '模型输出与项目类目无交集',
-  }[reason] || reason
-}
-
-function previewReasonType(reason: string): 'success' | 'warning' | 'info' | 'danger' {
-  const t: Record<string, 'success' | 'warning' | 'info' | 'danger'> = {
-    would_label: 'success',
-    below_threshold: 'warning',
-    not_in_categories: 'info',
-    no_match: 'danger',
-  }
-  return t[reason] || 'info'
-}
+// previewGroups / previewActiveTab / previewReasonLabel / previewReasonType
+// v3.0.0 Phase H: 已抽离到 components/PreviewDialog.vue
+// page 只保留 dialog 可见性 + loading + result 三个 state
 
 async function onAutoAnnotate() {
   if (!datasetId.value) return
@@ -1159,91 +1134,17 @@ watch(() => route.params.id, resetPage)
       />
     </el-dialog>
 
-    <!-- 置信度测评结果弹窗 (非破坏性预览) -->
-    <el-dialog
+    <!-- 置信度测评结果弹窗 (非破坏性预览) - v3.0.0 Phase H: 抽离为子组件 -->
+    <PreviewDialog
       v-model="previewDialogVisible"
-      title="置信度测评结果"
-      width="980px"
-      :close-on-click-modal="false"
-      destroy-on-close
-    >
-      <div v-if="previewResult" class="preview-summary">
-        <el-alert
-          v-if="previewResult.warning"
-          :title="previewResult.warning"
-          type="warning" :closable="false" show-icon
-          style="margin-bottom: 12px;"
-        />
-        <div class="preview-summary__cards">
-          <div class="preview-card preview-card--success">
-            <div class="preview-card__num">{{ previewResult.would_label }}</div>
-            <div class="preview-card__label">将被自动标注</div>
-            <div class="preview-card__hint">≥ 阈值 {{ (previewResult.threshold * 100).toFixed(0) }}% 且在项目类目内</div>
-          </div>
-          <div class="preview-card preview-card--warning">
-            <div class="preview-card__num">{{ previewResult.need_human }}</div>
-            <div class="preview-card__label">需人工复核</div>
-            <div class="preview-card__hint">低于阈值 / top-1 不在项目类目</div>
-          </div>
-          <div class="preview-card preview-card--danger">
-            <div class="preview-card__num">{{ previewResult.no_match }}</div>
-            <div class="preview-card__label">无匹配</div>
-            <div class="preview-card__hint">模型输出与项目类目无交集</div>
-          </div>
-        </div>
-        <div class="preview-summary__model">
-          测评模型:
-          <b v-if="previewResult.used_finetune && previewResult.finetune_name">
-            {{ previewResult.finetune_name }}
-            <span style="color: #909399; font-weight: normal; font-size: 12px;">
-              (基础模型 {{ previewResult.base_model || previewResult.model_name }})
-            </span>
-          </b>
-          <b v-else>{{ previewResult.model_name || '(空)' }}</b>
-          <el-tag
-            v-if="previewResult.used_finetune" type="success" size="small" effect="plain"
-            style="margin-left: 8px;"
-          >fine-tune</el-tag>
-          <el-tag
-            v-else type="info" size="small" effect="plain"
-            style="margin-left: 8px;"
-          >timm 预训练</el-tag>
-        </div>
-      </div>
-
-      <el-tabs v-model="previewActiveTab" class="preview-tabs">
-        <el-tab-pane :name="'would'">
-          <template #label>
-            <span><el-icon><Check /></el-icon> 会被标注 ({{ previewGroups.would.length }})</span>
-          </template>
-          <PreviewList :items="previewGroups.would" :task-type="currentDatasetTaskType" />
-        </el-tab-pane>
-        <el-tab-pane :name="'human'">
-          <template #label>
-            <span><el-icon><InfoFilled /></el-icon> 需人工复核 ({{ previewGroups.human.length }})</span>
-          </template>
-          <PreviewList :items="previewGroups.human" :task-type="currentDatasetTaskType" />
-        </el-tab-pane>
-        <el-tab-pane :name="'none'">
-          <template #label>
-            <span><el-icon><CircleClose /></el-icon> 无匹配 ({{ previewGroups.none.length }})</span>
-          </template>
-          <PreviewList :items="previewGroups.none" :task-type="currentDatasetTaskType" />
-        </el-tab-pane>
-      </el-tabs>
-
-      <template #footer>
-        <el-button @click="previewDialogVisible = false">关闭</el-button>
-        <el-button
-          type="primary" :icon="Lightning"
-          :loading="autoLabeling"
-          @click="async () => {
-            previewDialogVisible = false
-            await onAutoAnnotate()
-          }"
-        >应用并启动预标注</el-button>
-      </template>
-    </el-dialog>
+      :result="previewResult"
+      :task-type="currentDatasetTaskType"
+      :auto-labeling="autoLabeling"
+      @apply="async () => {
+        previewDialogVisible = false
+        await onAutoAnnotate()
+      }"
+    />
   </div>
 </template>
 
@@ -1657,65 +1558,7 @@ watch(() => route.params.id, resetPage)
   .filter-cell--btn-primary { font-size: 12px; padding: 0 10px; }
 }
 
-/* 测评结果弹窗: 顶部三张统计卡 */
-.preview-summary {
-  margin-bottom: 12px;
-}
-.preview-summary__cards {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.preview-card {
-  border-radius: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--border-soft);
-  background: var(--bg-card);
-  position: relative;
-  overflow: hidden;
-}
-.preview-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  opacity: 0.06;
-  pointer-events: none;
-}
-.preview-card--success { border-color: rgba(103, 194, 58, 0.4); }
-.preview-card--success::before { background: #67c23a; }
-.preview-card--warning { border-color: rgba(230, 162, 60, 0.4); }
-.preview-card--warning::before { background: #e6a23c; }
-.preview-card--danger  { border-color: rgba(245, 108, 108, 0.4); }
-.preview-card--danger::before  { background: #f56c6c; }
-.preview-card__num {
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1;
-  margin-bottom: 6px;
-}
-.preview-card--success .preview-card__num { color: #67c23a; }
-.preview-card--warning .preview-card__num { color: #e6a23c; }
-.preview-card--danger  .preview-card__num { color: #f56c6c; }
-.preview-card__label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  margin-bottom: 2px;
-}
-.preview-card__hint {
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.4;
-}
-.preview-summary__model {
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding: 4px 0;
-}
-.preview-summary__model b { color: var(--text-primary); font-weight: 600; }
-.preview-tabs { margin-top: 4px; }
-.preview-tabs :deep(.el-tabs__header) { margin-bottom: 8px; }
+/* 测评结果弹窗样式 - v3.0.0 Phase H: 已迁入 components/PreviewDialog.vue */
 /* Fine-tune 下拉选项已与 Annotate.vue 视觉对齐:
    名称 + 灰字「· base_model」 + 绿字准确率 (由内联 style 控制),
    此处不再需要 ft-option 系列样式 */
