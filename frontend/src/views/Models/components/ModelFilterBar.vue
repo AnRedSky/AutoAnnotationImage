@@ -23,7 +23,6 @@ const props = defineProps<{
   selectedCount: number
   batchActivating: boolean
   batchDeleting: boolean
-  compareDisabled: boolean  // selectedCount === 2
 }>()
 
 const emit = defineEmits<{
@@ -35,7 +34,6 @@ const emit = defineEmits<{
   (e: 'batch-activate'): void
   (e: 'batch-deactivate'): void
   (e: 'batch-delete'): void
-  (e: 'compare'): void
 }>()
 
 // 计算属性: 任务类型变化时, 数据集下拉只显示同任务类型的数据集
@@ -135,13 +133,6 @@ const onKeywordInput = (val: string) => {
         @click="emit('batch-delete')"
       >
         批量删除<span v-if="selectedCount > 0"> ({{ selectedCount }})</span>
-      </el-button>
-      <el-button
-        type="primary"
-        :disabled="compareDisabled"
-        @click="emit('compare')"
-      >
-        对比所选
       </el-button>
     </div>
   </div>

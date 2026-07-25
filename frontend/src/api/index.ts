@@ -356,8 +356,6 @@ export const modelApi = {
   // 批量删除: 后端单事务, 任一不存在则 4xx 全部回滚 (激活的不再拒绝, v2 改造)
   // 成功返回 {success, deleted_ids, files_deleted, detail:[{id, name, deleted_file}]}
   batchRemove: (ids: number[]) => http.post('/models/batch-delete', { ids }),
-  compare: (a: number, b: number) =>
-    http.get(`/stats/models/compare/${a}/${b}`)
 }
 
 // ============== 导出 ==============

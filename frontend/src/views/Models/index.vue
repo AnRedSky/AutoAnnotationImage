@@ -25,7 +25,6 @@ import ModelStatsRow from './components/ModelStatsRow.vue'
 import ModelFilterBar from './components/ModelFilterBar.vue'
 import ModelTable from './components/ModelTable.vue'
 import ModelDetailDialog from './components/ModelDetailDialog.vue'
-import ModelCompareDialog from './components/ModelCompareDialog.vue'
 
 // ============== 列表数据 + 操作 (委托 useModelList) ==============
 const data = ref<any[]>([])
@@ -44,11 +43,9 @@ const {
   onSelectionChange,
 } = useModelList({ data, loading })
 
-// ============== 详情/对比 弹窗 state ==============
+// ============== 详情 弹窗 state ==============
 const detail = ref<any>(null)
-const compare = ref<any>(null)
 const detailOpen = ref(false)
-const compareOpen = ref(false)
 
 // ============== 筛选条件 (即时生效) ==============
 const filterKeyword = ref('')
@@ -138,7 +135,7 @@ const stats = computed(() => {
   return { total, active, bestAcc, bestName, baseCount: bases.size }
 })
 
-// ============== 详情/对比 触发 ==============
+// ============== 详情 触发 ==============
 const onDetail = async (id: number) => {
   try {
     const d: any = await modelApi.detail(id)
@@ -149,21 +146,7 @@ const onDetail = async (id: number) => {
   }
 }
 
-const onCompare = async () => {
-  if (selectedIds.value.length !== 2) {
-    ElMessage.warning('请选择恰好 2 个版本进行对比')
-    return
-  }
-  try {
-    const c: any = await modelApi.compare(selectedIds.value[0], selectedIds.value[1])
-    compare.value = c
-    compareOpen.value = true
-  } catch (e: any) {
-    ElMessage.error('对比失败: ' + (e?.response?.data?.detail || e?.message))
-  }
-}
-
-// ============== 批量激活/取消激活/对比 (page 编排) ==============
+// ============== 批量激活/取消激活 (page 编排) ==============
 const onBatchActivate = () => onBatchSetActive(true)
 const onBatchDeactivate = () => onBatchSetActive(false)
 
@@ -212,13 +195,11 @@ onMounted(load)
       :selected-count="selectedIds.length"
       :batch-activating="batchActivating"
       :batch-deleting="batchDeleting"
-      :compare-disabled="selectedIds.length !== 2"
       @change:task-type="onTaskTypeChange"
       @change:filter="onFilterChange"
       @batch-activate="onBatchActivate"
       @batch-deactivate="onBatchDeactivate"
       @batch-delete="onBatchDelete"
-      @compare="onCompare"
     />
 
     <!-- 表格 (拆分) -->
@@ -251,9 +232,6 @@ onMounted(load)
 
     <!-- 详情弹窗 (拆分) -->
     <ModelDetailDialog v-model="detailOpen" :model="detail" />
-
-    <!-- 对比弹窗 (拆分) -->
-    <ModelCompareDialog v-model="compareOpen" :compare="compare" />
   </div>
 </template>
 
