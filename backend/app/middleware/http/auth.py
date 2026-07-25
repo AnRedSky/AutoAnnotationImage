@@ -2,7 +2,7 @@
 FastAPI Auth Dependencies (Middleware Layer)
 ============================================
 
-v3.0.0 迁移: 从 app.core.deps 迁入 app.middleware.http.auth
+v3.0.0 迁移: 从 app.middleware.http.auth 迁入 app.middleware.http.auth
 """
 from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.middleware.security.security import decode_token
-from app.model.user import User
+from app.admin.model.user import User
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")

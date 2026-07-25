@@ -42,7 +42,7 @@ def configure_ultralytics() -> None:
       <ULTRALYTICS_HOME>/weights 等子目录
     """
     try:
-        from app.config import settings
+        from app.core.config import settings
     except Exception as e:
         # 在早期模块加载阶段 settings 还没初始化, 直接跳过
         logger.debug(f"[ultralytics_setup] skip, settings not ready: {e}")
@@ -100,7 +100,7 @@ def migrate_legacy_yolo_weights(backend_root: Path | None = None) -> int:
     Returns:
         实际迁移的文件数
     """
-    from app.config import settings
+    from app.core.config import settings
 
     target = settings.ULTRALYTICS_WEIGHTS_DIR
     target.mkdir(parents=True, exist_ok=True)

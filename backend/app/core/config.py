@@ -5,7 +5,7 @@ Application Configuration (Core Layer)
 All configs from environment variables, with sensible defaults for dev.
 兼容 .env (SECRET_KEY/MYSQL_DATABASE) 与 直传 (DATABASE_URL) 两种方式。
 
-v3.0.0 迁移: 从 app.config 迁入 app.core.config (Phase 1.7)
+v3.0.0 迁移: 从 app.core.config 迁入 app.core.config (Phase 1.7)
 """
 import os
 from pathlib import Path

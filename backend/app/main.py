@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import settings
+from app.core.config import settings
 from app.core.exceptions import AppException, to_response_payload
 from app.database import init_db, engine
 from app.registry import AppRegistry

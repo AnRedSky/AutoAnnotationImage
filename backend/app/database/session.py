@@ -8,7 +8,7 @@ v3.0.0 迁移: 从 app.database 拆出 (Phase 1.9)
 """
 from app.core.config import settings
 from app.database.engine import engine, AsyncSessionLocal
-from app.model.base import Base
+from app.common.base_model import Base
 
 
 async def get_db():
@@ -31,7 +31,9 @@ async def init_db():
       现在启动时自动跑迁移, 用户零感知.
     """
     # 必须在 create_all 之前 import models, 避免 Base.metadata 为空导致建不出表
-    import app.model  # noqa: F401
+    import app.tasks.model  # noqa: F401
+    import app.admin.model  # noqa: F401
+    import app.annotation.model  # noqa: F401
     import app.core.db_migration as dbm  # noqa: PLC0415
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

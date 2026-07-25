@@ -20,7 +20,7 @@ Database Package — 数据库基础设施 (横切复用)
 # Re-export 所有公共符号, 保持向后兼容
 from app.database.engine import engine, AsyncSessionLocal  # noqa: F401
 from app.database.session import get_db, init_db  # noqa: F401
-from app.model.base import Base  # noqa: F401
+from app.common.base_model import Base  # noqa: F401
 
 __all__ = [
     "engine",

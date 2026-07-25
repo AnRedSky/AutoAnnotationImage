@@ -6,7 +6,7 @@ Redis Client Singleton
 关键：必须从 .env 实时读取端口，而不是 os.getenv（避免 import 顺序问题）。
 app.config.settings 用了 pydantic-settings 自动从 .env 加载，端口统一从那里来。
 """
-from app.config import settings
+from app.core.config import settings
 import redis
 
 REDIS_HOST = settings.REDIS_HOST
