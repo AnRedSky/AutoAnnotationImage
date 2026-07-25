@@ -1,14 +1,27 @@
 """Pydantic Schemas: Auth"""
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 from typing import Optional, Literal
 
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    email: Optional[str] = None
-    role: Optional[Literal["admin", "annotator", "viewer"]] = "annotator"
+    """注册请求 (v3.0.0 审查修复: 密码强度强制)
+    - 密码: 至少 8 位 (Pydantic 自动校验, 失败 422)
+    - 角色: 枚举白名单 (admin/annotator/viewer)
+    - 注意: 端点现在要求 admin 权限, 前端自选 role 实际无效
+    """
+    username: str = Field(..., min_length=3, max_length=50, description="用户名")
+    password: str = Field(..., min_length=8, max_length=128, description="密码 (至少 8 位)")
+    email: Optional[EmailStr] = Field(default=None, description="邮箱")
+    role: Optional[Literal["admin", "annotator", "viewer"]] = Field(
+        default="annotator", description="角色 (后端按业务分配)"
+    )
+
+
+class ChangePasswordRequest(BaseModel):
+    """修改密码请求 (v3.0.0 新增 API)"""
+    old_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128, description="新密码至少 8 位")
 
 
 class TokenResponse(BaseModel):

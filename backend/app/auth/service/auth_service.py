@@ -3,11 +3,12 @@ AuthService — 认证业务服务 (app/auth/service/)
 ============================================
 
 **职责**:
-- 登录 / 注册 / Token 签发
+- 登录 / 注册 / Token 签发 / 改密
 - 权限校验封装
 - 密码哈希
 
 **v3.0.0 Stage 2.4 迁移**: 从 app/services/auth_service.py 迁入 auth 应用
+**v3.0.0 审查修复**: 新增 `issue_token` 静态方法统一 Token 签发入口
 """
 from __future__ import annotations
 
@@ -28,6 +29,18 @@ class AuthService:
     """认证业务服务 (无状态, 静态方法)"""
 
     @staticmethod
+    def issue_token(user: User) -> str:
+        """统一 Token 签发入口 (login/register 都用)
+        v3.0.0 审查修复: 避免 token payload 格式漂移
+        """
+        return create_access_token({
+            "sub": str(user.id),
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+        })
+
+    @staticmethod
     async def login(
         db: AsyncSession,
         username: str,
@@ -41,7 +54,7 @@ class AuthService:
         if not user.is_active:
             raise HTTPException(403, "账号已停用, 请联系管理员")
 
-        token = create_access_token({"sub": user.username, "id": user.id, "role": user.role})
+        token = AuthService.issue_token(user)
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -61,7 +74,12 @@ class AuthService:
         email: Optional[str] = None,
         role: str = "annotator",
     ) -> User:
-        """注册新用户"""
+        """注册新用户 (v3.0.0 审查修复: 角色白名单 + 密码强度)
+
+        - 密码长度: AuthService 防御性 6 位, Schema 层强制 8 位 (双重保护)
+        - 重复用户名: 409 Conflict
+        - 角色白名单: admin/annotator/viewer
+        """
         if len(password) < 6:
             raise HTTPException(422, "密码长度至少 6 位")
 

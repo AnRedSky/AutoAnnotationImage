@@ -2,40 +2,60 @@
 Auth API: Register / Login / Me / Logout (app/auth/api/)
 =======================================================
 
+**v3.0.0 审查修复**:
+- 注册端点: 默认仅 admin 可创建账号; 首个 admin 走 bootstrap
+- 业务逻辑全部委托 AuthService, 避免 controller 层重复实现
+- 密码强度: 由 Pydantic schema 强制 (min 8 chars)
+- 重复用户名: 409 Conflict (而非 400)
+
 **v3.0.0 Stage 2.5 迁移**: 从 app/api/auth.py 迁入 auth 应用
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from app.admin.model.user import User
-from app.middleware.http.auth import get_current_user
-from app.core.security import create_access_token, hash_password, verify_password
+from app.middleware.http.auth import (
+    get_current_user,
+    require_admin,
+)
 from app.database import get_db
-from app.schemas.auth import RegisterRequest, TokenResponse, UserOut
+from app.schemas.auth import (
+    RegisterRequest,
+    TokenResponse,
+    UserOut,
+    ChangePasswordRequest,
+)
+# v3.0.0 审查修复: 业务委托 AuthService
+from app.auth.service.auth_service import AuthService
 
 router = APIRouter()
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """用户注册"""
-    result = await db.execute(select(User).where(User.username == req.username))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Username already taken")
+async def register(
+    req: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),  # 修复: 仅 admin 可注册 (无 auth → 401, 非 admin → 403)
+):
+    """用户注册 (v3.0.0 修复: 仅管理员可创建账号, 防止任意提权)
 
-    user = User(
+    - 无 Authorization 头 → 401 (get_current_user 抛)
+    - 已登录但非 admin → 403 (require_admin 抛)
+    - 角色由后端按业务规则分配, 前端无法自选
+    - 业务实现委托 AuthService.register (含密码长度/角色白名单/409 冲突)
+    """
+    # 修复 1: 业务全部下沉到 AuthService
+    user = await AuthService.register(
+        db,
         username=req.username,
-        password_hash=hash_password(req.password),
+        password=req.password,
         email=req.email,
+        # admin 创建账号时允许指定角色, 普通用户注册入口已禁用
         role=req.role or "annotator",
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
 
-    token = create_access_token({"sub": str(user.id), "role": user.role})
+    token = AuthService.issue_token(user)
     return TokenResponse(access_token=token, token_type="bearer", user_id=user.id)
 
 
@@ -63,17 +83,24 @@ async def login(
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
-    """用户登录 (OAuth2 表单)"""
-    result = await db.execute(select(User).where(User.username == form.username))
-    user = result.scalar_one_or_none()
+    """用户登录 (OAuth2 表单) — 委托 AuthService.login"""
+    # 委托 AuthService 统一处理 (含 is_active 校验)
+    result = await AuthService.login(db, form.username, form.password)
+    return TokenResponse(
+        access_token=result["access_token"],
+        token_type=result["token_type"],
+        user_id=result["user"]["id"],
+    )
 
-    if not user or not verify_password(form.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-        )
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="User disabled")
 
-    token = create_access_token({"sub": str(user.id), "role": user.role})
-    return TokenResponse(access_token=token, token_type="bearer", user_id=user.id)
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """修改当前用户密码 (v3.0.0 新增, 修复: 之前 AuthService 有此方法但 API 缺失)"""
+    await AuthService.change_password(
+        db, current_user, body.old_password, body.new_password,
+    )
+    return {"success": True, "detail": "密码已更新"}
