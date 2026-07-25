@@ -9,7 +9,7 @@ TrainingDataService — 训练数据加载与模型保存 (v3.0.0 Phase 5)
 
 **v3.0.0 Phase 5 设计**:
 - 从 `ml/train.py:run_training` 抽出所有 DB IO 逻辑
-- ML 模块只接收"已加载样本"和"已计算指标", 不再 import app.model / app.database
+- ML 模块只接收"已加载样本"和"已计算指标", 不再 import ORM 模型层 / app.database
 - Worker 通过 `data_loader` / `model_saver` 回调注入本服务
 
 **API 调用模式**:
@@ -59,9 +59,9 @@ class TrainingDataService:
         """
         from sqlalchemy import select
         from app.database import AsyncSessionLocal
-        from app.model.image import Image
-        from app.model.category import Category
-        from app.config import settings
+        from app.tasks.model.image import Image
+        from app.tasks.model.category import Category
+        from app.core.config import settings
 
         async with AsyncSessionLocal() as db:
             # 1) 加载已确认标注图片 (含 ai_labeled 孤儿, LEFT JOIN 兼容)
@@ -92,7 +92,7 @@ class TrainingDataService:
                         )
                         orphans_to_backfill.append((img.id, cat_id))
             if orphans_to_backfill:
-                from app.model.image import Image as _Image
+                from app.tasks.model.image import Image as _Image
                 for img_id, cat_id in orphans_to_backfill:
                     img_row = await db.get(_Image, img_id)
                     if img_row and img_row.final_label_id is None:
@@ -155,7 +155,7 @@ class TrainingDataService:
             ModelVersion.id
         """
         from app.database import AsyncSessionLocal
-        from app.model.model_version import ModelVersion
+        from app.tasks.model.model_version import ModelVersion
 
         # 提取 macro avg 指标
         macro = report.get("macro avg", {}) if isinstance(report, dict) else {}

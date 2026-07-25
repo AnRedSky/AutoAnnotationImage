@@ -172,7 +172,7 @@ class AIService:
         # 设备选择：尊重 INFERENCE_DEVICE 配置
         # v2.0.0 S2: 延迟 import torch + 容错, 避免无 AI 调用路径的测试环境
         # (未装 timm/torch) 强制拉整个 torch (~2GB 运行时) 才能 import 本模块
-        from app.config import settings
+        from app.core.config import settings
         try:
             import torch  # lazy
             if settings.INFERENCE_DEVICE == "cuda" and torch.cuda.is_available():

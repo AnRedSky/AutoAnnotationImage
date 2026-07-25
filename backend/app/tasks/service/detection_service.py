@@ -9,7 +9,7 @@ DetectionService — 目标检测任务业务编排
 - 任务状态查询走 JobStateService
 
 **关键设计**:
-- BBox 几何运算复用 `app.services.bbox_service` (BBox / IoU / NMS)
+- BBox 几何运算复用 `app.common.geometry.bbox_service` (BBox / IoU / NMS)
 - AI 推理结果 → BBoxAnnotation 走本服务的转换函数
 - 人工确认/修正 → 同时更新 image.status 和 BBoxAnnotation.source
 
@@ -24,10 +24,10 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.model.annotation_log import AnnotationLog
-from app.model.bbox_annotation import BBoxAnnotation
-from app.model.image import Image
-from app.services.bbox_service import (
+from app.tasks.model.annotation_log import AnnotationLog
+from app.annotation.model.bbox_annotation import BBoxAnnotation
+from app.tasks.model.image import Image
+from app.common.geometry.bbox_service import (
     BBox,
     bbox_from_dict,
     nms,
@@ -226,7 +226,7 @@ class DetectionService:
         db: AsyncSession, image_id: int, source: Optional[str] = None
     ) -> List[BBoxAnnotation]:
         """查图的所有 BBox (可选 source 过滤)"""
-        from app.model.bbox_annotation_queries import list_bbox_by_image
+        from app.tasks.model.bbox_annotation_queries import list_bbox_by_image
         if source:
             result = await db.execute(
                 select(BBoxAnnotation).where(
@@ -257,7 +257,7 @@ class DetectionService:
         4. 一次 commit, 事务内完成
         """
         # 1) 校验 category
-        from app.model.category import Category
+        from app.tasks.model.category import Category
         for it in items:
             cat_id = it.get("category_id")
             if cat_id is not None:

@@ -28,10 +28,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.exceptions import NotFoundError, ValidationError
-from app.model.annotation_log import AnnotationLog
-from app.model.image import Image
-from app.model.segmentation_mask import SegmentationMask
-from app.config import settings
+from app.tasks.model.annotation_log import AnnotationLog
+from app.tasks.model.image import Image
+from app.annotation.model.segmentation_mask import SegmentationMask
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ class SegmentationService:
 
         校验像素值, 越界标 ignore_index=-1 (避免下游 CrossEntropyLoss 错误)
         """
-        from app.model.segmentation_mask_queries import get_mask_by_image
+        from app.tasks.model.segmentation_mask_queries import get_mask_by_image
         mask_row = await get_mask_by_image(db, image_id)
         if not mask_row:
             return None
@@ -251,8 +251,8 @@ class SegmentationService:
         4. upsert ORM (单图唯一)
         5. 升级 image.status: pending/ai_labeled → human_confirmed
         """
-        from app.services.storage_service import storage_service
-        from app.model.category import Category
+        from app.common.storage.storage_service import storage_service
+        from app.tasks.model.category import Category
 
         if not content:
             raise HTTPException(400, "上传的 mask 文件为空")
@@ -351,7 +351,7 @@ class SegmentationService:
         commit: bool = True,
     ) -> bool:
         """删除 mask (v3.0.0 Phase 4: 业务下沉)"""
-        from app.services.storage_service import storage_service
+        from app.common.storage.storage_service import storage_service
         mask = await db.get(SegmentationMask, mask_id)
         if not mask:
             return False

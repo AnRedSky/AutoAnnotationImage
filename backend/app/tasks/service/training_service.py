@@ -31,18 +31,18 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
-from app.model.dataset import Dataset
-from app.model.training_job import TrainingJob
+from app.core.config import settings
+from app.tasks.model.dataset import Dataset
+from app.tasks.model.training_job import TrainingJob
 
 logger = logging.getLogger(__name__)
 
 
 # 任务签名分发表 (3 种任务类型 → Celery 函数 + kwargs 构造)
 _TASK_DISPATCH: Dict[str, str] = {
-    "classification": "app.workers.tasks:train_model_task",
-    "detection": "app.workers.detection_tasks:train_detection_task",
-    "segmentation": "app.workers.segmentation_tasks:train_segmentation_task",
+    "classification": "app.tasks.workers.classification:train_model_task",
+    "detection": "app.tasks.workers.detection:train_detection_task",
+    "segmentation": "app.tasks.workers.segmentation:train_segmentation_task",
 }
 
 
@@ -280,13 +280,13 @@ class TrainingService:
     def _apply_training_task(task_type: str, kwargs: Dict[str, Any], task_id: str):
         """按 task_type 选 Celery 任务并投递 (强制使用预生成 task_id)"""
         if task_type == "detection":
-            from app.workers.detection_tasks import train_detection_task
+            from app.tasks.workers.detection import train_detection_task
             task = train_detection_task
         elif task_type == "segmentation":
-            from app.workers.segmentation_tasks import train_segmentation_task
+            from app.tasks.workers.segmentation import train_segmentation_task
             task = train_segmentation_task
         else:
-            from app.workers.tasks import train_model_task
+            from app.tasks.workers.classification import train_model_task
             task = train_model_task
         return task.apply_async(kwargs=kwargs, task_id=task_id)
 

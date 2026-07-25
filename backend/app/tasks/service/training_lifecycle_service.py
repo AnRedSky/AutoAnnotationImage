@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 from app.utils.async_helpers import run_async_in_worker as _run_async
 from app.core.redis_client import redis_client
-from app.config import settings
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class TrainingLifecycleService:
         """
         from sqlalchemy import select
         from app.database import AsyncSessionLocal
-        from app.model.training_job import TrainingJob
+        from app.tasks.model.training_job import TrainingJob
 
         async with AsyncSessionLocal() as db:
             existing = (await db.execute(
@@ -158,7 +158,7 @@ class TrainingLifecycleService:
         history 由 push_history 单独写库避免重复 IO.
         """
         from app.database import AsyncSessionLocal
-        from app.model.training_job import TrainingJob
+        from app.tasks.model.training_job import TrainingJob
 
         try:
             async with AsyncSessionLocal() as db:
@@ -243,7 +243,7 @@ class TrainingLifecycleService:
 
             from sqlalchemy import select
             from app.database import AsyncSessionLocal
-            from app.model.training_job import TrainingJob
+            from app.tasks.model.training_job import TrainingJob
 
             async with AsyncSessionLocal() as db:
                 job = (await db.execute(
@@ -296,7 +296,7 @@ class TrainingLifecycleService:
             sticky_meta: 数据集统计 (5 字段)
         """
         from app.database import AsyncSessionLocal
-        from app.model.training_job import TrainingJob
+        from app.tasks.model.training_job import TrainingJob
 
         try:
             async with AsyncSessionLocal() as db:
@@ -349,7 +349,7 @@ class TrainingLifecycleService:
         兼容老 _finish_failed_job: 失败时也要保留已计算的数据集统计
         """
         from app.database import AsyncSessionLocal
-        from app.model.training_job import TrainingJob
+        from app.tasks.model.training_job import TrainingJob
 
         try:
             async with AsyncSessionLocal() as db:
@@ -413,8 +413,8 @@ class TrainingLifecycleService:
         """
         from sqlalchemy import delete
         from app.database import AsyncSessionLocal
-        from app.model.training_job import TrainingJob
-        from app.model.model_version import ModelVersion
+        from app.tasks.model.training_job import TrainingJob
+        from app.tasks.model.model_version import ModelVersion
 
         # ---- 1) 清理半成品 ModelVersion ----
         try:
@@ -486,7 +486,7 @@ class TrainingLifecycleService:
             ModelVersion.id
         """
         from app.database import AsyncSessionLocal
-        from app.model.model_version import ModelVersion
+        from app.tasks.model.model_version import ModelVersion
 
         mv_data: Dict[str, Any] = {
             "name": name,

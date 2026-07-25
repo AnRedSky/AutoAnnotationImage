@@ -1,12 +1,16 @@
 """
-Tasks Services Package (Stage 2.4 填充)
-=======================================
+Tasks Services Package (Stage 2.4 完整迁移)
+=========================================
 
-**v3.0.0 Stage 2.4 迁移**: 从 app/services/* 迁入 tasks 应用
+**v3.0.0 Stage 2.4-2.8 迁移**: 从 app/services/* 迁入 tasks 应用
 
-**重要**: 本 __init__.py 只 re-export 实际位于 app.tasks.service.* 的服务.
-未完成迁移的服务 (training 等) 仍位于 app.services.*, 业务代码应继续
-import from app.services.<name> 直到 Stage 2.6 完成.
+**当前状态 (Stage 2.8)**:
+- 所有 8 个 tasks 业务服务已完整迁移到 app.tasks.service.*
+- 3 个跨应用服务 (UserService/StatsService/AuthService) 已迁入各自应用
+- 3 个工具服务已迁入 app.common.{ml,geometry,storage}
+- app/services/ 目录即将删除
+
+**跨应用工具** (BBox 几何计算) re-export 自 app.common.geometry.bbox_service.
 """
 # Stage 2.4 已完整迁移 (含源码) - 跨应用服务
 from app.admin.service.user_service import UserService
@@ -18,8 +22,20 @@ from app.tasks.service.dataset_service import DatasetService
 from app.tasks.service.image_service import ImageService
 from app.tasks.service.model_service import ModelService
 
-# Re-export 工具函数 (来自 app.services.bbox_service, 无 cycle)
-from app.services.bbox_service import (
+# Stage 2.8 新迁移 - 业务编排服务
+from app.tasks.service.job_state_service import JobStateService, JobStateSnapshot
+from app.tasks.service.training_service import TrainingService
+from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
+from app.tasks.service.training_data_service import TrainingDataService
+from app.tasks.service.auto_annotate_service import (
+    AutoAnnotateService, AutoAnnotateResult, ASYNC_THRESHOLD,
+)
+from app.tasks.service.annotation_service import AnnotationService
+from app.tasks.service.detection_service import DetectionService
+from app.tasks.service.segmentation_service import SegmentationService
+
+# 跨应用工具 (几何计算) — re-export 自 app.common.geometry.bbox_service
+from app.common.geometry.bbox_service import (
     BBox,
     validate_normalized_bbox,
     normalized_to_pixels,
@@ -33,10 +49,20 @@ from app.services.bbox_service import (
 )
 
 __all__ = [
-    # Stage 2.4 完整迁移
+    # 跨应用服务
     "UserService", "StatsService", "AuthService",
+    # tasks 本应用服务
     "DatasetService", "ImageService", "ModelService",
-    # 工具
+    # 业务编排服务 (Stage 2.8 迁移)
+    "JobStateService", "JobStateSnapshot",
+    "TrainingService",
+    "TrainingLifecycleService",
+    "TrainingDataService",
+    "AutoAnnotateService", "AutoAnnotateResult", "ASYNC_THRESHOLD",
+    "AnnotationService",
+    "DetectionService",
+    "SegmentationService",
+    # 跨应用工具
     "BBox",
     "validate_normalized_bbox",
     "normalized_to_pixels",

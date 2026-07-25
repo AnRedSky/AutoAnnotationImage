@@ -28,13 +28,13 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
-from app.model.annotation_log import AnnotationLog
-from app.model.category import Category
-from app.model.dataset import Dataset
-from app.model.image import Image
-from app.services.ai_service import ai_service, filter_predictions_to_categories
-from app.services.image_service import ImageService
+from app.core.config import settings
+from app.tasks.model.annotation_log import AnnotationLog
+from app.tasks.model.category import Category
+from app.tasks.model.dataset import Dataset
+from app.tasks.model.image import Image
+from app.common.ml.ai_service import ai_service, filter_predictions_to_categories
+from app.tasks.service.image_service import ImageService
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +235,7 @@ class AutoAnnotateService:
                 mode="async", task_id=None,
             )
 
-        from app.workers.tasks import auto_annotate_task
+        from app.tasks.workers.classification import auto_annotate_task
         async_result = auto_annotate_task.delay(
             dataset_id=dataset_id,
             model_name=model_name,

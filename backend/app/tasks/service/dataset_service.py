@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.core.config import settings
 from app.tasks.model.annotation_log import AnnotationLog
 from app.tasks.model.category import Category
 from app.tasks.model.dataset import Dataset, DATASET_STATUS_DRAFT, DATASET_STATUS_DONE

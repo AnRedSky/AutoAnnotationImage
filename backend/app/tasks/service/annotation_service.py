@@ -21,10 +21,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.model.image import Image
-from app.services.image_service import ImageService
-from app.services.detection_service import DetectionService
-from app.services.segmentation_service import SegmentationService
+from app.tasks.model.image import Image
+from app.tasks.service.image_service import ImageService
+from app.tasks.service.detection_service import DetectionService
+from app.tasks.service.segmentation_service import SegmentationService
 
 logger = logging.getLogger(__name__)
 

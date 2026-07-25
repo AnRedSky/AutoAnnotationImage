@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.utils.async_helpers import check_celery_available
 from app.core.redis_client import redis_client
 from app.database import AsyncSessionLocal
-from app.model.training_job import (
+from app.tasks.model.training_job import (
     TrainingJob,
     TRAIN_STATE_PENDING,
     TRAIN_STATE_PROGRESS,
@@ -61,7 +61,7 @@ from app.model.training_job import (
 def _get_celery_app_safe():
     """安全导入 celery_app, 避免循环 import"""
     try:
-        from app.workers.celery_app import celery_app
+        from app.tasks.workers.celery_app import celery_app
         return celery_app
     except ImportError:
         return None
@@ -307,7 +307,7 @@ class JobStateService:
     @staticmethod
     async def list_active_snapshots(db: AsyncSession) -> List[JobStateSnapshot]:
         """列出所有进行中任务快照 (前端仪表盘用)"""
-        from app.model.training_queries import list_active_jobs
+        from app.tasks.model.training_queries import list_active_jobs
         jobs = await list_active_jobs(db)
         snapshots = []
         for job in jobs:

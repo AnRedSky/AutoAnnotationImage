@@ -6,7 +6,7 @@ import uuid
 import hashlib
 from pathlib import Path
 from typing import BinaryIO
-from app.config import settings
+from app.core.config import settings
 
 
 class StorageService:
