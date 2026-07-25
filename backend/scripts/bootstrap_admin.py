@@ -33,7 +33,7 @@ async def _create_admin(username: str, password: str, email: str) -> int:
     from app.core.config import settings
     from app.database import AsyncSessionLocal
     from app.admin.model.user import User
-    from app.core.security import get_password_hash
+    from app.middleware.security.security import get_password_hash
 
     # 安全: 仅 dev 环境可运行 CLI bootstrap
     if settings.APP_ENV == "production":

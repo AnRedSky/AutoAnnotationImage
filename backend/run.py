@@ -17,7 +17,7 @@ Backend 一键启动入口
     ReDoc     : http://127.0.0.1:5000/redoc
     Health    : http://127.0.0.1:5000/api/health
 """
-from app.cli import main
+from app.core.cli import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

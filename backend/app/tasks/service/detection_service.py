@@ -279,7 +279,7 @@ class DetectionService:
             await db.flush()
 
         # 3) 写新 bbox
-        from app.schemas.enums import AnnotationSource
+        from app.common.enums import AnnotationSource
         new_boxes: List[BBoxAnnotation] = []
         for it in items:
             src = it.get("source") or AnnotationSource.HUMAN.value
