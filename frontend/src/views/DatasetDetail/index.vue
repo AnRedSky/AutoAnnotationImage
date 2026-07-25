@@ -275,16 +275,13 @@ function onUploaded(r: any) {
   padding: 16px;
 }
 
-/* 分页: 始终可见 */
+/* 分页: 跟随文档流, 不固定容器, 避免悬浮遮挡图片 */
 .pager {
   margin-top: 12px;
-  padding: 8px 0;
+  padding: 12px 0;
   display: flex;
   justify-content: flex-end;
   background: #fff;
   border-top: 1px solid var(--border-soft);
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
 }
 </style>
