@@ -222,31 +222,51 @@ class Settings(BaseSettings):
     @property
     def EFFECTIVE_JWT_SECRET(self) -> str:
         """JWT 签名密钥，兼容 SECRET_KEY / JWT_SECRET 两种命名
-        v2.5.15 P1-1: 硬编码兜底字符串保留作 attribute, 但生产环境
-        _validate_production_secrets 会先 fail 永远走不到. 开发环境
-        .env 配了 SECRET_KEY 也不会用到这里.
+
+        v3.0.0 审查修复 P0-7: 移除占位字符串兜底
+        - 旧: SECRET_KEY 缺失时返回 'change-me-to-a-random-string-min-32-chars'
+          (生产未设 SECRET_KEY 会用此占位, JWT 可被伪造)
+        - 新: 缺失时 raise ValueError, _validate_production_secrets 已先 fail
+        - dev 环境仍保留 _validate_production_secrets 的 WARN, 但 EFFECTIVE_JWT_SECRET
+          现在也用相同逻辑 (确保 dev 启动能成功, 但 secret 已从 .env 读取)
         """
-        return (
-            self.SECRET_KEY
-            or self.JWT_SECRET
-            or "change-me-to-a-random-string-min-32-chars"
-        )
+        if not (self.SECRET_KEY or self.JWT_SECRET):
+            raise ValueError(
+                "SECRET_KEY (or JWT_SECRET) is required. "
+                "JWT tokens cannot be signed without a secret."
+            )
+        return self.SECRET_KEY or self.JWT_SECRET
 
     # v2.5.15 P1-1 + P1-2: 生产环境 fail-fast 校验
     @model_validator(mode="after")
     def _validate_production_secrets(self) -> "Settings":
         """生产环境强校验, 开发环境 WARN 不阻塞
 
-        - SECRET_KEY (or JWT_SECRET) 必须设置
+        - SECRET_KEY (or JWT_SECRET) 必须设置 (v3.0.0 审查修复 P0-7: 也禁止占位字符串)
         - MYSQL_PASSWORD 不能用默认值 (root123/root/空)
         - APP_ENV=production 任意一条违反则 ValueError, 启动失败
         - APP_ENV=development 仅 WARN, 不影响开发体验
         """
         issues: list[str] = []
-        if not (self.SECRET_KEY or self.JWT_SECRET):
+        _weak_secrets = (
+            "",
+            "change-me",
+            "changeme",
+            "secret",
+            "password",
+            "12345678",
+            "your-secret-key",
+        )
+        eff_secret = self.SECRET_KEY or self.JWT_SECRET or ""
+        if not eff_secret:
             issues.append(
                 "SECRET_KEY (or JWT_SECRET) is not set. "
                 "JWT tokens can be forged."
+            )
+        elif any(w in eff_secret.lower() for w in _weak_secrets):
+            issues.append(
+                f"SECRET_KEY looks like a weak/placeholder value: {eff_secret[:8]}... "
+                "JWT tokens can be forged. Generate a strong random secret (>= 32 chars)."
             )
         # 拦截不安全的默认密码
         _insecure = ("root123", "", "password", "root")
