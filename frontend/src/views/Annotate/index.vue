@@ -617,7 +617,12 @@ const loadNext = async () => {
 }
 
 /**
- * 「上一张」逻辑: cursor--, 从 history 拿图, 调 detail 拉最新数据
+ * 「上一张」逻辑: 从 cursor-1 往前遍历, 跳过已处理图 (confirmed/corrected/unqualified)
+ * v3.0.0: 与 list_images 后端过滤语义对齐 — 只有 pending/ai_labeled 才是"待标注"
+ * - 跳过的图从 historyIds 中移除 (避免重复跳过, 保持历史栈干净)
+ * - 找到第一张 pending/ai_labeled → fillImage
+ * - 全部已处理 → 提示, cursor 不动 (用户仍停留在当前图)
+ * - 加载异常 (如图被删除) → 也跳过并移除
  */
 const loadPrev = async () => {
   if (historyCursor.value <= 0) {
@@ -626,20 +631,56 @@ const loadPrev = async () => {
   }
   const ok = await autoSaveBeforeSwitch()
   if (!ok) return
-  historyCursor.value--
   noMore.value = false
-  const prevId = historyIds.value[historyCursor.value]
-  loading.value = true
-  try {
-    const detail: any = await imageApi.detail(prevId)
-    fillImage(detail)
-  } catch (e: any) {
-    historyIds.value.splice(historyCursor.value, 1)
-    historyCursor.value++
-    ElMessage.error('加载上一张失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    loading.value = false
+
+  let foundIdx = -1
+  let foundDetail: any = null
+  const skipIndices: number[] = []  // 要从 historyIds 移除的索引 (已处理/异常)
+
+  for (let i = historyCursor.value - 1; i >= 0; i--) {
+    const candidateId = historyIds.value[i]
+    loading.value = true
+    try {
+      const detail: any = await imageApi.detail(candidateId)
+      const status = detail?.status
+      // 跳过已处理图 (与后端 list_images status=pending + quality_flag IS NULL 过滤对齐)
+      if (status && status !== 'pending' && status !== 'ai_labeled') {
+        skipIndices.push(i)
+        continue
+      }
+      // 找到待标注图
+      foundIdx = i
+      foundDetail = detail
+      break
+    } catch {
+      // 图被删除等异常, 也跳过并移除
+      skipIndices.push(i)
+      continue
+    }
   }
+
+  loading.value = false
+
+  if (foundIdx === -1) {
+    // 前面全部已处理: 移除跳过的图, cursor 相应前移 (这些图都不在当前 cursor 之前, 不影响当前图)
+    skipIndices.sort((a, b) => b - a)  // 降序 splice 避免索引移位
+    for (const idx of skipIndices) {
+      historyIds.value.splice(idx, 1)
+    }
+    historyCursor.value -= skipIndices.length
+    ElMessage.info('前面没有未处理的待标注图片了')
+    return
+  }
+
+  // 找到待标注图: 移除 foundIdx 之后到 cursor 之间被跳过的图
+  const toRemove = skipIndices.filter(idx => idx > foundIdx)
+  toRemove.sort((a, b) => b - a)
+  for (const idx of toRemove) {
+    historyIds.value.splice(idx, 1)
+  }
+  // cursor 指向 foundDetail (foundIdx 位置的元素, 前面的元素没被动过, 索引不变)
+  historyCursor.value = foundIdx
+  fillImage(foundDetail)
 }
 
 /**
