@@ -25,6 +25,10 @@ class ModelVersion(Base):
         default="classification", nullable=False, index=True
     )
     num_classes: Mapped[int] = mapped_column(Integer, default=0)
+    # v3.0.0: 类别名称列表 (按训练时 label_idx 顺序), 供推理时重建索引→类别名映射
+    # - 含虚拟类别 __unqualified__ 时, 推理预测该索引 → 自动标记不合格
+    # - 旧模型为 NULL, 推理时 fallback 到 Category 表 sorted (向后兼容)
+    class_names: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     file_path: Mapped[str] = mapped_column(String(500), nullable=True)
     accuracy: Mapped[float] = mapped_column(Float, default=0)
     precision: Mapped[float] = mapped_column(Float, default=0)

@@ -43,6 +43,8 @@ MIGRATIONS = [
     ("model_version", "miou",            "FLOAT",       "NULL"),
     ("model_version", "pixel_accuracy",  "FLOAT",       "NULL"),
     ("model_version", "dice_score",      "FLOAT",       "NULL"),
+    # v3.0.0: 类别名称列表 (训练时存储, 推理时重建索引→类别名映射, 含虚拟 __unqualified__)
+    ("model_version", "class_names",     "JSON",        "NULL"),
     # image
     ("image", "task_type", "VARCHAR(32)", "'classification'"),
     # v3.0.0 不合格图片标记 (正交于 status 状态机, 4 字段全 nullable)
