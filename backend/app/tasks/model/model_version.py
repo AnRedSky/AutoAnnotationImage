@@ -15,7 +15,7 @@ class ModelVersion(Base):
     __tablename__ = "model_version"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     base_model: Mapped[str] = mapped_column(String(50), nullable=False)
     dataset_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("dataset.id"), nullable=True

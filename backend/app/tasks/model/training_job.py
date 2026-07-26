@@ -39,7 +39,7 @@ class TrainingJob(Base):
     # 输入参数
     dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=False)
     base_model = Column(String(64), nullable=False)
-    model_name = Column(String(64), nullable=False)
+    model_name = Column(String(128), nullable=False)
     task_type = Column(
         String(32), default="classification", nullable=False, index=True,
     )

@@ -287,9 +287,13 @@ async def start_existing_training_job(
         final_learning_rate = overrides.get("learning_rate", job.learning_rate)
         final_task_type = (job.task_type or "classification").lower()
         # model_name: 强制加后缀 (即使 payload 改了 model_name, 也再加一层时间戳)
+        # v3.0.0 修复: 先剥离已有的 _r{digits} 后缀, 避免多次再训练后名称无限增长
+        # (之前: resnet50_v1_r123_r456_r789... → 超过列长度 64 报 DataError)
+        import re
         suffix = f"_r{int(datetime.utcnow().timestamp())}"
         payload_model = overrides.get("model_name", job.model_name)
-        new_model_name = f"{payload_model}{suffix}"
+        base_name = re.sub(r'_r\d+$', '', payload_model)  # 剥离末尾的 _r{timestamp}
+        new_model_name = f"{base_name}{suffix}"
 
     # ---- 增量训练 (再训练) 核心: 自动用当前激活的模型权重 ----
     pretrained_model_path = None

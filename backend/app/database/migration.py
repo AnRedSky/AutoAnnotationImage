@@ -242,4 +242,66 @@ async def ensure_v2_0_0_schema(
         if verbose:
             print(f"  [err]  {err}")
 
+    # v3.0.0: model_name / name 列加长 (再训练 _r{timestamp} 后缀累积导致超 64 字符)
+    # training_jobs.model_name: 64 → 128; model_version.name: 100 → 128
+    try:
+        result = await _ensure_column_varchar_length(conn, verbose=verbose)
+        added.extend(result)
+    except Exception as e:  # noqa: BLE001
+        err = f"model_name 列加长失败: {e!r}"
+        errors.append(err)
+        if verbose:
+            print(f"  [err]  {err}")
+
     return {"added": added, "skipped": skipped, "errors": errors}
+
+
+# v3.0.0: 需要加长的 VARCHAR 列 (table, column, 原长度, 新长度)
+_VARCHAR_LENGTH_MIGRATIONS = [
+    ("training_jobs", "model_name", 64, 128),
+    ("model_version", "name", 100, 128),
+]
+
+
+async def _get_mysql_varchar_length(conn: AsyncConnection, table: str, column: str) -> Optional[int]:
+    """查询 MySQL VARCHAR 列的字符最大长度; 非 MySQL 或查询失败返回 None"""
+    try:
+        rows = await conn.execute(text(
+            "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "  AND TABLE_NAME = :t AND COLUMN_NAME = :c LIMIT 1"
+        ), {"t": table, "c": column})
+        row = rows.first()
+        return int(row[0]) if row and row[0] else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _ensure_column_varchar_length(
+    conn: AsyncConnection, *, verbose: bool = False
+) -> list[str]:
+    """幂等加长 VARCHAR 列 (MySQL MODIFY COLUMN; SQLite 不执行, TEXT 无长度限制)
+
+    Returns: 已修改的列列表 (空 = 无需修改或非 MySQL)
+    """
+    applied: list[str] = []
+    for table, column, _old_len, new_len in _VARCHAR_LENGTH_MIGRATIONS:
+        current_len = await _get_mysql_varchar_length(conn, table, column)
+        if current_len is None:
+            # 非 MySQL 或列不存在: 跳过
+            continue
+        if current_len >= new_len:
+            # 已够长: 跳过
+            continue
+        # ALTER TABLE ... MODIFY COLUMN ... VARCHAR(new_len)
+        # 保留原有的 NOT NULL 约束 (两列都是 NOT NULL)
+        sql = (
+            f"ALTER TABLE `{table}` "
+            f"MODIFY COLUMN `{column}` VARCHAR({new_len}) NOT NULL"
+        )
+        await conn.execute(text(sql))
+        msg = f"{table}.{column} VARCHAR({current_len}→{new_len})"
+        applied.append(msg)
+        if verbose:
+            print(f"  [mod]  {msg}")
+    return applied
