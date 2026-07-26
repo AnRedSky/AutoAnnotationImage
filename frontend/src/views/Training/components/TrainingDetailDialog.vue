@@ -141,7 +141,14 @@ const onCloseDialog = () => {
       </div>
 
       <!-- 基本信息 -->
-      <el-descriptions class="detail-descs" :column="3" border size="small">
+      <el-descriptions
+        class="detail-descs"
+        :column="3"
+        border
+        size="small"
+        label-class-name="detail-desc-label"
+        class-name="detail-desc-content"
+      >
         <el-descriptions-item label="任务 ID">{{ job.id }}</el-descriptions-item>
         <el-descriptions-item label="数据集">{{ datasetNameOf(job.dataset_id) }}</el-descriptions-item>
         <el-descriptions-item label="任务类型">
@@ -158,24 +165,33 @@ const onCloseDialog = () => {
         <el-descriptions-item label="基础模型">{{ job.base_model }}</el-descriptions-item>
         <el-descriptions-item label="模型版本">{{ job.model_name }}</el-descriptions-item>
         <el-descriptions-item label="训练设备">
-          <el-tag v-if="job.device_type" :type="deviceTagType(job.device_type)" size="small">
-            {{ deviceShortLabel(job.device_type, job.device_name) }}
-          </el-tag>
-          <span v-else style="color: #c0c4cc;">未记录</span>
-          <el-tooltip
-            v-if="job.device_info"
-            placement="top"
-            :content="deviceTooltip(job.device_info) +
-              (job.gpu_peak_memory_mb
-                ? `\n\nGPU 峰值显存: ${job.gpu_peak_memory_mb} MB`
-                : '')">
-            <el-icon style="margin-left: 4px; cursor: help;"><InfoFilled /></el-icon>
-          </el-tooltip>
-          <el-tag
-            v-if="job.gpu_peak_memory_mb"
-            size="small" type="warning" effect="plain"
-            style="margin-left: 6px;"
-          >峰值 {{ job.gpu_peak_memory_mb }} MB</el-tag>
+          <div class="device-info-cell">
+            <el-tag
+              v-if="job.device_type"
+              :type="deviceTagType(job.device_type)"
+              size="small"
+              class="device-tag"
+            >
+              {{ deviceShortLabel(job.device_type, job.device_name) }}
+            </el-tag>
+            <span v-else class="device-empty">未记录</span>
+            <el-tooltip
+              v-if="job.device_info"
+              placement="top"
+              :content="deviceTooltip(job.device_info) +
+                (job.gpu_peak_memory_mb
+                  ? `\n\nGPU 峰值显存: ${job.gpu_peak_memory_mb} MB`
+                  : '')">
+              <el-icon class="device-info-icon"><InfoFilled /></el-icon>
+            </el-tooltip>
+            <el-tag
+              v-if="job.gpu_peak_memory_mb"
+              size="small"
+              type="warning"
+              effect="plain"
+              class="device-peak-tag"
+            >峰值 {{ job.gpu_peak_memory_mb }} MB</el-tag>
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="轮次">{{ job.epochs }}</el-descriptions-item>
         <el-descriptions-item label="批大小">{{ job.batch_size }}</el-descriptions-item>
@@ -365,19 +381,47 @@ const onCloseDialog = () => {
 .hero-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .hero-base { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 
-/* 描述列表: 顶部空隙收紧 */
-.detail-descs :deep(.el-descriptions__label) {
+/* 描述列表: 固定列宽, 长文本在单元格内换行, 不挤压相邻列 */
+.detail-descs :deep(.el-descriptions__table) {
+  table-layout: fixed;
+  width: 100%;
+}
+.detail-descs :deep(.detail-desc-label) {
   color: var(--text-secondary) !important;
   font-weight: 500;
   background: var(--bg-soft) !important;
-  white-space: nowrap;  /* 防止中文标签被单字竖排换行 */
+  width: 96px;
+  white-space: nowrap;
+  vertical-align: top;
 }
-.detail-descs :deep(.el-descriptions__content) {
-  word-break: break-all;  /* 长内容在单元格内换行, 不撑开列宽 */
+.detail-descs :deep(.detail-desc-content) {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
 }
-/* 表格固定布局: 长内容撑开列宽导致 label 单元格被挤压 */
-.detail-descs :deep(.el-descriptions__table) {
-  table-layout: fixed;
+
+/* 训练设备: 长设备名在固定宽度单元格内换行 */
+.device-info-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.device-info-cell :deep(.device-tag),
+.device-info-cell :deep(.device-peak-tag) {
+  white-space: normal;
+  height: auto;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.device-empty {
+  color: #c0c4cc;
+}
+.device-info-icon {
+  cursor: help;
+  flex-shrink: 0;
 }
 
 /* 详情内的小型指标块 (用于 4 联指标和数据集统计) */
