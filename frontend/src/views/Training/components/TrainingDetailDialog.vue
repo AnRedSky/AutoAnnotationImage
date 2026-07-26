@@ -370,6 +370,14 @@ const onCloseDialog = () => {
   color: var(--text-secondary) !important;
   font-weight: 500;
   background: var(--bg-soft) !important;
+  white-space: nowrap;  /* 防止中文标签被单字竖排换行 */
+}
+.detail-descs :deep(.el-descriptions__content) {
+  word-break: break-all;  /* 长内容在单元格内换行, 不撑开列宽 */
+}
+/* 表格固定布局: 长内容撑开列宽导致 label 单元格被挤压 */
+.detail-descs :deep(.el-descriptions__table) {
+  table-layout: fixed;
 }
 
 /* 详情内的小型指标块 (用于 4 联指标和数据集统计) */

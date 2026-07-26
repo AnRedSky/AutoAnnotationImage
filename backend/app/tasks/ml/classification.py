@@ -250,6 +250,8 @@ def run_training(
     best_acc = 0.0
     best_state = None
     no_improve_count = 0  # 早停计数器
+    early_stopped = False  # v3.0.0: 早停触发标志, 写回 result + sticky_meta 通知前端
+    actual_epochs = 0  # v3.0.0: 实际执行的 epoch 数 (早停时 < epochs)
 
     for epoch in range(epochs):
         # ---- 暂停检查: 每个 epoch 起点 (避免打断 DataLoader 迭代器) ----
@@ -348,8 +350,20 @@ def run_training(
 
         # ---- 早停 ----
         if no_improve_count >= early_stop_patience:
-            print(f"[train] Early stop at epoch {epoch+1} (no improve for {early_stop_patience} epochs)")
+            actual_epochs = epoch + 1  # 记录实际跑到的 epoch
+            early_stopped = True
+            msg = (f"Early stop at epoch {actual_epochs}/{epochs} "
+                   f"(val_acc 连续 {early_stop_patience} epoch 未提升)")
+            print(f"[train] {msg}")
+            # v3.0.0: 通过 progress_callback 推给前端 SSE, 用户能在日志面板看到早停提示
+            if progress_callback:
+                progress_callback(
+                    (epoch + 1) / epochs * 100,
+                    f"⚠ {msg}",
+                )
             break
+        else:
+            actual_epochs = epoch + 1
 
     # 保存最佳模型
     model_path = settings.MODEL_DIR / f"{model_name}_best.pth"
@@ -436,6 +450,10 @@ def run_training(
         "unqualified_skipped": unqualified_skipped,
         # v3.0.0: 软门禁警告 (None=未启用 / 已达标; 字符串=不达标, 前端 SSE 显示)
         "unqualified_warning": unqualified_warning,
+        # v3.0.0: 早停信息 (前端详情页可显示「实际跑 X/Y 轮, 触发早停」)
+        "early_stopped": early_stopped,
+        "actual_epochs": actual_epochs,
+        "configured_epochs": epochs,
     }
 
 

@@ -195,11 +195,23 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             if gpu_peak is not None:
                 sticky_meta["gpu_peak_memory_mb"] = int(gpu_peak)
 
+        # v3.0.0: 早停信息透传 (前端详情页可显示「实际跑 X/Y 轮, 触发早停」)
+        if result.get("early_stopped"):
+            sticky_meta["early_stopped"] = True
+            sticky_meta["actual_epochs"] = int(result.get("actual_epochs", 0))
+            sticky_meta["configured_epochs"] = int(result.get("configured_epochs", 0))
+        # v3.0.0: message 携带早停提示, 让前端 status 描述直观可见
+        success_message = "Training completed"
+        if result.get("early_stopped"):
+            ae = int(result.get("actual_epochs", 0))
+            ce = int(result.get("configured_epochs", 0))
+            success_message = f"训练完成 (早停: {ae}/{ce} 轮)"
+
         TrainingLifecycleService.mark_success_sync(
             job_id=job_id,
             started_at=started_at,
             history_buffer=history_buffer,
-            message="Training completed",
+            message=success_message,
             model_version_id=mv_id,
             sticky_meta=sticky_meta,
         )
