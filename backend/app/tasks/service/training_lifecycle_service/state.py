@@ -75,6 +75,19 @@ async def mark_success(
                     job.num_classes = sticky_meta["num_classes"]
                 if "class_names" in sticky_meta:
                     job.class_names = sticky_meta["class_names"]
+                # v3.0.0: 训练设备信息持久化 (由 worker 调 collect_device_info 塞入 sticky_meta)
+                # - device_type: "cpu" / "cuda" / "mps"
+                # - device_name: GPU 型号 / CPU 描述
+                # - device_info: 完整 dict (cuda_version / gpu_memory / cpu_count / ram 等)
+                # - gpu_peak_memory_mb: CUDA 时的峰值显存 (由训练过程监控更新)
+                if "device_type" in sticky_meta:
+                    job.device_type = sticky_meta["device_type"]
+                if "device_name" in sticky_meta:
+                    job.device_name = sticky_meta["device_name"]
+                if "device_info" in sticky_meta:
+                    job.device_info = sticky_meta["device_info"]
+                if "gpu_peak_memory_mb" in sticky_meta and sticky_meta["gpu_peak_memory_mb"] is not None:
+                    job.gpu_peak_memory_mb = sticky_meta["gpu_peak_memory_mb"]
             await db.commit()
     except Exception as e:
         logger.warning("mark_success failed for job %s: %s", job_id, e)
@@ -124,6 +137,15 @@ async def mark_failure(
                     job.num_classes = sticky_meta["num_classes"]
                 if "class_names" in sticky_meta:
                     job.class_names = sticky_meta["class_names"]
+                # v3.0.0: 失败任务也记录运行设备 (便于排查 OOM/CUDA 异常等设备相关问题)
+                if "device_type" in sticky_meta:
+                    job.device_type = sticky_meta["device_type"]
+                if "device_name" in sticky_meta:
+                    job.device_name = sticky_meta["device_name"]
+                if "device_info" in sticky_meta:
+                    job.device_info = sticky_meta["device_info"]
+                if "gpu_peak_memory_mb" in sticky_meta and sticky_meta["gpu_peak_memory_mb"] is not None:
+                    job.gpu_peak_memory_mb = sticky_meta["gpu_peak_memory_mb"]
             await db.commit()
     except Exception as e:
         logger.warning("mark_failure failed for job %s: %s", job_id, e)
