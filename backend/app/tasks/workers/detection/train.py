@@ -72,6 +72,17 @@ def train_detection_task(
     history_buffer: list = []
     workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
 
+    # v3.0.0: 采集训练设备信息 (CPU/GPU/CUDA/显存), 塞入 sticky_meta 供 mark_success 持久化
+    # - 尽早采集, 失败路径也能通过 sticky_meta 记录运行设备
+    try:
+        from app.tasks.ml.device_info import collect_device_info, extract_job_device_fields
+        _device_info = collect_device_info()
+        sticky_meta.update(extract_job_device_fields(_device_info))
+        # 立即透传, 确保导出阶段失败时 _finish_failed 也能拿到设备信息
+        TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
+    except Exception:
+        pass
+
     def _export_cb(stage, current, total, info=""):
         TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": round(current / max(total, 1) * 100, 2),

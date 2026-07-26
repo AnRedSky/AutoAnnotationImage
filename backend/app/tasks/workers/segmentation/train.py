@@ -93,6 +93,15 @@ def train_segmentation_task(
         _finish_failed(self, job_id, "数据集无 image+mask 配对, 请先上传 mask", started_at, task_id)
         return {"status": "FAILURE", "reason": "empty_dataset"}
 
+    # v3.0.0: 采集训练设备信息 (CPU/GPU/CUDA/显存), 塞入 sticky_meta 供 mark_success 持久化
+    # - 尽早采集, 失败路径也能通过 sticky_meta 记录运行设备
+    _device_info_dict: dict = {}
+    try:
+        from app.tasks.ml.device_info import collect_device_info, extract_job_device_fields
+        _device_info_dict = collect_device_info()
+    except Exception:
+        pass
+
     # ---- 3) 加载类目 (用于 sticky_meta) ----
     async def _load_categories():
         from sqlalchemy import select
@@ -115,6 +124,13 @@ def train_segmentation_task(
         "num_classes": None,
         "class_names": sorted(category_names),
     }
+    # v3.0.0: 合并设备信息字段 (供 mark_success/mark_failure 持久化到 TrainingJob)
+    if _device_info_dict:
+        try:
+            from app.tasks.ml.device_info import extract_job_device_fields
+            sticky_meta.update(extract_job_device_fields(_device_info_dict))
+        except Exception:
+            pass
     # 跨函数透传 (失败路径也能拿到)
     TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
 

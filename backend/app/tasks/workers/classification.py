@@ -183,6 +183,18 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         if uq_warning:
             sticky_meta["unqualified_warning"] = str(uq_warning)[:500]
 
+        # v3.0.0: 训练设备信息透传给 mark_success 持久化到 TrainingJob
+        # - run_training 已调 collect_device_info() 采集, 返回值带 device_type/device_info
+        # - final_device_info["gpu_peak_mb"] 是 CUDA 训练过程中的真实峰值显存
+        result_device_info = result.get("device_info") or {}
+        if result.get("device_type"):
+            sticky_meta["device_type"] = result["device_type"]
+            sticky_meta["device_name"] = result_device_info.get("device_name", "CPU")
+            sticky_meta["device_info"] = result_device_info
+            gpu_peak = result_device_info.get("gpu_peak_mb")
+            if gpu_peak is not None:
+                sticky_meta["gpu_peak_memory_mb"] = int(gpu_peak)
+
         TrainingLifecycleService.mark_success_sync(
             job_id=job_id,
             started_at=started_at,
