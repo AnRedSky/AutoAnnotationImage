@@ -120,13 +120,15 @@
       <div class="op-section-title">3. 图片导航</div>
       <div style="display: flex; gap: 8px; margin-top: 6px;">
         <el-button
-          style="flex: 1;" :icon="ArrowLeft"
+          style="flex: 1;" 
+          :icon="ArrowLeft"
           :disabled="!canGoPrev"
           @click="emit('prev')"
         >上一张 (P)</el-button>
         <el-button
           style="flex: 1;"
-          :type="noMore ? 'info' : 'primary'"
+          :icon="ArrowRight"
+          :type="noMore ? 'info' : 'danger'"
           :plain="!noMore"
           :disabled="noMore"
           @click="emit('next')"
@@ -270,7 +272,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Check, Close, ArrowLeft, View, MagicStick, RefreshLeft, RefreshRight, Warning } from '@element-plus/icons-vue'
+import { Check, Close, ArrowLeft, View, MagicStick, RefreshLeft, RefreshRight, Warning, ArrowRight } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 
 interface Category { id: number; name: string }

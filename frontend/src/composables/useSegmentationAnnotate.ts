@@ -10,11 +10,16 @@
  */
 import { ref, nextTick, type Ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { segmentationApi } from '@/api'
+import { annotationApi, segmentationApi } from '@/api'
 
 export interface SegmentationImage {
   id: number
   task_type: string
+  /** v3.0.0: 不合格标记状态 (供保存时自动清理) */
+  quality_flag?: string | null
+  reject_reason?: string | null
+  rejected_by?: number | null
+  rejected_at?: string | null
 }
 
 export function useSegmentationAnnotate(options: {
@@ -73,10 +78,31 @@ export function useSegmentationAnnotate(options: {
   // 保存 segmentation mask --------------------------------------------
   const saveSegmentationMask = async (file: File) => {
     if (!image.value?.id) return
+    // v3.0.0: 保存前若图已被标记不合格, 主动撤销 (与后端正交维度清理对齐)
+    const wasUnqualified = image.value?.quality_flag === 'unqualified'
     annotatorSaving.value = true
     try {
       await segmentationApi.uploadMask(image.value.id, file, 'human')
       ElMessage.success('mask 已保存')
+      // v3.0.0: 前端同步清空不合格标记 (后端已自动撤销)
+      if (wasUnqualified && image.value) {
+        try {
+          await annotationApi.unmarkUnqualified(image.value.id)
+        } catch (e: any) {
+          // 409 = 后端认为未标记 (save 时已清空), 静默忽略
+          if (e?.response?.status !== 409) {
+            console.warn('unmarkUnqualified failed (non-fatal):', e)
+          }
+        }
+        // 就地更新 image 对象, 让 UI 立刻反映
+        image.value = {
+          ...image.value,
+          quality_flag: null,
+          reject_reason: null,
+          rejected_by: null,
+          rejected_at: null,
+        }
+      }
       await loadSegmentationMask(image.value.id)
       await nextTick()
       segAnnotRef.value?.resetInitial?.()

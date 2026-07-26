@@ -283,8 +283,13 @@ export function useAutoAnnotate(options: {
           if (refreshed) activeModel.value = refreshed
         } catch {}
         if (resp.used_finetune) {
+          // v3.0.0: 展示自动检测不合格的统计 (命中 __unqualified__ 虚拟类别)
+          const uqMarked = Number(resp.auto_marked_unqualified || 0)
+          const uqHint = uqMarked > 0
+            ? `, 自动标记不合格 ${uqMarked} 张`
+            : (resp.has_unqualified_class ? ', 未检出不合格' : '')
           ElMessage.success(
-            `[Fine-tune ${resp.model_name}] 共 ${resp.total} 张, 命中 ${resp.auto_labeled} 张, 需人工 ${resp.need_human} 张, 平均置信度 ${(resp.avg_confidence * 100).toFixed(1)}%`
+            `[Fine-tune ${resp.model_name}] 共 ${resp.total} 张, 命中 ${resp.auto_labeled} 张, 需人工 ${resp.need_human} 张${uqHint}, 平均置信度 ${(resp.avg_confidence * 100).toFixed(1)}%`
           )
         } else if (resp.message) {
           const selected = finetuneModels.value.find((m) => m.id === selectedModelId.value)

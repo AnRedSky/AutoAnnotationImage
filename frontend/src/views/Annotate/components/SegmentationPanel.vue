@@ -82,7 +82,8 @@
         >上一张 (P)</el-button>
         <el-button
           style="flex: 1;"
-          :type="noMore ? 'info' : 'primary'"
+          :icon="ArrowRight"
+          :type="noMore ? 'info' : 'danger'"
           :plain="!noMore"
           :disabled="noMore"
           @click="emit('next')"
@@ -164,7 +165,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Check, Close, ArrowLeft, View, RefreshLeft, Warning } from '@element-plus/icons-vue'
+import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 
 interface Category { id: number; name: string }

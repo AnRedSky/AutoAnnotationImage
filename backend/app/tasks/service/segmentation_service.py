@@ -178,6 +178,12 @@ class SegmentationService:
         image.annotated_at = _dt.utcnow()
         image.ai_prediction = None
 
+        # v3.0.0: 写入新标注时自动清除"不合格"标记 (类别标签与不合格互斥)
+        auto_unmarked = False
+        if image.is_unqualified():
+            image.unmark_unqualified()
+            auto_unmarked = True
+
         # 5) 写 AnnotationLog
         log = AnnotationLog(
             image_id=image.id,
@@ -189,6 +195,14 @@ class SegmentationService:
             payload={"mask_pixels": int(mask_array.sum()), "mask_unique": int(len(np.unique(mask_array)))},
         )
         db.add(log)
+        if auto_unmarked:
+            db.add(AnnotationLog(
+                image_id=image.id,
+                user_id=user_id,
+                action="unmark_unqualified",
+                payload={"reason": "auto_cleared_on_mask_save"},
+                time_spent_ms=0,
+            ))
 
         if commit:
             await db.commit()
@@ -326,6 +340,17 @@ class SegmentationService:
         # 5) 升级 image.status (pending/ai_labeled → human_confirmed)
         if image.status in ("pending", "ai_labeled"):
             image.status = "human_confirmed"
+
+        # v3.0.0: 写入新标注时自动清除"不合格"标记 (类别标签与不合格互斥)
+        if image.is_unqualified():
+            image.unmark_unqualified()
+            db.add(AnnotationLog(
+                image_id=image.id,
+                user_id=user_id,
+                action="unmark_unqualified",
+                payload={"reason": "auto_cleared_on_mask_upload"},
+                time_spent_ms=0,
+            ))
 
         if commit:
             await db.commit()

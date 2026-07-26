@@ -72,6 +72,7 @@ class RejectReason(str, Enum):
     OUT_OF_SCOPE: Final[str] = "out_of_scope"  # 非本数据集类别
     VIOLATION: Final[str] = "violation"        # 内容违规
     OTHER: Final[str] = "other"                # 其他 (需填自定义文本)
+    AI_DETECTED: Final[str] = "ai_detected"    # v3.0.0: AI 模型自动检测为不合格
 
 
 REJECT_REASON_VALUES: Final[Tuple[str, ...]] = tuple(
@@ -86,6 +87,7 @@ REJECT_REASON_LABELS: Final[dict[str, str]] = {
     RejectReason.OUT_OF_SCOPE.value: "非本数据集类别",
     RejectReason.VIOLATION.value: "内容违规",
     RejectReason.OTHER.value: "其他",
+    RejectReason.AI_DETECTED.value: "AI 自动检测",
 }
 
 
@@ -93,6 +95,16 @@ REJECT_REASON_LABELS: Final[dict[str, str]] = {
 
 # Image.quality_flag 字段的取值 (正交于 Image.status, 不影响状态机)
 IMAGE_QUALITY_UNQUALIFIED: Final[str] = "unqualified"
+
+
+# ================== 不合格虚拟类别 (训练 / 推理) ==================
+
+# v3.0.0: 不合格图片作为独立虚拟类别纳入分类训练时的标签名
+# - 训练时: TrainingDataService.load_classification_samples 把所有 quality_flag="unqualified"
+#   的图片归到 __unqualified__ 索引, 末位追加到 label_name_to_idx
+# - 推理时: 命中该索引 → 自动调用 mark_unqualified 标记图片为不合格 (reason=ai_detected)
+# - 保留名: 不应在 Category 表出现 (load_classification_samples 不查 Category 表的 __unqualified__)
+UNQUALIFIED_LABEL: Final[str] = "__unqualified__"
 
 
 # ================== 检测 / 分割 训练任务状态 ==================

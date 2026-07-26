@@ -8,6 +8,12 @@ v3.0.0 Phase N 拆分: 从 image.py 抽离
   - use_finetune=True (默认): 优先 fine-tune, 冷启动兜底 ImageNet
   - use_finetune=False: 严格模式, 有 fine-tune 时禁止
 - 输出: ai_prediction + status=ai_labeled + final_label_id
+
+v3.0.0 不合格虚拟类别支持:
+- 优先用 mv.class_names 构建 idx→name 映射 (含 __unqualified__ 末位虚拟类别)
+- 推理命中 __unqualified__ 且置信度 >= threshold → 自动 mark_unqualified
+  (不写 final_label_id, status 保持 pending, 仅 quality_flag="unqualified")
+- 旧模型无 class_names → fallback 到 Category 表 sorted (向后兼容)
 """
 from pathlib import Path
 from typing import Optional
@@ -25,6 +31,7 @@ from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.common.ml.ai_service import ai_service
 from app.common.ml.ai_service import filter_predictions_to_categories
+from app.common.enums import UNQUALIFIED_LABEL, RejectReason
 from app.core.config import settings
 
 # auto_label 独立 router
@@ -49,10 +56,16 @@ async def auto_label(
                                 仍会写入 final_label_id + status=ai_labeled, 训练可发现
     - use_finetune=True + model_id: 显式指定 ModelVersion.id (支持标注工作台切换多个 fine-tune 模型)
     - use_finetune=False: 显式走 timm ImageNet, 输出 (class_532 等) 过滤到项目类目, 无匹配保持 pending
+
+    v3.0.0: 若 fine-tune 模型训练时纳入了 __unqualified__ 虚拟类别 (mv.class_names 末位含
+    __unqualified__), 推理命中该类别且置信度 >= threshold 的图片会被自动标记为不合格
+    (quality_flag="unqualified", reject_reason="ai_detected"), 不写 final_label_id.
     """
     # 1. 加载模型
     used_finetune = False
     mv: Optional[ModelVersion] = None
+    # v3.0.0: 是否启用了不合格虚拟类别 (mv.class_names 含 __unqualified__)
+    has_unqualified_class = False
     if use_finetune:
         # 取 fine-tune 模型: 优先 model_id 显式指定, 否则取激活
         if model_id is not None:
@@ -82,8 +95,15 @@ async def auto_label(
                     400,
                     "Dataset has no categories. Please add categories first (Dataset -> 类别)."
                 )
-            sorted_names = sorted({c.name for c in cats})
-            ai_service.set_label_map({i: name for i, name in enumerate(sorted_names)})
+            # v3.0.0: 优先用 mv.class_names (训练时存储, 含 __unqualified__ 虚拟类别)
+            # 旧模型 class_names 为 NULL → fallback 到 Category 表 sorted (向后兼容)
+            if isinstance(mv.class_names, list) and mv.class_names:
+                label_names_for_map = list(mv.class_names)
+                has_unqualified_class = UNQUALIFIED_LABEL in label_names_for_map
+            else:
+                label_names_for_map = sorted({c.name for c in cats})
+                has_unqualified_class = False
+            ai_service.set_label_map({i: name for i, name in enumerate(label_names_for_map)})
             used_finetune = True
         else:
             # 冷启动兜底: 没有激活的 fine-tune 模型, 自动回退到 timm ImageNet 预训练
@@ -135,6 +155,8 @@ async def auto_label(
             "model_path": ai_service.current_model_path,
             "model_id": mv.id if (used_finetune and mv is not None) else None,
             "fallback_to_pretrained": (use_finetune and not used_finetune),
+            "has_unqualified_class": has_unqualified_class,
+            "auto_marked_unqualified": 0,
             "message": "No pending images",
         }
 
@@ -159,6 +181,8 @@ async def auto_label(
 
     auto_labeled = 0
     no_match = 0
+    # v3.0.0: 自动标记为不合格的图片数 (命中 __unqualified__ 类别)
+    auto_marked_unqualified = 0
     confs_for_avg: list = []
     for img, pred in zip(images, final_predictions):
         if pred is None:
@@ -167,9 +191,34 @@ async def auto_label(
             continue
         img.ai_prediction = pred
         confs_for_avg.append(pred["top1_conf"])
+
+        # v3.0.0: 优先识别不合格虚拟类别 (命中 → mark_unqualified, 不走正常标注流程)
+        top1_label = pred.get("top1")
+        if (
+            has_unqualified_class
+            and top1_label == UNQUALIFIED_LABEL
+            and pred["top1_conf"] >= confidence_threshold
+            and not img.is_unqualified()
+        ):
+            img.mark_unqualified(current_user.id, RejectReason.AI_DETECTED.value)
+            db.add(AnnotationLog(
+                image_id=img.id,
+                user_id=current_user.id,
+                action="mark_unqualified",
+                payload={
+                    "reason": RejectReason.AI_DETECTED.value,
+                    "source": "auto_label",
+                    "model_id": mv.id if mv else None,
+                    "confidence": pred["top1_conf"],
+                },
+                time_spent_ms=0,
+            ))
+            auto_marked_unqualified += 1
+            continue
+
+        # 正常标注流程
         if pred["top1_conf"] >= confidence_threshold:
             img.status = "ai_labeled"
-            top1_label = pred.get("top1")
             if top1_label and top1_label in name_to_id:
                 img.final_label_id = name_to_id[top1_label]
             db.add(AnnotationLog(
@@ -187,7 +236,7 @@ async def auto_label(
     return {
         "total": len(images),
         "auto_labeled": auto_labeled,
-        "need_human": len(images) - auto_labeled,
+        "need_human": len(images) - auto_labeled - auto_marked_unqualified,
         "no_match": no_match,
         "avg_confidence": round(
             (sum(confs_for_avg) / len(confs_for_avg)) if confs_for_avg else 0.0,
@@ -201,6 +250,9 @@ async def auto_label(
         "model_path": ai_service.current_model_path,
         "model_id": mv.id if (used_finetune and mv is not None) else None,
         "fallback_to_pretrained": (use_finetune and not used_finetune),
+        # v3.0.0: 不合格虚拟类别训练 / 推理元信息
+        "has_unqualified_class": has_unqualified_class,
+        "auto_marked_unqualified": auto_marked_unqualified,
         "warning": (
             "未找到激活的 fine-tune 模型, 已自动回退到 ImageNet 预训练 (冷启动). "
             "建议: 数据集中数据足够后点击「训练」→ 等待 SUCCESS → 回到模型版本页点击「激活」,"

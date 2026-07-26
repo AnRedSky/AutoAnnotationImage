@@ -115,10 +115,17 @@ const {
   image,
   detAnnotRef,
   annotatorSaving,
-  // v2.5.15: 检测保存成功后立刻重拉 stats
-  // - 后端 save_bbox 会把 image.status 提升到 human_confirmed
-  // - 前端需主动刷新才能让"待标注"数字减少
-  onSaved: refreshStats,
+  // v3.0.0: 检测保存成功后 → 刷新 stats + 栈顶时自动 loadNext
+  // - 后端 save_bbox/replace_bboxes 会把 image.status 提升到 human_confirmed/corrected
+  // - 前端需主动刷新 stats, 才能让"待标注"数字减少
+  // - 仅在 historyCursor 在栈顶时自动跳下一张 (与分类 submit 行为一致),
+  //   用户在历史中间时不跳, 避免覆盖用户的"上一张"浏览意图
+  onSaved: async () => {
+    await refreshStats()
+    if (historyCursor.value >= historyIds.value.length - 1) {
+      loadNext()
+    }
+  },
 })
 
 // ============== 分割任务 composable ==============
@@ -139,10 +146,16 @@ const {
   image,
   segAnnotRef,
   annotatorSaving,
-  // v2.5.15: 分割保存成功后立刻重拉 stats
+  // v3.0.0: 分割保存成功后 → 刷新 stats + 栈顶时自动 loadNext
   // - 后端 upload_mask 会把 image.status 提升到 human_confirmed
-  // - 前端需主动刷新才能让"待标注"数字减少
-  onSaved: refreshStats,
+  // - 前端需主动刷新 stats, 才能让"待标注"数字减少
+  // - 仅在 historyCursor 在栈顶时自动跳下一张 (与分类 submit 行为一致)
+  onSaved: async () => {
+    await refreshStats()
+    if (historyCursor.value >= historyIds.value.length - 1) {
+      loadNext()
+    }
+  },
 })
 
 // ============== 浏览历史栈 (按访问顺序记录看过的 image id) ==============
@@ -331,6 +344,11 @@ const loadSpecificImage = async (imageId: number): Promise<boolean> => {
   }
 }
 
+// ============== 切图 race 控制 (v3.0.0) ==============
+// onMarkUnqualified 后 600ms 自动 loadNext, 但用户在窗口期内可能点"下一张"
+// 用 setTimeout 句柄 + 检查 image.value.id 是否还是被标记的图, 避免重复 loadNext
+let pendingMarkUnqualifiedTimer: ReturnType<typeof setTimeout> | null = null
+
 // ============== v3.0.0: 不合格标记事件处理 ==============
 
 /**
@@ -338,12 +356,14 @@ const loadSpecificImage = async (imageId: number): Promise<boolean> => {
  * - 调 API 设置 quality_flag / reject_reason
  * - 就地更新 image 对象 (避免整页重拉)
  * - 标记后自动加载下一张 (不合格图不应停留)
+ * - v3.0.0: 加 race 保护, 600ms 延迟期间用户点"下一张"则跳过定时器
  */
 async function onMarkUnqualified(reason: string, customText: string) {
   if (!image.value?.id) return
+  const markedId = image.value.id  // v3.0.0: 记录被标记的图 id, 用于 race 检测
   try {
     await annotationApi.markUnqualified({
-      image_id: image.value.id,
+      image_id: markedId,
       reason,
       custom_text: customText || undefined,
     })
@@ -354,8 +374,19 @@ async function onMarkUnqualified(reason: string, customText: string) {
       quality_flag: 'unqualified',
       reject_reason: reason,
     }
-    // 标记后自动加载下一张
-    setTimeout(() => loadNext(), 600)
+    // v3.0.0: 刷新统计 (不合格卡需要实时更新)
+    await refreshStats()
+    // 标记后自动加载下一张 (race 保护: 仅在 600ms 后仍是同一张图时才 loadNext)
+    // 场景: 用户在 600ms 窗口内点"下一张"或"启动 AI 预标注",
+    //       image.value.id 已变, 此时不应再触发重复 loadNext
+    if (pendingMarkUnqualifiedTimer) clearTimeout(pendingMarkUnqualifiedTimer)
+    pendingMarkUnqualifiedTimer = setTimeout(() => {
+      pendingMarkUnqualifiedTimer = null
+      // 仅在当前仍是同一张图时才 loadNext
+      if (image.value?.id === markedId) {
+        loadNext()
+      }
+    }, 600)
   } catch (e: any) {
     ElMessage.error('标记失败: ' + (e?.response?.data?.detail || e?.message))
   }
@@ -550,11 +581,17 @@ const loadNext = async () => {
     const resp: any = await imageApi.list(datasetId.value, {
       status: 'pending',
       page: 1,
-      page_size: 1,
+      page_size: 20,  // v3.0.0: 拉多个候选, 兜底过滤 historyIds 后取第一个 (防止 race 返回已加载的图)
       exclude_ids: excludeIdsParam,
     })
     const items = resp?.items || []
-    const item = items[0]
+    // v3.0.0 兜底过滤: 排除 historyIds 中已加载的图
+    // - 后端 list_images 已通过 exclude_ids 过滤, 但若 race (onMarkUnqualified 后端
+    //   还没改 quality_flag 时前端已发起 loadNext), 仍可能返回历史图
+    // - 前端二次过滤保证: 「下一张」永远不会返回用户已处理过的图
+    const seen = new Set(historyIds.value)
+    const safeItem = items.find((it: any) => it && !seen.has(it.id))
+    const item = safeItem || null
     if (!item) {
       noMore.value = true
       if (historyIds.value.length > 0) {
@@ -625,12 +662,13 @@ const {
 
 /**
  * 分类任务提交标注 (确认 / 修正)
+ * v3.0.0: 标注保存后端会清空不合格标记, 前端需同步更新本地 image.value
  */
 const submit = async (labelId: number, labelName: string, isConfirm: boolean) => {
   if (!image.value) return
   const cost = Date.now() - startTs.value
   try {
-    await annotationApi.save({
+    const r: any = await annotationApi.save({
       image_id: image.value.id,
       label_id: labelId,
       time_spent_ms: cost,
@@ -643,6 +681,16 @@ const submit = async (labelId: number, labelName: string, isConfirm: boolean) =>
     if (isConfirm) sessionStats.value.confirmed++
     else sessionStats.value.corrected++
     noMore.value = false
+    // v3.0.0: 后端在 save 时已自动撤销不合格标记, 同步清空本地 image.value
+    if (r?.auto_unmarked_unqualified) {
+      image.value = {
+        ...image.value,
+        quality_flag: null,
+        reject_reason: null,
+        rejected_by: null,
+        rejected_at: null,
+      }
+    }
     await refreshStats()
     loadNext()
   } catch (e: any) {

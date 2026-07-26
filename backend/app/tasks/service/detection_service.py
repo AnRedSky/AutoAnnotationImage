@@ -176,6 +176,12 @@ class DetectionService:
         # 清 AI prediction, 人工已确认则不再展示 AI 预测
         image.ai_prediction = None
 
+        # v3.0.0: 写入新标注时自动清除"不合格"标记 (类别标签与不合格互斥)
+        auto_unmarked = False
+        if image.is_unqualified():
+            image.unmark_unqualified()
+            auto_unmarked = True
+
         # 4) 写 AnnotationLog
         log = AnnotationLog(
             image_id=image.id,
@@ -187,6 +193,14 @@ class DetectionService:
             payload={"bbox_count": len(bboxes)},
         )
         db.add(log)
+        if auto_unmarked:
+            db.add(AnnotationLog(
+                image_id=image.id,
+                user_id=user_id,
+                action="unmark_unqualified",
+                payload={"reason": "auto_cleared_on_bbox_save"},
+                time_spent_ms=0,
+            ))
 
         if commit:
             await db.commit()
@@ -254,7 +268,8 @@ class DetectionService:
         1. 删除 image 下所有现有 BBox
         2. 校验所有 category_id 归属
         3. 写入新 BBox (annotated_by = user_id)
-        4. 一次 commit, 事务内完成
+        4. v3.0.0: 自动清除不合格标记 (与人工标注互斥)
+        5. 一次 commit, 事务内完成
         """
         # 1) 校验 category
         from app.tasks.model.category import Category
@@ -296,6 +311,18 @@ class DetectionService:
             )
             db.add(bb)
             new_boxes.append(bb)
+
+        # 4) v3.0.0: 写入新标注时自动清除"不合格"标记 (类别标签与不合格互斥)
+        # 写一条 unmark_unqualified 审计, 保留撤销原因
+        if image.is_unqualified():
+            image.unmark_unqualified()
+            db.add(AnnotationLog(
+                image_id=image.id,
+                user_id=user_id,
+                action="unmark_unqualified",
+                payload={"reason": "auto_cleared_on_bbox_replace"},
+                time_spent_ms=0,
+            ))
 
         if commit:
             await db.commit()

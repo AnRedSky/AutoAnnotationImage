@@ -23,6 +23,10 @@ class ModelVersionOut(BaseModel):
     mAP50: Optional[float] = None
     mAP50_95: Optional[float] = None
     accuracy: Optional[float] = None
+    # v3.0.0: 训练时的类别名称列表 (按 label_idx 顺序, 可能含 __unqualified__ 末位虚拟类别)
+    # - 前端展示「已启用不合格检测」徽章 + 训练类别列表
+    # - 推理时按此重建索引→类别名映射 (auto_label.py 已支持)
+    class_names: Optional[List[str]] = None
 
     model_config = ConfigDict(from_attributes=True)
 

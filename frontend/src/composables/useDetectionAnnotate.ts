@@ -17,7 +17,7 @@
  */
 import { ref, computed, nextTick, type Ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { detectionApi } from '@/api'
+import { annotationApi, detectionApi } from '@/api'
 
 // 类型定义 ---------------------------------------------------------------
 export interface BBox {
@@ -42,6 +42,11 @@ export interface CopySuggestion {
 export interface DetectionImage {
   id: number
   task_type: string
+  /** v3.0.0: 不合格标记状态 (供保存时自动清理) */
+  quality_flag?: string | null
+  reject_reason?: string | null
+  rejected_by?: number | null
+  rejected_at?: string | null
 }
 
 export interface Category {
@@ -189,6 +194,10 @@ export function useDetectionAnnotate(options: {
       // 静默 no-op: 用户没改, 也不弹消息 (避免打断操作流)
       return
     }
+    // v3.0.0: 检测保存前, 若图已被标记不合格, 主动撤销 (后端 save 时已自动撤销)
+    // - 与后端正交维度清理对齐, 前端本地 image.value 同步清空
+    // - 后端已实现 save 时自动 unmark_unqualified, 此处为前端同步 UI 状态
+    const wasUnqualified = image.value?.quality_flag === 'unqualified'
     annotatorSaving.value = true
     try {
       // 1) 清空旧 bbox
@@ -208,6 +217,27 @@ export function useDetectionAnnotate(options: {
         ElMessage.success('已清空全部标注 (0 个 bbox 写入数据库)')
       } else {
         ElMessage.success(`已保存 ${bboxes.length} 个 bbox`)
+      }
+      // v3.0.0: 前端同步清空不合格标记 (后端已自动撤销)
+      if (wasUnqualified && image.value) {
+        // 调用 unmarkUnqualified 让审计日志完整 (与手动撤销行为一致)
+        try {
+          await annotationApi.unmarkUnqualified(image.value.id)
+        } catch (e: any) {
+          // 409 表示后端认为未标记, 静默忽略 (save 时已清空, 这是正常 race)
+          if (e?.response?.status !== 409) {
+            // 其他错误不阻塞主流程
+            console.warn('unmarkUnqualified failed (non-fatal):', e)
+          }
+        }
+        // 就地更新 image 对象, 让 UI 立刻反映 (isUnqualified computed 重新求值)
+        image.value = {
+          ...image.value,
+          quality_flag: null,
+          reject_reason: null,
+          rejected_by: null,
+          rejected_at: null,
+        }
       }
       // v2.5.42: 同步 lastSavedBboxes (本次保存即为「新的上次保存」状态)
       // 注意: 先同步再 loadDetectionAnnotations, 因为 load 会重置它一次, 但保持顺序让逻辑清晰

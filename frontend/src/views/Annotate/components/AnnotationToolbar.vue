@@ -2,10 +2,12 @@
   AnnotationToolbar.vue (v2.5.7 拆分自 Annotate.vue, v2.5.15 +已人工标注卡, v2.5.48 +类别卡)
   ===================================================
   标注工作台顶部工具栏:
-  - 4 个统计卡片 (待标注 / 已人工标注 / AI 已标 / 类别)
+  - 5 个统计卡片 (待标注 / 已人工标注 / AI 已标 / 类别 / 不合格) 同一行 flex 等分
     · 已人工标注: 包含已确认 + 已修正, 与 DatasetDetail 统计卡口径一致
     · 类别: 显示数据集总类数; hover 展示每类的总样本 / 已人工标 / AI 已标
       (类目级覆盖度, 反映任务复杂度 + 各类的标注进度)
+    · 不合格 (v3.0.0): 来源 stats.unqualified_count, 副标题显示占比
+      正交于 status 状态机, 由标注员 / AI 自动检测写入 quality_flag
   - v2.5.48: 移除 3 个低价值指标 ——
     · 本会话已标: 与「已人工标注」语义重复 (差在 session scope, 切换 dataset 即重置)
     · 本会话耗时: 孤立秒数无意义, 标注效率 = 已标/耗时 已在 DatasetDetail 体现
@@ -17,6 +19,11 @@
     · segmentation:   项目模型 → fine-tune 下拉; 基础模型 → 暂不支持 (禁用提示)
   - 置信度阈值 + IoU 阈值 (检测专属)
   - 启动 AI 预标注 按钮 (与其它控件同一行)
+
+  v3.0.0 不合格指标增强:
+  - 布局从 el-row/el-col (24 栅格无法 5 等分) 改为 flex 等分, 与 DatasetStatsRow 风格一致
+  - 新增第 5 张「不合格」卡 (红色), 副标题显示不合格占总图片百分比
+  - 数据源: stats.unqualified_count (后端 /api/stats/dataset/{id} 已返回)
 
   Props (页面私有子组件, 接收父组件状态):
     datasets, datasetId, currentTaskTypeRaw
@@ -36,92 +43,97 @@
 -->
 <template>
   <div>
-    <!-- 顶部统计 (v2.5.48: 6 卡 → 4 卡)
+    <!-- 顶部统计 (v3.0.0: 5 卡同一行 flex 等分, 替代 el-row/el-col)
          · 待标注 (蓝)        来源: status_counts.pending
          · 已人工标注 (绿)    来源: status_counts.human_confirmed + human_corrected
                              · 副标题: 已确认 N · 已修正 N
          · AI 已标 (灰)       来源: status_counts.ai_labeled
          · 类别 (紫) v2.5.48  来源: categories.length
                              · hover tooltip: 每类的总样本 / 已人工标 / AI 已标
+         · 不合格 (红) v3.0.0 来源: stats.unqualified_count
+                             · 副标题: 占比 N% (不合格 / 图片总数)
 
          v2.5.48 移除的 3 个低价值指标:
          · 本会话已标: 与「已人工标注」语义重叠 (差在 session scope, 切换 dataset 即重置)
          · 本会话耗时: 孤立秒数无意义, 标注效率 = 已标/耗时 已在 DatasetDetail 体现
          · 估算 AI 节省: 后端硬编码 ai_labeled * 3 (拍脑袋), 不可验证 / 不可解释
     -->
-    <el-row v-if="stats" :gutter="12" style="margin-bottom: 16px;">
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="待标注" :value="pendingCount" suffix="张"
-            :value-style="{ color: '#409eff' }" />
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="已人工标注"
-            :value="humanConfirmedCount + humanCorrectedCount" suffix="张"
-            :value-style="{ color: '#67c23a' }" />
-          <div class="stat-meta">
-            <span style="color: #67c23a;">已确认 {{ humanConfirmedCount }}</span>
-            <span class="stat-meta-sep">·</span>
-            <span style="color: #e6a23c;">已修正 {{ humanCorrectedCount }}</span>
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
-          <el-statistic title="AI 已标" :value="aiLabeledCount" suffix="张"
-            :value-style="{ color: '#909399' }" />
-        </el-card>
-      </el-col>
+    <div v-if="stats" class="annotate-stats">
+      <el-card shadow="hover" class="stat-card">
+        <el-statistic title="待标注" :value="pendingCount" suffix="张"
+          :value-style="{ color: '#409eff' }" />
+      </el-card>
+      <el-card shadow="hover" class="stat-card">
+        <el-statistic title="已人工标注"
+          :value="humanConfirmedCount + humanCorrectedCount" suffix="张"
+          :value-style="{ color: '#67c23a' }" />
+        <div class="stat-meta">
+          <span style="color: #67c23a;">已确认 {{ humanConfirmedCount }}</span>
+          <span class="stat-meta-sep">·</span>
+          <span style="color: #e6a23c;">已修正 {{ humanCorrectedCount }}</span>
+        </div>
+      </el-card>
+      <el-card shadow="hover" class="stat-card">
+        <el-statistic title="AI 已标" :value="aiLabeledCount" suffix="张"
+          :value-style="{ color: '#909399' }" />
+      </el-card>
       <!-- v2.5.48: 类别卡 — 显示总类数, hover 看每类详情
            - el-tooltip 触发 hover 弹出详细面板
            - 面板内: 类目名 + 3 列计数 (总样本 / 已人工 / AI 已标)
            - 数据来源: datasetApi.categories 已在父组件加载到 categories.value
            - 空态: 0 个类目时显示「-」 + tooltip 提示「数据集未配置类目」 -->
-      <el-col :span="6">
-        <el-tooltip
-          placement="top"
-          :disabled="categories.length === 0"
-          :show-after="200"
-        >
-          <template #content>
-            <div v-if="categories.length === 0" style="padding: 4px 8px;">
-              当前数据集未配置类目
-            </div>
-            <div v-else class="category-tooltip">
-              <div class="category-tooltip__header">各类目已标进度</div>
-              <table class="category-tooltip__table">
-                <thead>
-                  <tr>
-                    <th class="ct-name">类目</th>
-                    <th class="ct-num">总样本</th>
-                    <th class="ct-num">已人工</th>
-                    <th class="ct-num">AI 已标</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="c in categories" :key="c.id">
-                    <td class="ct-name">
-                      <span class="ct-dot" :style="{ background: c.color || '#409eff' }"></span>
-                      {{ c.name }}
-                    </td>
-                    <td class="ct-num">{{ c.sample_count ?? 0 }}</td>
-                    <td class="ct-num ct-human">{{ c.human_labeled_count ?? 0 }}</td>
-                    <td class="ct-num ct-ai">{{ c.ai_labeled_count ?? 0 }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </template>
-          <el-card shadow="hover" class="stat-card stat-card--clickable">
-            <el-statistic :title="categories.length === 0 ? '类别' : `类别 (共 ${categories.length} 类)`"
-              :value="categories.length" suffix="类"
-              :value-style="{ color: categories.length > 0 ? '#722ed1' : '#c0c4cc' }" />
-          </el-card>
-        </el-tooltip>
-      </el-col>
-    </el-row>
+      <el-tooltip
+        placement="top"
+        :disabled="categories.length === 0"
+        :show-after="200"
+      >
+        <template #content>
+          <div v-if="categories.length === 0" style="padding: 4px 8px;">
+            当前数据集未配置类目
+          </div>
+          <div v-else class="category-tooltip">
+            <div class="category-tooltip__header">各类目已标进度</div>
+            <table class="category-tooltip__table">
+              <thead>
+                <tr>
+                  <th class="ct-name">类目</th>
+                  <th class="ct-num">总样本</th>
+                  <th class="ct-num">已人工</th>
+                  <th class="ct-num">AI 已标</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in categories" :key="c.id">
+                  <td class="ct-name">
+                    <span class="ct-dot" :style="{ background: c.color || '#409eff' }"></span>
+                    {{ c.name }}
+                  </td>
+                  <td class="ct-num">{{ c.sample_count ?? 0 }}</td>
+                  <td class="ct-num ct-human">{{ c.human_labeled_count ?? 0 }}</td>
+                  <td class="ct-num ct-ai">{{ c.ai_labeled_count ?? 0 }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <el-card shadow="hover" class="stat-card stat-card--clickable">
+          <el-statistic :title="categories.length === 0 ? '类别' : `类别 (共 ${categories.length} 类)`"
+            :value="categories.length" suffix="类"
+            :value-style="{ color: categories.length > 0 ? '#722ed1' : '#c0c4cc' }" />
+        </el-card>
+      </el-tooltip>
+      <!-- v3.0.0: 不合格卡 — 与上述 4 卡同一行 flex 等分
+           - 数据源: stats.unqualified_count (后端 /api/stats/dataset/{id} 已返回)
+           - 副标题: 占比 N% (不合格 / 图片总数)
+           - 视觉风格: 红色, 与 DatasetStatsRow 不合格卡一致 -->
+      <el-card shadow="hover" class="stat-card stat-card--unqualified">
+        <el-statistic title="不合格" :value="unqualifiedCount" suffix="张"
+          :value-style="{ color: '#f56c6c' }" />
+        <div class="stat-meta">
+          占比 {{ unqualifiedRatioPct }}%
+        </div>
+      </el-card>
+    </div>
 
     <!-- 顶部控制条 -->
     <el-card style="margin-bottom: 16px;">
@@ -364,7 +376,7 @@ const TASK_TYPE_FILTER_OPTIONS: { value: string; label: string }[] = [
 ]
 
 const props = defineProps({
-  datasets: { type: Array as PropType<{ id: number; name: string; task_type?: string }[]>, required: true },
+  datasets: { type: Array as PropType<{ id: number; name: string; task_type?: string; image_count?: number }[]>, required: true },
   datasetId: { type: Number as PropType<number | null>, default: null },
   /** v2.5.19: 任务类型筛选值, 'classification' / 'detection' / 'segmentation' */
   taskTypeFilter: { type: String, required: true },
@@ -435,9 +447,46 @@ const filteredDatasets = computed(() => {
   const f = props.taskTypeFilter
   return props.datasets.filter((d) => (d.task_type || 'classification') === f)
 })
+
+/**
+ * v3.0.0: 不合格图片数 (来源 stats.unqualified_count)
+ * - 后端 /api/stats/dataset/{id} 已返回 (正交于 status_counts, 单独字段)
+ * - 用于顶部「不合格」统计卡, 与其它 4 张卡同一行 flex 等分
+ */
+const unqualifiedCount = computed(() => {
+  return Number(props.stats?.unqualified_count || 0)
+})
+
+/**
+ * v3.0.0: 不合格占总图片百分比 (用于「不合格」卡副标题)
+ * - 分母: 数据集图片总数 (datasets prop 中匹配当前 datasetId 的 image_count)
+ * - 0 张时显示 0%, 避免除零
+ */
+const unqualifiedRatioPct = computed(() => {
+  const total = Number(props.datasets.find((d: any) => d.id === props.datasetId)?.image_count || 0)
+  if (total <= 0) return 0
+  return Math.round((unqualifiedCount.value / total) * 100)
+})
 </script>
 
 <style scoped>
+/* v3.0.0: flex 等分布局 (替代 el-row/el-col, 支持 5 张卡同一行)
+ * - 大屏: 5 列等分 (flex: 1 1 0)
+ * - 窄屏 (<=768px): 自动换行为 2 列 (min-width 触发 wrap)
+ * - 与 DatasetStatsRow.vue 的 .ds-stats 风格保持一致, 便于跨页面维护 */
+.annotate-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.annotate-stats :deep(.el-card) {
+  flex: 1 1 0;
+  min-width: 150px;
+  width: auto;
+  margin-bottom: 0;
+}
+
 .stat-card { text-align: center; }
 /* v2.5.15: 统计卡副标题 (已人工标注卡下方的"已确认 N · 已修正 N")
    类名 .stat-meta 与 DatasetDetail/index.vue 保持一致, 便于跨页面维护 */
@@ -498,6 +547,22 @@ const filteredDatasets = computed(() => {
 .stat-card--clickable:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(114, 46, 209, 0.15);
+}
+
+/* v3.0.0: 不合格卡 (红色, 与 DatasetStatsRow 不合格卡视觉一致) */
+.stat-card--unqualified {
+  border-color: rgba(245, 108, 108, 0.3) !important;
+}
+.stat-card--unqualified:hover {
+  border-color: #f56c6c !important;
+}
+
+/* 响应式: 窄屏 2 列 (flex-basis 50% 减去 gap) */
+@media (max-width: 768px) {
+  .annotate-stats :deep(.el-card) {
+    flex: 1 1 calc(50% - 12px);
+    min-width: 0;
+  }
 }
 </style>
 

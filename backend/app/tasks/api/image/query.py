@@ -59,6 +59,10 @@ async def list_images(
     # v3.0.0: status="unqualified" 是正交维度, 转查 quality_flag
     # 其它 status 值正常按 Image.status 过滤, 并额外排除不合格图片
     # (标注工作台 loadNext 不应返回不合格图)
+    # v3.0.0 加固: "待标注" (status=pending) 严格不包含已处理的图
+    # - 不合格图: quality_flag != null → 排除
+    # - 人工确认/修正图: status 升级到 human_confirmed/corrected → 已被 status 过滤排除
+    # - 这保证了"待标注队列"中每张图都是真正未处理过的, 防止重复标注
     if status == "unqualified":
         base = base.where(Image.quality_flag == "unqualified")
     elif status:
@@ -229,4 +233,11 @@ async def get_image_detail(
         "created_at": img.created_at.isoformat() if img.created_at else None,
         "file_url": f"/api/files/{img.id}",
         "annotation_history": logs,
+        # v3.0.0: 不合格标记字段 (正交于 status 状态机)
+        # - 修复: 上一张/下一张切回时丢失不合格状态的问题
+        # - 与 list_images 接口的字段保持一致
+        "quality_flag": img.quality_flag,
+        "reject_reason": img.reject_reason,
+        "rejected_by": img.rejected_by,
+        "rejected_at": img.rejected_at.isoformat() if img.rejected_at else None,
     }

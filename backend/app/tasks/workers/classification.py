@@ -160,50 +160,28 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         )
 
         # ---- 2) TrainingJob SUCCESS (委托 Service) ----
-        async def _link_mv():
-            """关联 ModelVersion (取 file_path 最新的)"""
-            from sqlalchemy import select
-            from app.database import AsyncSessionLocal
-            from app.tasks.model.model_version import ModelVersion
-            if not result.get("model_path"):
-                return None
-            async with AsyncSessionLocal() as db:
-                stmt = (
-                    select(ModelVersion)
-                    .where(ModelVersion.file_path == result["model_path"])
-                    .order_by(ModelVersion.id.desc())
-                )
-                return (await db.execute(stmt)).scalars().first()
+        # v3.0.0: ModelVersion 已在 run_training → model_saver 内部创建完成 (含
+        # accuracy/precision/recall/f1_score/confusion_matrix/training_log/class_names),
+        # 这里直接复用 result["model_version_id"], 不再二次创建空记录 (旧实现会插入
+        # num_classes=0 metrics={} 的脏行, 导致前端详情页拉到空指标).
+        mv_id = result.get("model_version_id")
 
-        # ---- 3) 写 ModelVersion + 关联 ----
-        dv_type = result.get("device_type")
-        dv_info = result.get("device_info") or {}
-        extra_fields: dict = {}
-        if dv_type:
-            extra_fields["device_type"] = str(dv_type)[:16]
-        if isinstance(dv_info, dict) and dv_info:
-            extra_fields["device_info"] = dv_info
-            if dv_info.get("device_name"):
-                extra_fields["device_name"] = str(dv_info["device_name"])[:128]
-            peak = dv_info.get("gpu_peak_mb")
-            if isinstance(peak, (int, float)):
-                extra_fields["gpu_peak_memory_mb"] = int(peak)
-
-        mv_id = None
-        if result.get("model_path"):
-            mv_id = TrainingLifecycleService.create_model_version_sync(
-                name=model_name,
-                base_model=base_model,
-                dataset_id=dataset_id,
-                task_type="classification",
-                num_classes=0,  # classification 走 device_info 等额外字段
-                file_path=result["model_path"],
-                metrics=result.get("metrics", {}),
-                history=history_buffer,
-                extra_fields=extra_fields,
-            )
-            # 关联到 TrainingJob (若已存在同 file_path 的旧记录, 已通过 id desc 取最大, 这里新写)
-            # 不需要再 link, Service 已经写好
+        # v3.0.0: 不合格虚拟类别训练元信息透传给前端 (sticky_meta 持久化到 SSE)
+        # - unqualified_count: 纳入训练的不合格样本数 (0=未启用或降级)
+        # - unqualified_skipped: True=样本不足自动降级 (跳过不合格类别)
+        # - unqualified_included: 是否含虚拟 __unqualified__ 类别
+        # - unqualified_warning: 软门禁警告 (None=达标 / 字符串=不达标, 前端 SSE 显示)
+        uq_count = result.get("unqualified_count", 0)
+        uq_skipped = result.get("unqualified_skipped", False)
+        uq_class_names = result.get("class_names") or []
+        uq_warning = result.get("unqualified_warning")
+        sticky_meta["unqualified_count"] = int(uq_count)
+        sticky_meta["unqualified_skipped"] = bool(uq_skipped)
+        sticky_meta["unqualified_included"] = (
+            TrainingDataService.UNQUALIFIED_LABEL in uq_class_names
+        )
+        if uq_warning:
+            sticky_meta["unqualified_warning"] = str(uq_warning)[:500]
 
         TrainingLifecycleService.mark_success_sync(
             job_id=job_id,

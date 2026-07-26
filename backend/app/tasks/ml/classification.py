@@ -21,6 +21,11 @@ from app.core.config import settings
 # v3.0.0 Phase 5: ML 模块不再直接 import app.core.celery_utils (DB IO 已委托给 service)
 # 当前 ML 模块已彻底解耦, 不再需要任何兼容垫片引用
 
+# v3.0.0: 不合格虚拟类别常量 + 软门禁阈值 (与 app.common.enums.UNQUALIFIED_LABEL 同义)
+UNQUALIFIED_LABEL = "__unqualified__"
+# 召回率阈值: 低于此值说明模型漏检不合格样本严重, 警告用户
+UNQUALIFIED_RECALL_THRESHOLD = 0.5
+
 
 def collect_device_info() -> Dict[str, Any]:
     """
@@ -198,7 +203,7 @@ def run_training(
         except Exception:
             pass
 
-    # ---- v3.0.0 Phase 5: 数据加载委托给注入的 data_loader ----
+    # v3.0.0 Phase 5: 数据加载委托给注入的 data_loader ----
     # 默认实现 (_default_classification_data_loader) 内部走 app.tasks.model
     # 推荐由 Worker 注入 TrainingDataService.load_classification_samples_sync
     data = data_loader(dataset_id)
@@ -208,6 +213,13 @@ def run_training(
     skipped_orphan = data.get("skipped_orphan", 0)
     skipped_missing = data.get("skipped_missing", 0)
     n = data.get("total_before_filter", len(samples) + skipped_orphan + skipped_missing)
+
+    # v3.0.0: 不合格虚拟类别纳入训练的关键数据 (供 model_saver 持久化 + 推理重建索引)
+    # - class_names: 按 label_idx 顺序的类别名列表 (含 __unqualified__ 时末位即不合格类别)
+    # - unqualified_count / unqualified_skipped: 降级标志, 由 worker 写入 TrainingJob 元数据
+    class_names = data.get("class_names") or list(label_name_to_idx.keys())
+    unqualified_count = int(data.get("unqualified_count", 0))
+    unqualified_skipped = bool(data.get("unqualified_skipped", False))
     # 若回填/过滤后样本不够, 重新检查
     if len(samples) < 2:
         raise ValueError(
@@ -434,6 +446,24 @@ def run_training(
     # 容易让用户误判的 bug)
     cm_json = cm.tolist() if hasattr(cm, "tolist") else (cm if isinstance(cm, list) else [])
 
+    # v3.0.0: 不合格类别准确率软门禁
+    # 训练纳入 __unqualified__ 虚拟类别时, 从 classification_report 提取该类别的
+    # precision / recall / f1, 低于阈值则警告 (不阻断训练, 仅提示用户模型可能不可靠)
+    # - 阈值: UNQUALIFIED_METRIC_THRESHOLD (recall 低于此值, 模型容易漏检不合格)
+    # - 警告通过 sticky_meta 透传给前端 SSE (worker 中读取 result["unqualified_warning"])
+    unqualified_warning: Optional[str] = None
+    if UNQUALIFIED_LABEL in class_names:
+        uq_metrics = report.get(UNQUALIFIED_LABEL, {}) if isinstance(report, dict) else {}
+        uq_recall = float(uq_metrics.get("recall", 0.0) or 0.0)
+        uq_precision = float(uq_metrics.get("precision", 0.0) or 0.0)
+        uq_f1 = float(uq_metrics.get("f1-score", 0.0) or 0.0)
+        if uq_recall < UNQUALIFIED_RECALL_THRESHOLD:
+            unqualified_warning = (
+                f"不合格类别召回率偏低 (recall={uq_recall:.2f} < {UNQUALIFIED_RECALL_THRESHOLD}), "
+                f"模型可能漏检不合格样本. precision={uq_precision:.2f}, f1={uq_f1:.2f}. "
+                f"建议: 增加不合格样本数 (当前 {unqualified_count} 张) 后再训练."
+            )
+
     # ---- 训练资源记录: 把设备信息 + GPU 峰值显存 (CUDA 时) 加到返回值 ----
     # tasks.py 会把 device_type + device_info 写到 TrainingJob 表 (DB 持久化)
     # 前端 Training.vue 通过 /api/training/jobs/{id} 拉到 device_info 后展示
@@ -455,6 +485,8 @@ def run_training(
     # 持久化到数据库 (创建 ModelVersion 记录, is_active 默认为 False)
     # 激活操作由前端通过 POST /api/models/{id}/activate 触发, 保证互斥
     # v3.0.0 Phase 5: 委托给注入的 model_saver
+    # v3.0.0: 传 class_names 让 ModelVersion 保存索引→类别名映射 (含 __unqualified__),
+    # 推理时按此映射重建, 命中 __unqualified__ 索引 → 自动标记图片为不合格
     new_model_version_id = model_saver(
         name=model_name,
         base_model=base_model,
@@ -466,6 +498,7 @@ def run_training(
         history=history,
         confusion_matrix=cm,
         device_info=final_device_info,
+        class_names=class_names,
     )
 
     return {
@@ -476,6 +509,12 @@ def run_training(
         "model_version_id": int(new_model_version_id) if new_model_version_id is not None else None,
         "device_type": str(device_info.get("device_type", "cpu")),
         "device_info": final_device_info,
+        # v3.0.0: 不合格虚拟类别纳入训练的元信息 (供 worker 写 TrainingJob.sticky_meta)
+        "class_names": class_names,
+        "unqualified_count": unqualified_count,
+        "unqualified_skipped": unqualified_skipped,
+        # v3.0.0: 软门禁警告 (None=未启用 / 已达标; 字符串=不达标, 前端 SSE 显示)
+        "unqualified_warning": unqualified_warning,
     }
 
 

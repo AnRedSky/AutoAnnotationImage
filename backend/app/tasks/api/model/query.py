@@ -91,6 +91,8 @@ async def list_models(
                 "dice_score": float(m.dice_score) if m.dice_score is not None else None,
                 "is_active": m.is_active,
                 "created_at": m.created_at.isoformat(),
+                # v3.0.0: 训练时的类别名称列表 (含 __unqualified__ 时表示已启用不合格检测)
+                "class_names": m.class_names,
             }
             for m in models
         ]
@@ -204,4 +206,6 @@ async def get_model_detail(
         "training_log": m.training_log,
         "confusion_matrix": m.confusion_matrix,
         "file_path": m.file_path,
+        # v3.0.0: 训练时的类别名称列表 (含 __unqualified__ 时表示已启用不合格检测)
+        "class_names": m.class_names,
     }

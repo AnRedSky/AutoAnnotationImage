@@ -68,6 +68,14 @@ async def save_annotation(
     img.annotated_at = datetime.utcnow()
     img.status = "human_confirmed" if req.is_confirm else "human_corrected"
 
+    # v3.0.0: 写入新标注时自动清除"不合格"标记
+    # - 业务规则: 类别标签与不合格标记互斥, 标注了类别即视为有效图片
+    # - 写一条 unmark_unqualified 审计日志, 保留撤销原因
+    auto_unmarked = False
+    if img.is_unqualified():
+        img.unmark_unqualified()
+        auto_unmarked = True
+
     # 写审计日志
     # 修复: 之前只对有 ai_prediction 的图记 from_label_id, 导致修改标注时旧 label 丢失
     # 现在的规则:
@@ -84,6 +92,15 @@ async def save_annotation(
         time_spent_ms=req.time_spent_ms,
     )
     db.add(log)
+    if auto_unmarked:
+        # 写一条 unmark_unqualified 审计 (自动撤销原因: 标注了类别)
+        db.add(AnnotationLog(
+            image_id=req.image_id,
+            user_id=current_user.id,
+            action="unmark_unqualified",
+            payload={"reason": "auto_cleared_on_label_save"},
+            time_spent_ms=0,
+        ))
 
     # 更新类别样本数
     # 修改标注: 旧类目 -1, 新类目 +1
@@ -100,6 +117,9 @@ async def save_annotation(
         "image_id": req.image_id,
         "new_status": img.status,
         "label": label.name,
+        # v3.0.0: 标注保存时, 不合格标记被自动清除, 前端需同步清空本地 image.value
+        "auto_unmarked_unqualified": auto_unmarked,
+        "quality_flag": img.quality_flag,  # 现在一定是 None
     }
 
 
@@ -472,15 +492,27 @@ async def annotation_stats(
     - 各状态图片数
     - AI 节省时间估算
     - 标注员人均速度
+    - v3.0.0: 不合格图片单独统计 (正交于 status 状态机), status_counts 排除不合格图
     """
     from sqlalchemy import func
-    # 各状态图片数
+    # 各状态图片数 (v3.0.0: 排除不合格图片, 不合格单独统计)
     stmt = (
         select(Image.status, func.count(Image.id))
-        .where(Image.dataset_id == dataset_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            Image.quality_flag.is_(None),
+        )
         .group_by(Image.status)
     )
     status_counts = dict((await db.execute(stmt)).all())
+
+    # v3.0.0: 不合格图片数 (供前端顶部统计卡展示)
+    unqualified_count = (await db.execute(
+        select(func.count(Image.id)).where(
+            Image.dataset_id == dataset_id,
+            Image.quality_flag == "unqualified",
+        )
+    )).scalar() or 0
 
     # 标注总耗时
     stmt = (
@@ -496,6 +528,7 @@ async def annotation_stats(
 
     return {
         "status_counts": status_counts,
+        "unqualified_count": unqualified_count,  # v3.0.0: 不合格图片数
         "total_annotations": total_annos,
         "total_time_seconds": (total_time or 0) // 1000,
         "avg_seconds_per_image": round((total_time or 0) / 1000 / max(total_annos, 1), 2),

@@ -7,6 +7,10 @@
  * - 关键指标 4 卡 (准确率 / 精确率 / 召回率 / F1)
  * - 基础信息描述列表 (ID / 数据集 / 模型文件路径)
  *
+ * v3.0.0 不合格虚拟类别支持:
+ * - 顶部信息卡显示「已启用不合格检测」徽章 (class_names 含 __unqualified__)
+ * - 描述列表新增「训练类别」行, 展示 class_names (隐藏 __unqualified__ 虚拟类别)
+ *
  * 父组件只需:
  *   <ModelDetailDialog v-model="detailOpen" :model="detail" />
  */
@@ -30,6 +34,21 @@ const visible = computed({
 // 数值格式化 helpers (从原 page 同步过来)
 const pct = (v: any) => (v != null ? `${(Number(v) * 100).toFixed(2)}%` : '-')
 const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
+
+// v3.0.0: 是否启用了不合格虚拟类别训练
+const UNQUALIFIED_LABEL = '__unqualified__'
+const hasUnqualifiedClass = computed(() => {
+  const names = props.model?.class_names
+  return Array.isArray(names) && names.includes(UNQUALIFIED_LABEL)
+})
+
+// v3.0.0: 训练类别展示列表 (隐藏虚拟类别 __unqualified__, 改为「+ 不合格类别」描述)
+const displayClassNames = computed(() => {
+  const names = props.model?.class_names
+  if (!Array.isArray(names) || names.length === 0) return null
+  const real = names.filter((n: string) => n !== UNQUALIFIED_LABEL)
+  return real.length > 0 ? real : null
+})
 </script>
 
 <template>
@@ -46,7 +65,19 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
             <el-icon><Grid /></el-icon>
           </div>
           <div>
-            <div class="hero-name">{{ model.name }}</div>
+            <div class="hero-name">
+              {{ model.name }}
+              <!-- v3.0.0: 已启用不合格虚拟类别训练徽章 -->
+              <el-tag
+                v-if="hasUnqualifiedClass"
+                type="warning"
+                effect="plain"
+                size="small"
+                style="margin-left: 8px; vertical-align: middle;"
+              >
+                已启用不合格检测
+              </el-tag>
+            </div>
             <div class="hero-base">{{ model.base_model }} · 类别数 {{ model.num_classes }}</div>
           </div>
         </div>
@@ -87,6 +118,28 @@ const f1fmt = (v: any) => (v != null ? Number(v).toFixed(3) : '-')
         <el-descriptions-item label="数据集 ID">{{ model.dataset_id }}</el-descriptions-item>
         <el-descriptions-item label="基础模型">{{ model.base_model }}</el-descriptions-item>
         <el-descriptions-item label="类别数">{{ model.num_classes }}</el-descriptions-item>
+        <el-descriptions-item v-if="displayClassNames" label="训练类别" :span="2">
+          <div class="class-names-row">
+            <el-tag
+              v-for="name in displayClassNames"
+              :key="name"
+              size="small"
+              effect="plain"
+              style="margin: 2px 4px 2px 0;"
+            >
+              {{ name }}
+            </el-tag>
+            <el-tag
+              v-if="hasUnqualifiedClass"
+              size="small"
+              type="warning"
+              effect="plain"
+              style="margin: 2px 4px 2px 0;"
+            >
+              + 不合格类别
+            </el-tag>
+          </div>
+        </el-descriptions-item>
         <el-descriptions-item label="模型文件" :span="2">
           <code class="path-code">{{ model.file_path }}</code>
         </el-descriptions-item>
