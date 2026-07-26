@@ -165,6 +165,9 @@ export function useTrainingDetailStream() {
       },
       onError: (e) => {
         cancelStream = null
+        // v3.0.0 修复: SSE 断开时也必须清 historyTimer, 否则 5s 轮询永久运行
+        // (之前只在 onComplete 清, 网络异常断连时 historyTimer 泄漏)
+        if (historyTimer) { clearInterval(historyTimer); historyTimer = null }
         log.value.push(`[${new Date().toLocaleTimeString()}] SSE 断开: ${e.message}`)
       },
     })

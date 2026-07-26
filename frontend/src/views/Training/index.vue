@@ -145,6 +145,11 @@ const onCreateSubmit = async (payload: { params: any; newTaskId: string; newJobI
     })
   }
   await loadJobs()
+  // v3.0.0: 如果详情弹窗还开着, 关闭它以清理旧任务的 SSE + 5s historyTimer
+  // 避免旧 PENDING/PROGRESS 任务的定时请求继续跑 (5s historyTimer + SSE 连接)
+  if (detailVisible.value) {
+    detailVisible.value = false
+  }
 }
 
 const openRetrainDialog = (row: any) => {
@@ -163,6 +168,12 @@ const onRetrainSubmit = async (payload: { params: any; newTaskId: string; newJob
     })
   }
   await loadJobs()
+  // v3.0.0: 再训练提交后关闭详情弹窗, 触发 cleanup() 清理旧任务的 SSE + 5s historyTimer
+  // 旧任务如果是 PENDING/PROGRESS, 其 SSE 连接和 5s 轮询会继续跑直到弹窗关闭
+  // 关闭后 useSilentRefresh 恢复 (30s 兜底), useTrainingListSSE 跟踪新任务进度
+  if (detailVisible.value) {
+    detailVisible.value = false
+  }
 }
 
 // 详情弹窗: 行点击 → 设置 row, 打开 dialog
