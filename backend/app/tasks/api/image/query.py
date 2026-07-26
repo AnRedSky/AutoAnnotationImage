@@ -206,6 +206,10 @@ async def get_image_detail(
             "to_label": to_lab,
             "time_spent_ms": log.time_spent_ms,
             "created_at": log.created_at.isoformat() if log.created_at else None,
+            # v3.0.0: 返回 payload 供前端展示扩展信息
+            # - mark_unqualified: {"reason": "blurry", "custom_text": "..."}
+            # - 其他 action: 通常为 None
+            "payload": log.payload,
         })
 
     return {

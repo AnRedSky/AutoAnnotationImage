@@ -9,8 +9,9 @@
  */
 import { ref, watch, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Check, Close, Position, Clock, User } from '@element-plus/icons-vue'
+import { Check, Close, Position, Clock, User, Warning } from '@element-plus/icons-vue'
 import { imageApi, annotationApi, datasetApi } from '@/api'
+import { getRejectReasonLabel } from '@/utils/rejectReason'  // v3.0.0: 不合格原因中文映射
 
 const props = defineProps<{
   imageId: number
@@ -143,12 +144,60 @@ function confColor(c: number): string {
   return '#909399'
 }
 
-function actionLabel(a: string): string {
-  return { confirm: '确认', correct: '修正', ai_predict: 'AI 预测', reject: '驳回' }[a] || a
+/**
+ * action 枚举值 → 中文标签
+ * v3.0.0: 覆盖后端 AnnotationLog.action 全部 8 个枚举值
+ * - 修正 reject 翻译: 原错误翻译为「驳回」, 实际语义为「清除标注」
+ *   (见 backend/app/annotation/api/annotation.py 清除标注端点)
+ * - 新增 4 个: auto_annotate_pretrained / auto_annotate_finetuned /
+ *   mark_unqualified / unmark_unqualified
+ */
+const ACTION_LABELS: Record<string, string> = {
+  ai_predict: 'AI 预测',
+  confirm: '确认',
+  correct: '修正',
+  reject: '清除标注',
+  auto_annotate_pretrained: '预训练模型自动标注',
+  auto_annotate_finetuned: '微调模型自动标注',
+  mark_unqualified: '标记不合格',
+  unmark_unqualified: '撤销不合格',
 }
 
-function actionType(a: string): 'success' | 'warning' | 'info' | 'danger' {
-  return { confirm: 'success', correct: 'warning', ai_predict: 'info', reject: 'danger' }[a] as any || 'info'
+/** action → el-tag / el-timeline-item 颜色类型 */
+const ACTION_TYPES: Record<string, 'primary' | 'success' | 'warning' | 'info' | 'danger'> = {
+  ai_predict: 'info',
+  confirm: 'success',
+  correct: 'warning',
+  reject: 'danger',
+  auto_annotate_pretrained: 'info',
+  auto_annotate_finetuned: 'primary',
+  mark_unqualified: 'danger',
+  unmark_unqualified: 'success',
+}
+
+function actionLabel(a: string): string {
+  return ACTION_LABELS[a] || a
+}
+
+function actionType(a: string): 'primary' | 'success' | 'warning' | 'info' | 'danger' {
+  return ACTION_TYPES[a] || 'info'
+}
+
+/**
+ * v3.0.0: 从 log.payload 提取不合格原因中文描述
+ * - mark_unqualified: payload = {"reason": "blurry", "custom_text": "..."}
+ * - 其他 action: 返回空字符串
+ */
+function unqualifiedReasonText(log: any): string {
+  if (!log?.payload) return ''
+  if (log.action !== 'mark_unqualified') return ''
+  const reason = log.payload.reason
+  const customText = log.payload.custom_text
+  const reasonLabel = getRejectReasonLabel(reason)
+  if (reason === 'other' && customText) {
+    return `原因: ${customText}`
+  }
+  return reasonLabel ? `原因: ${reasonLabel}` : ''
 }
 
 function formatTime(iso: string | null | undefined): string {
@@ -284,6 +333,12 @@ function formatCost(ms: number): string {
               <span v-else-if="log.to_label" style="margin-left: 8px;">
                 → <el-tag size="small" type="primary">{{ log.to_label.name }}</el-tag>
               </span>
+              <!-- v3.0.0: 不合格标记展示原因 (mark_unqualified 专属) -->
+              <div v-if="unqualifiedReasonText(log)"
+                   style="margin-top: 4px; color: #f56c6c; font-size: 12px;">
+                <el-icon style="vertical-align: -2px;"><Warning /></el-icon>
+                {{ unqualifiedReasonText(log) }}
+              </div>
               <div v-if="log.time_spent_ms" style="margin-top: 2px; color: #909399; font-size: 12px;">
                 <el-icon><Clock /></el-icon> 耗时 {{ formatCost(log.time_spent_ms) }}
               </div>
