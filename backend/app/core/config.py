@@ -192,7 +192,11 @@ class Settings(BaseSettings):
     )
 
     # ===== CORS =====
-    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "*")  # 逗号分隔或 *
+    # 开发默认显式 origin, 可与 credentials 同时使用; 生产/Docker 可在 .env 覆盖为具体域名
+    CORS_ORIGINS: str = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    )
     # v2.5.15 P1-3: 显式化 CORS credentials 配置
     CORS_ALLOW_CREDENTIALS: bool = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
 
@@ -331,6 +335,13 @@ class Settings(BaseSettings):
         if self.CORS_ORIGINS.strip() == "*":
             return ["*"]
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def EFFECTIVE_CORS_ALLOW_CREDENTIALS(self) -> bool:
+        """CORS 规范: allow_origins=['*'] 时不可与 credentials=True 同时使用"""
+        if "*" in self.CORS_ORIGINS_LIST:
+            return False
+        return self.CORS_ALLOW_CREDENTIALS
 
     @property
     def MAX_UPLOAD_SIZE_BYTES(self) -> int:

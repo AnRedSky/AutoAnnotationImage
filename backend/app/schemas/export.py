@@ -3,7 +3,7 @@
 数据导出 / 模型下载相关 schema.
 """
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExportRequest(BaseModel):
@@ -34,6 +34,8 @@ class ModelDownloadResponse(BaseModel):
     download_url: str
     file_size: Optional[int] = None
     expires_at: Optional[str] = None
+
+    model_config = ConfigDict(protected_namespaces=())
 
 
 __all__ = [

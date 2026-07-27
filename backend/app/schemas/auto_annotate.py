@@ -57,6 +57,8 @@ class AutoLabelResponse(BaseModel):
     warning: Optional[str] = None
     message: Optional[str] = None
 
+    model_config = ConfigDict(protected_namespaces=())
+
 
 class AvailableModelOut(BaseModel):
     """系统支持的预训练模型 (前端下拉用)"""

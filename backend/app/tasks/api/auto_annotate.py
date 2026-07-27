@@ -166,6 +166,8 @@ class RunSegmentationPretrainedResponse(BaseModel):
     threshold: float
     mode: str = "sync"
 
+    model_config = ConfigDict(protected_namespaces=())
+
 
 @router.post(
     "/run-segmentation-pretrained",
