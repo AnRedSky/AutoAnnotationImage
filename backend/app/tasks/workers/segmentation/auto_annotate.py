@@ -113,62 +113,77 @@ def auto_annotate_segmentation_task(
         })
         return {"status": "FAILURE"}
 
-    # ---- 4) 写库 (worker 内联, 数据访问) ----
+    # ---- 4) 写库 (批量单 session, 避免 N 次 _run_async) ----
+    # v3.1.0 Phase W1.2: 旧实现逐图 _save_mask → 每图 1 次 _run_async (含 loop/dispose)
+    # 100 张图 = 200 次 engine.dispose. 新实现预加载 existing + 单 session 批量写 + 单次 commit.
     import io
     from sqlalchemy import select
     from app.database import AsyncSessionLocal
     from app.annotation.model.segmentation_mask import SegmentationMask
 
-    saved = 0
-    skipped = 0
-    for im, abs_p in zip(images, image_paths):
-        try:
-            pil_mask = mask_map.get(abs_p)
-            if pil_mask is None:
-                skipped += 1
-                continue
+    async def _save_all_masks():
+        saved = 0
+        skipped = 0
+        async with AsyncSessionLocal() as db:
+            # 4.1) 预加载所有 existing SegmentationMask (单次 SELECT → 内存 dict)
+            image_ids = [im.id for im in images]
+            existing_rows = (await db.execute(
+                select(SegmentationMask).where(
+                    SegmentationMask.image_id.in_(image_ids)
+                )
+            )).scalars().all()
+            existing_map: dict = {r.image_id: r for r in existing_rows}
 
-            async def _save_mask(image_id=im.id, dataset_id_=im.dataset_id, pil=pil_mask):
-                async with AsyncSessionLocal() as db:
-                    existing = (await db.execute(
-                        select(SegmentationMask).where(
-                            SegmentationMask.image_id == image_id,
-                        )
-                    )).scalar_one_or_none()
+            # 4.2) 逐图处理 (内存操作 + 文件 IO, 无 DB round-trip)
+            for im, abs_p in zip(images, image_paths):
+                try:
+                    pil_mask = mask_map.get(abs_p)
+                    if pil_mask is None:
+                        skipped += 1
+                        continue
+
+                    image_id = im.id
+                    dataset_id_ = im.dataset_id
+                    existing = existing_map.get(image_id)
+
                     if existing and not overwrite_existing:
-                        return False
-                    storage_key = save_mask_pil(pil, dataset_id_, image_id)
+                        skipped += 1
+                        continue
+
+                    # 保存 mask PNG 到存储
+                    storage_key = save_mask_pil(pil_mask, dataset_id_, image_id)
                     full_path = base / storage_key
                     if not full_path.parent.is_dir():
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                     if not full_path.exists():
                         buf = io.BytesIO()
-                        pil.save(buf, format="PNG")
+                        pil_mask.save(buf, format="PNG")
                         full_path.write_bytes(buf.getvalue())
+
                     if existing:
                         existing.mask_path = storage_key
-                        existing.width = pil.size[0]
-                        existing.height = pil.size[1]
+                        existing.width = pil_mask.size[0]
+                        existing.height = pil_mask.size[1]
                         existing.source = "ai"
                     else:
                         db.add(SegmentationMask(
                             image_id=image_id,
                             mask_path=storage_key,
-                            width=pil.size[0],
-                            height=pil.size[1],
+                            width=pil_mask.size[0],
+                            height=pil_mask.size[1],
                             source="ai",
                             annotated_by=user_id,
                         ))
-                    await db.commit()
-                    return True
+                    saved += 1
+                except Exception:
+                    skipped += 1
+                    continue
 
-            if _run_async(_save_mask()):
-                saved += 1
-            else:
-                skipped += 1
-        except Exception:
-            skipped += 1
-            continue
+            # 4.3) 单次 commit (事务批量提交)
+            await db.commit()
+        return saved, skipped
+
+    saved, skipped = _run_async(_save_all_masks())
 
     TrainingLifecycleService.set_task_state(self, "SUCCESS", {
         "saved": saved, "skipped": skipped, "total": len(images),

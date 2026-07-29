@@ -278,6 +278,12 @@ def start_foreground():
     ok(f"Celery broker: {celery_app.conf.broker_url}")
     ok(f"Worker pool: {pool} | concurrency: {concurrency}"
        + (" (concurrency 在 solo 池下被忽略)" if pool == "solo" else ""))
+    # v3.1.0 Phase W2.2: 消费 train + annotate 双队列 (task_routes 路由后的目标队列)
+    # CLI --queues=train 可只消费训练队列; 默认消费全部
+    queues = _get_arg_value("--queues", "")
+    if not queues:
+        queues = "train,annotate"
+    ok(f"Consuming queues: {queues}")
     print()
     try:
         celery_app.worker_main([
@@ -285,6 +291,7 @@ def start_foreground():
             f"--loglevel={loglevel}",
             f"--pool={pool}",
             f"--concurrency={concurrency}",
+            f"-Q={queues}",
         ])
     except KeyboardInterrupt:
         print("\n[INFO] Celery worker stopped")
@@ -316,7 +323,7 @@ def start_detach():
         if i + 1 < len(sys.argv):
             argv[3] = sys.argv[i + 1]
     # 透传 --pool / --concurrency (detached 模式下子进程会再走 resolve_worker_settings)
-    for flag in ("--pool", "--concurrency"):
+    for flag in ("--pool", "--concurrency", "--queues"):
         val = _get_arg_value(flag, "")
         if val:
             argv += [flag, val]

@@ -171,6 +171,11 @@ class Settings(BaseSettings):
     DEFAULT_BASE_MODEL: Optional[str] = None  # 兼容旧名
     DEFAULT_CONFIDENCE_THRESHOLD: float = float(os.getenv("DEFAULT_CONFIDENCE_THRESHOLD", "0.6"))
     INFERENCE_DEVICE: str = os.getenv("INFERENCE_DEVICE", "cpu")  # cpu | cuda
+    # v3.1.0 Phase W4.1: 分类训练 DataLoader 工作进程数
+    # 0=同步加载 (CPU 训练默认), >0=多进程并行加载 (GPU 训练推荐 2-4)
+    DATALOADER_WORKERS: int = int(os.getenv("DATALOADER_WORKERS", "0"))
+    # v3.1.0 Phase W4.3: 分割推理 batch size (逐张推理改为分批)
+    SEG_INFERENCE_BATCH_SIZE: int = int(os.getenv("SEG_INFERENCE_BATCH_SIZE", "4"))
 
     # ===== HuggingFace 镜像（国内网络环境必须配）=====
     HF_ENDPOINT: str = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")

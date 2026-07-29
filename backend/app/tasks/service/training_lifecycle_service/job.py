@@ -172,16 +172,25 @@ def push_history(
     """训练历史曲线写入 Redis + DB
 
     双写 (Redis 优先, DB 兜底):
-    1) Redis train:history:{task_id} — 供前端 /training/history 端点 5s 轮询
+    1) Redis train:history:{task_id} (LIST) — 供前端 /training/history 端点 5s 轮询
     2) TrainingJob.history (DB) — Redis 失效兜底 + 训练后历史保留
+
+    v3.1.0 Phase W4.2: Redis 写入从全量 STRING json.dumps 改为 RPUSH 增量.
+    旧实现每 epoch 都 json.dumps 整个 history_buffer (随 epoch 增长线性变大).
+    新实现只 RPUSH 最新 epoch 的 JSON, O(1) per epoch.
+    读取端 (history.py) 用 LRANGE 0 -1 + 逐元素 json.loads 聚合.
 
     兼容旧 worker 调用方式 (仅 task_id + history_buffer).
     """
-    # ---- 1) Redis ----
+    # ---- 1) Redis (增量 RPUSH) ----
     if history_buffer:
         try:
             key = f"train:history:{task_id}"
-            redis_client.setex(key, 86400, json.dumps(history_buffer))
+            # v3.1.0: 只推最新一个 epoch, 避免全量序列化
+            latest = history_buffer[-1]
+            redis_client.rpush(key, json.dumps(latest))
+            # 设过期时间 (RPUSH 后重设, 避免列表无限增长)
+            redis_client.expire(key, 86400)
         except Exception as e:
             logger.warning("push_history redis failed for %s: %s", task_id, e)
 
@@ -198,11 +207,19 @@ def push_history(
 
 # ============== 4. sticky_meta 持久化 (数据集统计) ==============
 
-async def persist_dataset_stats(task_id: str, extra: Dict[str, Any]) -> None:
+async def persist_dataset_stats(
+    task_id: str,
+    extra: Dict[str, Any],
+    *,
+    job_id: Optional[int] = None,
+) -> None:
     """把数据集统计 (data_total/data_train/data_val/num_classes/class_names) 写库
 
     触发条件: extra 含 data_total + num_classes 关键字 (避免每个 callback 都写)
     失败不抛: 写库失败不能让训练炸, 仅记日志
+
+    v3.1.0 Phase W3.3: 优先用 job_id 主键查询 (db.get), 避免 celery_task_id 非索引查询.
+    job_id 由调用方传入 (create_or_reset_job 返回值), 不传时回退到 celery_task_id.
     """
     try:
         data_total = extra.get("data_total")
@@ -221,9 +238,13 @@ async def persist_dataset_stats(task_id: str, extra: Dict[str, Any]) -> None:
         from app.tasks.model.training_job import TrainingJob
 
         async with AsyncSessionLocal() as db:
-            job = (await db.execute(
-                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
-            )).scalar_one_or_none()
+            # v3.1.0 Phase W3.3: 优先主键查询 (走索引), 回退到 celery_task_id
+            if job_id is not None:
+                job = await db.get(TrainingJob, job_id)
+            else:
+                job = (await db.execute(
+                    select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+                )).scalar_one_or_none()
             if not job:
                 logger.info("[stats] warn: no TrainingJob row for %s", task_id)
                 return
@@ -244,9 +265,14 @@ async def persist_dataset_stats(task_id: str, extra: Dict[str, Any]) -> None:
         )
 
 
-def persist_dataset_stats_sync(task_id: str, extra: Dict[str, Any]) -> None:
+def persist_dataset_stats_sync(
+    task_id: str,
+    extra: Dict[str, Any],
+    *,
+    job_id: Optional[int] = None,
+) -> None:
     """同步包装"""
-    _run_async(persist_dataset_stats(task_id, extra))
+    _run_async(persist_dataset_stats(task_id, extra, job_id=job_id))
 
 
 __all__ = [

@@ -167,17 +167,9 @@ def train_segmentation_task(
 
     # ---- 4) 训练 ----
     try:
-        # 计算 num_classes (类别数 + 背景 0)
-        async def _count_classes():
-            from sqlalchemy import select
-            from app.database import AsyncSessionLocal
-            from app.tasks.model.category import Category
-            async with AsyncSessionLocal() as db:
-                rows = (await db.execute(
-                    select(Category).where(Category.dataset_id == dataset_id)
-                )).scalars().all()
-                return len(rows)
-        n_cat = _run_async(_count_classes())
+        # v3.1.0 Phase W3.1: 复用已加载的 category_names 计算 num_classes, 消除重复 DB 查询
+        # 旧实现用 _count_classes() 又查了一次 Category 表 (与 L106-114 完全相同)
+        n_cat = len(category_names)
         num_classes = max(2, n_cat + 1)
         sticky_meta["num_classes"] = num_classes
         TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
@@ -189,7 +181,7 @@ def train_segmentation_task(
             "total_epochs": epochs,
             **sticky_meta,
         })
-        TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta)
+        TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta, job_id=job_id)
 
         result = train_segmentation(
             images=images, masks=masks,

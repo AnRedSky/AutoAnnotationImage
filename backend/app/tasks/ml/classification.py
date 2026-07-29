@@ -198,11 +198,14 @@ def run_training(
 
     train_loader = DataLoader(
         ImageClassificationDataset(train_samples, train_transform),
-        batch_size=batch_size, shuffle=True, num_workers=0,
+        batch_size=batch_size, shuffle=True,
+        # v3.1.0 Phase W4.1: num_workers 参数化, GPU 训练推荐 2-4, CPU 默认 0
+        num_workers=settings.DATALOADER_WORKERS,
     )
     val_loader = DataLoader(
         ImageClassificationDataset(val_samples, val_transform),
-        batch_size=batch_size, shuffle=False, num_workers=0,
+        batch_size=batch_size, shuffle=False,
+        num_workers=settings.DATALOADER_WORKERS,
     )
 
     # 构建模型

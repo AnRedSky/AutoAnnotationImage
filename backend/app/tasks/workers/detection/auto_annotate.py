@@ -130,11 +130,11 @@ def auto_annotate_detection_task(
                         no_match += 1
                         continue
                     if overwrite_existing:
-                        old = (await db.execute(
-                            select(BBoxAnnotation).where(BBoxAnnotation.image_id == img_id)
-                        )).scalars().all()
-                        for o in old:
-                            await db.delete(o)
+                        # v3.1.0 Phase W3.2: 逐条 ORM delete → 批量 SQL DELETE
+                        # 旧实现先 SELECT 全部旧行到内存再逐条 db.delete(), N+1 模式
+                        await db.execute(
+                            sa_delete(BBoxAnnotation).where(BBoxAnnotation.image_id == img_id)
+                        )
                     for bb in boxes:
                         cat = index_to_cat.get(bb.class_index)
                         if cat is None:

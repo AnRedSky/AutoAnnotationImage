@@ -149,7 +149,7 @@ def train_detection_task(
             "msg": f"数据集就绪: train={export_info['train_count']} val={export_info['val_count']}",
             "total_epochs": epochs,
         })
-        TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta)
+        TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta, job_id=job_id)
 
         # ---- 4) 跑训练 (纯 ML) ----
         result = train_yolo(

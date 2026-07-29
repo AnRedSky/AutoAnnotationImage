@@ -102,7 +102,7 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         TrainingLifecycleService.set_task_state(self, "PROGRESS", meta)
         # 持久化数据集统计到 DB
         if extra and "data_total" in extra and "num_classes" in extra:
-            TrainingLifecycleService.persist_dataset_stats_sync(task_id, extra)
+            TrainingLifecycleService.persist_dataset_stats_sync(task_id, extra, job_id=job_id)
 
     def epoch_cb(p: float, msg: str, epoch_data: dict):
         """每 epoch 结束回调"""

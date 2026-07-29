@@ -99,6 +99,8 @@ class TrainingDataService:
             }
 
             # 2) 回填 ai_labeled 孤儿 (final_label_id=NULL 但 ai_prediction.top1 在类目内)
+            # v3.1.0 Phase W3.4: 直接在已加载的 img ORM 对象上设置 final_label_id,
+            # 不再逐条 db.get (N+1 查询). img 已在 results 中且已 attached 到 session.
             orphans_to_backfill: List[Tuple[int, int]] = []
             for img, cat in results:
                 if cat is None and img.status == "ai_labeled" and img.ai_prediction:
@@ -107,13 +109,11 @@ class TrainingDataService:
                         cat_id = next(
                             cid for cid, cname in categories.items() if cname == top1
                         )
+                        # 直接在已加载的 img 对象上回填, 无需重新 db.get
+                        if img.final_label_id is None:
+                            img.final_label_id = cat_id
                         orphans_to_backfill.append((img.id, cat_id))
             if orphans_to_backfill:
-                from app.tasks.model.image import Image as _Image
-                for img_id, cat_id in orphans_to_backfill:
-                    img_row = await db.get(_Image, img_id)
-                    if img_row and img_row.final_label_id is None:
-                        img_row.final_label_id = cat_id
                 try:
                     await db.commit()
                 except Exception:

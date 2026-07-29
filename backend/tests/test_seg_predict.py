@@ -1,4 +1,4 @@
-"""
+﻿"""
 v2.5.15 P1-7 / D-1 测试: 图像分割推理模块
 ==========================================
 覆盖 5 条用例:
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from PIL import Image as PILImage
 
-from app.ml.segmentation.seg_predict import (
+from app.tasks.ml.segmentation.seg_predict import (
     _build_model_for_predict,
     load_model,
     predict_to_mask_image,
@@ -88,11 +88,11 @@ def test_build_model_for_predict_fcn_resnet50():
 
 def test_load_model_loads_state_dict():
     """load_model 用 state_dict bytes 加载到模型"""
-    with patch("app.ml.segmentation.seg_predict._build_model_for_predict") as mock_build:
+    with patch("app.tasks.ml.segmentation.seg_predict._build_model_for_predict") as mock_build:
         mock_model = MagicMock()
         mock_build.return_value = mock_model
         # mock torch.load 返回假 state_dict
-        with patch("app.ml.segmentation.seg_predict.torch.load") as mock_load:
+        with patch("app.tasks.ml.segmentation.seg_predict.torch.load") as mock_load:
             mock_load.return_value = {"layer.weight": torch.zeros(1)}
             out = load_model(b"fake_state_dict", backbone="deeplabv3_resnet50", num_classes=2)
     assert mock_model.load_state_dict.called

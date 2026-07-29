@@ -6,7 +6,9 @@ training.history 模块 — 训练历史曲线数据
 **职责**: 训练历史曲线 (loss/acc 折线图) 数据接口
 
 **数据来源 (双源)**:
-1. Redis train:history:{task_id} — classification worker 每个 epoch 写入
+1. Redis train:history:{task_id} — worker 每个 epoch 写入
+   v3.1.0: 写入格式从 STRING (全量 JSON) 改为 LIST (RPUSH 增量),
+   读取时用 LRANGE 0 -1 + 逐元素 json.loads 聚合; 兼容旧 STRING 格式.
 2. TrainingJob.history 字段 — detection/segmentation worker 写入 (YOLO/DeepLab
    不走 classification 的 Redis 写入路径)
 
@@ -44,12 +46,25 @@ async def get_training_history(
     history_key = f"train:history:{task_id}"
     history = []
     try:
-        raw = redis_client.get(history_key)
-        if raw:
-            try:
-                history = json.loads(raw)
-            except (ValueError, TypeError):
-                history = []
+        # v3.1.0 Phase W4.2: 兼容 LIST (增量 RPUSH) 和 STRING (旧全量) 两种格式
+        key_type = redis_client.type(history_key)
+        if key_type == b"list" or key_type == "list":
+            # 新格式: LIST, 逐元素 json.loads
+            raw_items = redis_client.lrange(history_key, 0, -1)
+            for item in raw_items:
+                try:
+                    history.append(json.loads(item))
+                except (ValueError, TypeError):
+                    pass
+        elif key_type == b"string" or key_type == "string":
+            # 旧格式: STRING, 整体 json.loads
+            raw = redis_client.get(history_key)
+            if raw:
+                try:
+                    history = json.loads(raw)
+                except (ValueError, TypeError):
+                    history = []
+        # key 不存在 (None) 时 history 保持空列表, 走 DB 回退
     except Exception as e:
         # Redis 不可达 / 超时 / 权限问题 → 记日志, 继续走 DB 回退
         _logger.warning(
