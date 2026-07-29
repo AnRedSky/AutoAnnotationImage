@@ -27,6 +27,8 @@ frontend/.env.production.local
 *.swo
 .tmp
 .trae/
+.openharness/
+.qoder/
 
 # Project
 uploads/
@@ -87,3 +89,7 @@ logs/
 htmlcov/
 .tox/
 .cache/
+
+# 包管理器锁文件 (按需保留, 这里统一忽略避免 PR diff 噪声)
+# uv.lock / pnpm-lock.yaml / yarn.lock / package-lock.json
+# 保留 uv.lock 便于可复现构建
