@@ -1,11 +1,14 @@
-/**
- * useTrainingDetailStream - 训练详情 SSE 流 + 数据集统计 + 历史曲线
+﻿/**
+ * useTrainingDetailStream - 训练详情 SSE 流 (走共享池) + 数据集统计 + 历史曲线
  *
- * v3.0.0 Phase J 拆分: 从 Training/index.vue 抽离
- * - 详情打开 (openDetail): 拉 DB → 拉历史日志 → 连 SSE → 定时拉 history
- * - 详情关闭 (cleanupDetail): 断开 SSE + 清理 echarts + 清理定时器
- * - SSE 帧处理: 同步 state/progress/epoch/started_at/finished_at + 增量训练状态
- * - 终态检测: 重新拉 DB 拿最终 finished_at / duration / device_info
+ * v3.1.0 Phase T1 (性能优化): 改用 useTrainingSsePool 共享底层 SSE 连接
+ * - 旧实现详情打开时单独调 trainingApi.streamProgress, 与列表订阅并发, 同一 taskId 两条流
+ * - 新实现走共享池, 详情关闭后池延迟 500ms~1.5s 才真关连接, 让快进快出场景复用
+ *
+ * v3.1.0 Phase T2 (性能优化): history 轮询改为 SSE 驱动
+ * - 旧实现固定 setInterval(refreshHistory, 5000), 5 秒轮询历史曲线
+ * - 新实现: SSE 帧 current_epoch 变更时立即刷一次; 若 8 秒内无 epoch 变更, 再退化
+ *   到 8 秒轮询兜底 (worker 偶发不推 SSE 帧), 全程 history 拉取最坏一次 / 8s
  *
  * 数据集统计双源 fallback (SSE 实时 ref + DB 持久化):
  * - displayDataTotal / displayDataTrain / displayDataVal / displayNumClasses / displayClassNames
@@ -15,6 +18,7 @@ import { ref, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts'
 import { trainingApi } from '@/api'
+import { useTrainingSsePool } from './useTrainingSsePool'
 
 export interface EpochData {
   epoch: number
@@ -35,6 +39,11 @@ export interface EpochData {
   pixel_acc?: number
   dice?: number
 }
+
+// 历史曲线刷新节流常量
+const HISTORY_MIN_INTERVAL_MS = 1500   // 同一 taskId 至少 1.5 秒才允许刷新一次 (防抖)
+const HISTORY_IDLE_BACKOFF_MS = 8000   // 无 epoch 变化时的兜底轮询间隔
+const HISTORY_LIVE_CHECK_MS = 2000     // epoch 变更后多久不再主动拉 (SSE 接管即停止)
 
 export function useTrainingDetailStream() {
   // ============== 状态 ==============
@@ -60,7 +69,6 @@ export function useTrainingDetailStream() {
   const pretrainedPath = ref<string | null>(null)
   const pretrainedError = ref<string | null>(null)
 
-  // ---- 数据集统计双源 fallback (SSE 实时 ref + DB 持久化) ----
   const displayDataTotal = computed(() => dataTotal.value ?? job.value?.data_total ?? null)
   const displayDataTrain = computed(() => dataTrain.value ?? job.value?.data_train ?? null)
   const displayDataVal = computed(() => dataVal.value ?? job.value?.data_val ?? null)
@@ -73,111 +81,108 @@ export function useTrainingDetailStream() {
     return []
   })
 
-  // ---- 内部: SSE / chart / timer 句柄 ----
+  // ---- 内部: ECharts / SSE 取消 / timer 句柄 ----
   let chart: echarts.ECharts | null = null
-  let cancelStream: (() => void) | null = null
-  let historyTimer: any = null
+  let sseOff: (() => void) | null = null
+  let historyBackoffTimer: ReturnType<typeof setTimeout> | null = null
   let lastLogSaveAt = 0
+  let lastHistoryFetchAt = 0
+  let lastEpochSeen: number | null = null
+  let historyLiveUntilAt = 0   // 在此时间之前由 SSE 驱动, 不退化轮询
+
+  const pool = useTrainingSsePool()
 
   // ============== 持久化一行训练日志到后端 ==============
   const saveDetailLog = (taskId: string, line: string) => {
     const jobId = job.value?.id
     if (!jobId) return
     const now = Date.now()
-    if (now - lastLogSaveAt < 500) return  // 500ms 节流
+    if (now - lastLogSaveAt < 500) return
     lastLogSaveAt = now
-    trainingApi.appendLog(jobId, line).catch(() => {
-      // 静默失败: 持久化是 best-effort, 训练过程不受影响
-    })
+    trainingApi.appendLog(jobId, line).catch(() => { /* best-effort */ })
   }
 
-  // ============== SSE 流 ==============
-  const startStream = (taskId: string) => {
-    log.value.push(
-      `[${new Date().toLocaleTimeString()}] 已连接 SSE 进度推送, task_id=${taskId.slice(0, 8)}…`
-    )
-    cancelStream = trainingApi.streamProgress(taskId, {
-      onMessage: (data) => {
-        // 同步 detailState 和 job.state (修复「下方完成, 上方还显示训练中」的 bug)
-        const newState = data.state || 'PROGRESS'
-        state.value = newState
-        if (job.value) job.value.state = newState
-        progress.value = Number(data.progress || 0)
-        currentEpoch.value = data.current_epoch ?? null
-        totalEpochs.value = data.total_epochs ?? totalEpochs.value
-        message.value = data.message || message.value
-        // 实时同步 started_at / finished_at (宽松比较: 转时间戳比秒级精度, 避免 ISO 格式微差异)
-        if (data.started_at && job.value) {
-          const _tsNew = new Date(data.started_at).getTime()
-          const _tsOld = job.value.started_at ? new Date(job.value.started_at).getTime() : 0
-          if (_tsNew && Math.abs(_tsNew - _tsOld) > 1000) {
-            job.value.started_at = String(data.started_at)
-          }
-        }
-        if (data.finished_at && job.value) {
-          const _tsNew = new Date(data.finished_at).getTime()
-          const _tsOld = job.value.finished_at ? new Date(job.value.finished_at).getTime() : 0
-          if (_tsNew && Math.abs(_tsNew - _tsOld) > 1000) {
-            job.value.finished_at = String(data.finished_at)
-          }
-        }
-        // 数据集统计
-        if (typeof data.data_total === 'number') dataTotal.value = data.data_total
-        if (typeof data.data_train === 'number') dataTrain.value = data.data_train
-        if (typeof data.data_val === 'number') dataVal.value = data.data_val
-        if (typeof data.num_classes === 'number') numClasses.value = data.num_classes
-        if (Array.isArray(data.class_names)) classNames.value = data.class_names
-        // 增量训练状态
-        if (typeof data.pretrained_loaded === 'boolean') {
-          pretrainedLoaded.value = data.pretrained_loaded
-        }
-        if (typeof data.pretrained_path === 'string') pretrainedPath.value = data.pretrained_path
-        if (typeof data.pretrained_error === 'string') pretrainedError.value = data.pretrained_error
-
-        const logLine =
-          `[${new Date().toLocaleTimeString()}] state=${data.state} ` +
-          `progress=${(Number(data.progress || 0)).toFixed(1)}% ` +
-          `epoch=${data.current_epoch ?? '-'}/${data.total_epochs ?? '-'} ` +
-          `msg=${data.message || ''}`
-        log.value.push(logLine)
-        if (log.value.length > 100) log.value = log.value.slice(-100)
-        saveDetailLog(taskId, logLine)
-
-        // 终态检测: 重新拉完整 job 拿 finished_at / duration / device_info
-        const isTerminal = ['SUCCESS', 'FAILURE', 'REVOKED'].includes(newState)
-        if (isTerminal && job.value?.id) {
-          trainingApi.job(job.value.id).then((d: any) => {
-            job.value = d
-          }).catch(() => {
-            // 拉取失败不影响其他字段, 保留 SSE 已推的 state
-          })
-        }
-      },
-      onComplete: () => {
-        cancelStream = null
-        if (historyTimer) { clearInterval(historyTimer); historyTimer = null }
-        refreshHistory(taskId)
-        if (job.value?.id) {
-          trainingApi.job(job.value.id).then((d: any) => {
-            job.value = d
-          }).catch(() => { /* 拉取失败 */ })
-        }
-      },
-      onError: (e) => {
-        cancelStream = null
-        // v3.0.0 修复: SSE 断开时也必须清 historyTimer, 否则 5s 轮询永久运行
-        // (之前只在 onComplete 清, 网络异常断连时 historyTimer 泄漏)
-        if (historyTimer) { clearInterval(historyTimer); historyTimer = null }
-        log.value.push(`[${new Date().toLocaleTimeString()}] SSE 断开: ${e.message}`)
-      },
-    })
-  }
-
-  const refreshHistory = async (taskId: string) => {
+  // ============== 历史曲线刷新 (节流 + 智能触发) ==============
+  const refreshHistory = async (taskId: string, opts: { force?: boolean } = {}) => {
+    const now = Date.now()
+    if (!opts.force && now - lastHistoryFetchAt < HISTORY_MIN_INTERVAL_MS) return
+    lastHistoryFetchAt = now
     try {
       const h: any = await trainingApi.history(taskId)
       history.value = h?.history || []
     } catch { /* 拉取失败不影响主流程 */ }
+  }
+
+  // SSE 帧到时: 立即刷新 history (epoch 变更场景), 设置 liveUntil 让兜底轮询让位
+  const onStreamFrame = (data: any) => {
+    const newState = data.state || 'PROGRESS'
+    state.value = newState
+    if (job.value) job.value.state = newState
+    progress.value = Number(data.progress || 0)
+    currentEpoch.value = data.current_epoch ?? null
+    totalEpochs.value = data.total_epochs ?? totalEpochs.value
+    message.value = data.message || message.value
+
+    if (data.started_at && job.value) {
+      const tsNew = new Date(data.started_at).getTime()
+      const tsOld = job.value.started_at ? new Date(job.value.started_at).getTime() : 0
+      if (tsNew && Math.abs(tsNew - tsOld) > 1000) job.value.started_at = String(data.started_at)
+    }
+    if (data.finished_at && job.value) {
+      const tsNew = new Date(data.finished_at).getTime()
+      const tsOld = job.value.finished_at ? new Date(job.value.finished_at).getTime() : 0
+      if (tsNew && Math.abs(tsNew - tsOld) > 1000) job.value.finished_at = String(data.finished_at)
+    }
+
+    // 数据集统计 / 增量训练状态
+    if (typeof data.data_total === 'number') dataTotal.value = data.data_total
+    if (typeof data.data_train === 'number') dataTrain.value = data.data_train
+    if (typeof data.data_val === 'number') dataVal.value = data.data_val
+    if (typeof data.num_classes === 'number') numClasses.value = data.num_classes
+    if (Array.isArray(data.class_names)) classNames.value = data.class_names
+    if (typeof data.pretrained_loaded === 'boolean') pretrainedLoaded.value = data.pretrained_loaded
+    if (typeof data.pretrained_path === 'string') pretrainedPath.value = data.pretrained_path
+    if (typeof data.pretrained_error === 'string') pretrainedError.value = data.pretrained_error
+
+    // 终态: 重新拉完整 job 拿 finished_at / duration / device_info
+    if (['SUCCESS', 'FAILURE', 'REVOKED'].includes(newState) && job.value?.id) {
+      trainingApi.job(job.value.id).then((d: any) => { job.value = d })
+        .catch(() => { /* 拉取失败不影响其他字段 */ })
+    }
+
+    // History: 仅在 epoch 变化时立即拉 (SSE 帧自带 current_epoch)
+    const frameEpoch = data.current_epoch
+    if (typeof frameEpoch === 'number' && frameEpoch !== lastEpochSeen) {
+      const isEpochAdvance = lastEpochSeen == null || frameEpoch > lastEpochSeen
+      lastEpochSeen = frameEpoch
+      if (isEpochAdvance && job.value?.celery_task_id) {
+        historyLiveUntilAt = Date.now() + HISTORY_LIVE_CHECK_MS
+        refreshHistory(job.value.celery_task_id)
+      }
+    }
+  }
+
+  // 退化兜底轮询 (worker 偶发不推 SSE 帧): 仅当 SSE 长时间空闲时启动
+  const armHistoryBackoff = (taskId: string) => {
+    if (historyBackoffTimer) {
+      clearTimeout(historyBackoffTimer)
+      historyBackoffTimer = null
+    }
+    const schedule = () => {
+      historyBackoffTimer = setTimeout(async () => {
+        const now = Date.now()
+        // SSE 接管中 → 跳过本次, 重新排程
+        if (now < historyLiveUntilAt) {
+          schedule()
+          return
+        }
+        if (visible.value && job.value?.celery_task_id === taskId) {
+          await refreshHistory(taskId, { force: true })
+        }
+        schedule()
+      }, HISTORY_IDLE_BACKOFF_MS)
+    }
+    schedule()
   }
 
   // ============== ECharts 训练曲线 ==============
@@ -247,7 +252,12 @@ export function useTrainingDetailStream() {
     window.addEventListener('resize', () => chart?.resize())
   }
 
-  // 监听 history 变化, 重绘图表
+  // 用 optional chain 避免字段缺失时崩 (旧 detection/segmentation rows 可能没 train_loss)
+  const safeFixed = (v: any, digits = 4) => {
+    const n = Number(v)
+    return Number.isFinite(n) ? +n.toFixed(digits) : 0
+  }
+
   const updateChartFromHistory = () => {
     if (!chart || history.value.length === 0) return
     const h = history.value
@@ -255,35 +265,35 @@ export function useTrainingDetailStream() {
     const isSegmentation = job.value?.task_type === 'segmentation'
     if (isDetection) {
       chart.setOption({
-        xAxis: { data: h.map((x) => x.epoch) },
+        xAxis: { data: h.map((x: any) => x.epoch) },
         series: [
-          { data: h.map((x) => +(x.box_loss ?? 0).toFixed(4)) },
-          { data: h.map((x) => +(x.cls_loss ?? 0).toFixed(4)) },
-          { data: h.map((x) => +(x.map_50 ?? 0).toFixed(4)) },
-          { data: h.map((x) => +(x.map_50_95 ?? 0).toFixed(4)) },
-          { data: h.map((x) => +(x.precision ?? 0).toFixed(4)) },
-          { data: h.map((x) => +(x.recall ?? 0).toFixed(4)) },
+          { data: h.map((x: any) => safeFixed(x.box_loss)) },
+          { data: h.map((x: any) => safeFixed(x.cls_loss)) },
+          { data: h.map((x: any) => safeFixed(x.map_50)) },
+          { data: h.map((x: any) => safeFixed(x.map_50_95)) },
+          { data: h.map((x: any) => safeFixed(x.precision)) },
+          { data: h.map((x: any) => safeFixed(x.recall)) },
         ],
       })
     } else if (isSegmentation) {
       chart.setOption({
-        xAxis: { data: h.map((x) => x.epoch) },
+        xAxis: { data: h.map((x: any) => x.epoch) },
         series: [
-          { data: h.map((x) => +((x.train_loss ?? 0)).toFixed(4)) },
-          { data: h.map((x) => +((x.val_loss ?? 0)).toFixed(4)) },
-          { data: h.map((x) => +((x.miou ?? 0)).toFixed(4)) },
-          { data: h.map((x) => +((x.pixel_acc ?? 0)).toFixed(4)) },
-          { data: h.map((x) => +((x.dice ?? 0)).toFixed(4)) },
+          { data: h.map((x: any) => safeFixed(x.train_loss)) },
+          { data: h.map((x: any) => safeFixed(x.val_loss)) },
+          { data: h.map((x: any) => safeFixed(x.miou)) },
+          { data: h.map((x: any) => safeFixed(x.pixel_acc)) },
+          { data: h.map((x: any) => safeFixed(x.dice)) },
         ],
       })
     } else {
       chart.setOption({
-        xAxis: { data: h.map((x) => x.epoch) },
+        xAxis: { data: h.map((x: any) => x.epoch) },
         series: [
-          { data: h.map((x) => +x.train_loss.toFixed(4)) },
-          { data: h.map((x) => +x.val_loss.toFixed(4)) },
-          { data: h.map((x) => +x.train_acc.toFixed(4)) },
-          { data: h.map((x) => +x.val_acc.toFixed(4)) },
+          { data: h.map((x: any) => safeFixed(x.train_loss)) },
+          { data: h.map((x: any) => safeFixed(x.val_loss)) },
+          { data: h.map((x: any) => safeFixed(x.train_acc)) },
+          { data: h.map((x: any) => safeFixed(x.val_acc)) },
         ],
       })
     }
@@ -310,8 +320,10 @@ export function useTrainingDetailStream() {
     pretrainedPath.value = null
     pretrainedError.value = null
     visible.value = true
+    lastEpochSeen = null
+    historyLiveUntilAt = 0
+    lastHistoryFetchAt = 0
 
-    // 取一次最新详情 (含 error + 从 DB 回填数据集统计)
     try {
       const d: any = await trainingApi.job(row.id)
       job.value = d
@@ -334,13 +346,12 @@ export function useTrainingDetailStream() {
       ElMessage.warning('获取任务详情失败: ' + (e?.response?.data?.detail || e?.message))
     }
 
-    // 拉取历史日志
     try {
       const lg: any = await trainingApi.getLog(row.id)
       const historical: string[] = Array.isArray(lg?.log) ? lg.log : []
       if (historical.length > 0) {
         log.value = [
-          `[${new Date().toLocaleTimeString()}] 已加载历史日志 (${historical.length} 行)`,
+          `[已加载历史日志] (${historical.length} 行)`,
           ...historical,
         ]
       }
@@ -349,36 +360,38 @@ export function useTrainingDetailStream() {
     await nextTick()
     initChart()
 
-    // 仅当任务活跃时连 SSE
     if (row.celery_task_id && (row.state === 'PENDING' || row.state === 'PROGRESS')) {
-      startStream(row.celery_task_id)
-      historyTimer = setInterval(() => refreshHistory(row.celery_task_id), 5000)
+      const taskId = row.celery_task_id
+      log.value.push(`[已连接 SSE 进度推送] task_id=${taskId.slice(0, 8)}…`)
+      sseOff = pool.subscribe(taskId, {
+        onMessage: onStreamFrame,
+        onError: (err) => {
+          // v3.1.0 Phase T3: 错误兜底由退化轮询接管, 不再硬切 history 拉取
+          log.value.push(`[SSE 断开] ${err?.message || ''}`)
+        },
+      })
+      armHistoryBackoff(taskId)
     } else if (row.celery_task_id) {
-      // 终态也拉一次历史曲线
-      refreshHistory(row.celery_task_id)
+      // 终态: 拉一次历史即可
+      refreshHistory(row.celery_task_id, { force: true })
     }
   }
 
   // ============== 关闭清理 ==============
   const cleanup = () => {
-    if (cancelStream) { cancelStream(); cancelStream = null }
-    if (historyTimer) { clearInterval(historyTimer); historyTimer = null }
+    if (sseOff) { sseOff(); sseOff = null }
+    if (historyBackoffTimer) { clearTimeout(historyBackoffTimer); historyBackoffTimer = null }
     chart?.dispose()
     chart = null
   }
 
-  /** 供 template 监听 history 变化重绘图表 */
   const onHistoryChanged = () => updateChartFromHistory()
 
   return {
-    // state
     visible, job, error, progress, state,
     currentEpoch, totalEpochs, message, log, history, chartEl,
-    // computed (display fallback)
     displayDataTotal, displayDataTrain, displayDataVal, displayNumClasses, displayClassNames,
-    // 增量训练
     pretrainedLoaded, pretrainedPath, pretrainedError,
-    // actions
     openDetail, cleanup, onHistoryChanged,
   }
 }

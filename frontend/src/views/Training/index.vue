@@ -25,7 +25,7 @@
  * - view 编排 (模板 + 事件转发)
  * - 业务编排: 把 composables 串起来
  */
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Promotion } from '@element-plus/icons-vue'
 import { datasetApi } from '@/api'
@@ -214,10 +214,16 @@ useTrainingListSSE({
 })
 
 // ============== 静默兜底刷新 (详情打开时跳过) ==============
-const { start: startSilentRefresh, stop: stopSilentRefresh } = useSilentRefresh({
-  intervalMs: 30000,
+const { start: startSilentRefresh, stop: stopSilentRefresh, pause: pauseSilentRefresh, resume: resumeSilentRefresh } = useSilentRefresh({
+  intervalMs: 60000,
   skipWhen: () => detailVisible.value,
   onTick: () => loadJobs(),
+})
+
+// v3.1.0 Phase T4: 详情打开时主动暂停兜底刷新 (SSE 接管)
+watch(detailVisible, (v) => {
+  if (v) pauseSilentRefresh()
+  else resumeSilentRefresh()
 })
 
 // ============== 生命周期 ==============
@@ -452,3 +458,4 @@ onBeforeUnmount(() => {
   z-index: 5;
 }
 </style>
+

@@ -246,19 +246,26 @@ export function useTrainingJobs() {
   }
 
   // ============== 原地更新一行 (SSE 行内更新用) ==============
+  // v3.1.1 Round 2A perf: 改 splice 整行替换为 Object.assign 细粒度更新
+  // - splice(idx,1,next) 触发该行整体重新渲染 + 数组 length 变化 (Vue 会 invalidate 整行)
+  // - Object.assign 在已响应式代理上写属性, 触发细粒度依赖, 只更新引用了变化字段的 cell
+  // - SSE 高频 (秒级 progress) 路径下, 避免每次重渲整行 12 列
   const updateJobProgressInPlace = (jobId: number, data: any) => {
     const idx = jobs.value.findIndex((j) => j.id === jobId)
     if (idx < 0) return
     const cur = jobs.value[idx]
-    const next = { ...cur }
-    if (data.state) next.state = data.state
-    if (typeof data.progress === 'number') next.progress = data.progress
-    if (data.message) next.message = data.message
-    if (typeof data.current_epoch === 'number') next.current_epoch = data.current_epoch
-    if (typeof data.total_epochs === 'number') next.total_epochs = data.total_epochs
-    if (data.started_at) next.started_at = data.started_at
-    if (data.finished_at) next.finished_at = data.finished_at
-    jobs.value.splice(idx, 1, next)
+    // 预校验: 没有任何可应用字段则直接 return, 避免空 Object.assign 触发依赖
+    let touched = false
+    if (data.state) { cur.state = data.state; touched = true }
+    if (typeof data.progress === 'number') { cur.progress = data.progress; touched = true }
+    if (data.message) { cur.message = data.message; touched = true }
+    if (typeof data.current_epoch === 'number') { cur.current_epoch = data.current_epoch; touched = true }
+    if (typeof data.total_epochs === 'number') { cur.total_epochs = data.total_epochs; touched = true }
+    if (data.started_at) { cur.started_at = data.started_at; touched = true }
+    if (data.finished_at) { cur.finished_at = data.finished_at; touched = true }
+    if (!touched) return
+    // 显式浅 trigger: 让 <el-table> 检测到行对象引用更新 (cur 已 reactive)
+    jobs.value[idx] = cur
   }
 
   return {
