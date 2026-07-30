@@ -55,6 +55,12 @@ async def save_annotation(
     if not img:
         raise HTTPException(404, "Image not found")
 
+    # P0-4: 非 admin 只能标注自己 dataset 的图片
+    from app.tasks.model.dataset import Dataset
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds or (not current_user.is_admin() and ds.owner_id != current_user.id):
+        raise HTTPException(403, "无权限标注此数据集的图片")
+
     label = await db.get(Category, req.label_id)
     if not label:
         raise HTTPException(404, "Category not found")

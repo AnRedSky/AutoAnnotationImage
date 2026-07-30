@@ -72,6 +72,10 @@ async def list_training_jobs(
     """
     base = select(TrainingJob)
     count_base = select(sa_func.count(TrainingJob.id))
+    # P0-6: 非 admin 只看自己的训练任务; admin 看全部
+    if not current_user.is_admin():
+        base = base.where(TrainingJob.user_id == current_user.id)
+        count_base = count_base.where(TrainingJob.user_id == current_user.id)
     if dataset_id is not None:
         base = base.where(TrainingJob.dataset_id == dataset_id)
         count_base = count_base.where(TrainingJob.dataset_id == dataset_id)

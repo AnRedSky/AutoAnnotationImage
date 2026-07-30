@@ -80,7 +80,11 @@ async def list_datasets(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Dataset).order_by(Dataset.id.desc()))
+    # P0-1: 非 admin 只看自己的 dataset; admin 看全部
+    stmt = select(Dataset).order_by(Dataset.id.desc())
+    if not current_user.is_admin():
+        stmt = stmt.where(Dataset.owner_id == current_user.id)
+    result = await db.execute(stmt)
     datasets = result.scalars().all()
     return {
         "items": [
@@ -157,6 +161,10 @@ async def delete_dataset(
     dataset = await DatasetService.get(db, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # P0-2: 非 admin 只能删自己的 dataset
+    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限删除此数据集")
 
     # 业务规则: 仅 draft / done 可删
     await DatasetService.assert_can_delete(db, dataset)

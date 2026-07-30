@@ -204,6 +204,14 @@ async def start_training(
     - 空字符串 (默认): 从头微调 (timm ImageNet 预训练权重)
     - 已有路径: 加载该 .pth 的 state_dict (fine-tune 旧模型)
     """
+    # P0-5: 非 admin 只能对自己的 dataset 启训练
+    from app.tasks.model.dataset import Dataset
+    dataset = await db.get(Dataset, dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限对此数据集启训练")
+
     result = await TrainingService.start_training(
         db,
         user_id=current_user.id,

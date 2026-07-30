@@ -85,6 +85,10 @@ async def upload_images(
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
+    # P0-3: 非 admin 只能向自己的 dataset 上传
+    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限向此数据集上传图片")
+
     results = []
     for file in files:
         # P0-4 修复 1: 流式读取 + 大小限制 (避免内存爆炸)
