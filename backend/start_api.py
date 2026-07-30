@@ -42,8 +42,57 @@ from app.core.config import settings  # noqa: E402,E501
 
 
 # ============================================================
-#  工具
+#  依赖健康预检 (v3.1.0 Phase V #3)
 # ============================================================
+def _check_port(host: str, port: int, timeout: float = 0.5) -> bool:
+    """TCP 端口探活."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def preflight() -> list[str]:
+    """启 API 前检查依赖. 返回 warning 列表 (空 = 全 OK, 不阻止启动).
+
+    Phase V #3: 启服务前先 sanity-check MySQL/Redis/MinIO, 让启动失败更明显.
+    之前用户启 start_api -> 启动看着像好 -> /api/health 才发现 Redis 不可用,
+    浪费时间排查. 现在 status 行给出明确诊断.
+    """
+    warnings: list[str] = []
+    deps = [
+        ("MySQL", settings.MYSQL_HOST, settings.MYSQL_PORT, True),
+        ("Redis", settings.REDIS_HOST, settings.REDIS_PORT, True),
+        ("MinIO", "127.0.0.1", 9000, False),  # MINIO_ENDPOINT 含 :port, parse it
+    ]
+    # Parse MinIO endpoint
+    try:
+        mhost = settings.MINIO_ENDPOINT.split(":")[0]
+        mport = int(settings.MINIO_ENDPOINT.split(":")[1])
+        deps[2] = ("MinIO", mhost, mport, False)
+    except Exception:
+        warnings.append(f"  ⚠  MinIO endpoint 解析失败: {settings.MINIO_ENDPOINT!r}")
+
+    for name, host, port, required in deps:
+        if _check_port(host, port):
+            print(f"  [OK ] {name:7s} {host}:{port}  reachable")
+        else:
+            msg = f"  [WARN] {name:7s} {host}:{port}  NOT reachable"
+            if required:
+                msg += "  (REQUIRED — API may fail on DB/cache calls)"
+            warnings.append(msg)
+            print(msg)
+
+    # Admin SECRET_KEY 弱密码警告 (production)
+    if settings.APP_ENV == "production":
+        weak = settings.SECRET_KEY in ("change-me-to-a-random-string-min-32-chars", "secret", "")
+        if weak:
+            warnings.append("  [ERR ] SECRET_KEY is default/weak; required for production")
+            print("  [ERR ] SECRET_KEY is default/weak; required for production")
+    return warnings
+
+
 def parse_args():
     reload = "--reload" in sys.argv
     detach = "--detach" in sys.argv
@@ -143,6 +192,11 @@ def start_foreground():
     host, port, reload, workers, _ = parse_args()
     print_banner(host, port, reload, workers, detach=False)
 
+    # v3.1.0 Phase V #3: 启动前依赖健康预检 (改进 start_api 失败诊断体验)
+    print()
+    print("  [Preflight] Checking required services...")
+    preflight()
+
     if reload and workers > 1:
         print("[WARN] --reload 不兼容多 workers，自动降为 1 worker")
         workers = 1
@@ -159,6 +213,11 @@ def start_detach():
     """detached 模式：subprocess.Popen + DETACHED_PROCESS（父进程退出不影响）"""
     host, port, reload, workers, _ = parse_args()
     print_banner(host, port, reload, workers, detach=True)
+
+    # v3.1.0 Phase V #3: 启动前依赖健康预检
+    print()
+    print("  [Preflight] Checking required services...")
+    preflight()
 
     # Check if already running
     existing = read_pid()
@@ -235,17 +294,21 @@ def show_status():
         print(f"  [OK] RUNNING  PID={pid}")
     else:
         print("  [INFO] NOT running")
-    # 端口探活
-    if test_port("127.0.0.1", 5000):
-        print(f"  [OK] :5000  LISTENING")
-    else:
-        print(f"  [INFO] :5000  not listening")
+    # 端口探活 (v3.1.0 Phase V #3: 优先查 settings.APP_PORT, 兼容 5000 也探)
+    print("\n  Listening ports:")
+    for port in (settings.APP_PORT, 5000):
+        if test_port("127.0.0.1", port):
+            print(f"  [OK]   :{port}  LISTENING")
+        else:
+            print(f"  [INFO] :{port}  not listening")
     # /api/health 探活
+    print()
+    health_port = settings.APP_PORT if test_port("127.0.0.1", settings.APP_PORT) else 5000
     try:
         import urllib.request, json
-        r = urllib.request.urlopen("http://127.0.0.1:5000/api/health", timeout=3)
+        r = urllib.request.urlopen(f"http://127.0.0.1:{health_port}/api/health", timeout=3)
         d = json.loads(r.read().decode())
-        print(f"  [OK] /api/health: {d.get('status')}")
+        print(f"  [OK] /api/health (port {health_port}): status={d.get('status')}")
     except Exception as e:
         print(f"  [INFO] /api/health: {e}")
     return 0

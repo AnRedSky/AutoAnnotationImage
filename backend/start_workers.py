@@ -138,6 +138,38 @@ def ensure_redis() -> bool:
         return False
 
 
+def preflight_deps() -> bool:
+    """v3.1.0 Phase V #3: workers 依赖健康预检 (MySQL 必须可达, MinIO 软警告).
+
+    Returns True if required deps OK, False otherwise. Worker 起来时若 DB 不可用,
+    会一直 retry 失败很烦. 现在预检明确告知.
+    """
+    section("Preflight - checking required services")
+    # MySQL: 必查
+    # 从 .env 读 (避免 import settings 顺序问题)
+    mysql_host = parse_env_value("MYSQL_HOST", "127.0.0.1")
+    mysql_port = int(parse_env_value("MYSQL_PORT", "3306"))
+    if test_port(mysql_host, mysql_port):
+        ok(f"MySQL   {mysql_host}:{mysql_port}  reachable")
+    else:
+        err(f"MySQL   {mysql_host}:{mysql_port}  NOT reachable (REQUIRED)")
+        return False
+
+    # MinIO: 软警告, 训练/上传任务才需要
+    minio_endpoint = parse_env_value("MINIO_ENDPOINT", "127.0.0.1:9000")
+    try:
+        mhost, mport = minio_endpoint.split(":")[:2]
+        mport = int(mport)
+    except Exception:
+        mhost, mport = "127.0.0.1", 9000
+    if test_port(mhost, mport):
+        ok(f"MinIO   {minio_endpoint}  reachable")
+    else:
+        info(f"MinIO   {minio_endpoint}  NOT reachable (training/upload may fail)")
+
+    return True
+
+
 # ============================================================
 #  PID file
 # ============================================================
@@ -251,6 +283,10 @@ def start_foreground():
     if not ensure_redis():
         err("Redis unavailable; Celery cannot start")
         return 1
+    # v3.1.0 Phase V #3: DB / MinIO 预检 (失败 quick exit, 避免 worker 起来后一堆 retry 报错)
+    if not preflight_deps():
+        err("Required deps unavailable; Celery worker cannot start effectively")
+        return 1
     # 关键: 必须 import celery_app + 子任务模块以触发 @celery_app.task 装饰器,
     # 否则 train_classification_task / train_detection_task 等不会注册到 celery_app.tasks,
     # worker 收到任务后会报 KeyError。
@@ -303,6 +339,9 @@ def start_detach():
     section("Starting Celery worker (detached)")
     if not ensure_redis():
         err("Redis unavailable; Celery cannot start")
+        return 1
+    if not preflight_deps():
+        err("Required deps unavailable; Celery worker cannot start effectively")
         return 1
 
     # Check if already running
