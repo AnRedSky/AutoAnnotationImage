@@ -113,50 +113,43 @@ async def list_active_models(
     - 每个 dataset 只返回 1 个最佳模型 (mAP50/mIoU/accuracy 降序, created_at 降序)
     - dataset_id 缺省: 全局所有数据集各自的最优模型
     - 委托 ModelService.get_active_for_dataset() 保证业务一致性
+
+    v3.0.0 Phase V #2: dataset_id 缺省时改用 get_active_for_all_datasets
+       (单 query + ROW_NUMBER OVER PARTITION BY). N+1 → 1 query.
     """
     items: list[dict] = []
 
-    # 1) 决定要遍历的 dataset 列表
     if dataset_id is not None:
-        ds_ids = [dataset_id]
+        # 单 dataset 路径: 沿用旧实现 (1 query)
+        active = await ModelService.get_active_for_dataset(db, dataset_id, task_type=task_type)
+        if active:
+            items.append(_model_to_dict(active))
     else:
-        rows = (await db.execute(select(Dataset.id))).all()
-        ds_ids = [r[0] for r in rows]
+        # 全局数据集路径 (Phase V #2: 1 query 替代 N+1)
+        active_map = await ModelService.get_active_for_all_datasets(db, task_type=task_type)
+        for ds_id, active in sorted(active_map.items()):
+            items.append(_model_to_dict(active))
 
-    # 2) 逐 dataset 委托 ModelService (排序: mAP50/mIoU/accuracy DESC, created_at DESC)
-    for ds_id in ds_ids:
-        active = await ModelService.get_active_for_dataset(db, ds_id, task_type=task_type)
-        if not active:
-            continue
-        items.append({
-            "id": active.id,
-            "name": active.name,
-            "base_model": active.base_model,
-            "dataset_id": active.dataset_id,
-            "task_type": active.task_type,
-            "num_classes": active.num_classes,
-            "accuracy": float(active.accuracy or 0),
-            "f1_score": float(active.f1_score or 0),
-            "map_50": float(active.map_50) if active.map_50 is not None else None,
-            "miou": float(active.miou) if active.miou is not None else None,
-            "is_active": active.is_active,
-            "created_at": active.created_at.isoformat() if active.created_at else None,
-        })
+    return {"items": items, "count": len(items)}
 
-    # 3) 预查 dataset_name (避免 N+1)
-    ds_name_map: dict[int, str] = {}
-    if items:
-        ds_ids2 = sorted({m["dataset_id"] for m in items if m["dataset_id"]})
-        if ds_ids2:
-            ds_rows = (await db.execute(
-                select(Dataset.id, Dataset.name).where(Dataset.id.in_(ds_ids2))
-            )).all()
-            for r in ds_rows:
-                ds_name_map[r[0]] = r[1]
-    for m in items:
-        m["dataset_name"] = ds_name_map.get(m["dataset_id"]) if m["dataset_id"] else None
 
-    return {"items": items}
+def _model_to_dict(model: ModelVersion) -> dict:
+    """统一序列化 (单 dataset 和全 dataset 共用)."""
+    return {
+        "id": model.id,
+        "name": model.name,
+        "base_model": model.base_model,
+        "dataset_id": model.dataset_id,
+        "task_type": model.task_type,
+        "num_classes": model.num_classes,
+        "accuracy": float(model.accuracy or 0),
+        "f1_score": float(model.f1_score or 0),
+        "map_50": float(model.map_50) if model.map_50 is not None else None,
+        "miou": float(model.miou) if model.miou is not None else None,
+        "is_active": model.is_active,
+        "created_at": model.created_at.isoformat() if model.created_at else None,
+        "best_epoch": None,  # 暂无字段; 占位
+    }
 
 
 @router.get("/{model_id}/detail")

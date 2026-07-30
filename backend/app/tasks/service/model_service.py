@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.tasks.model.model_version import ModelVersion
 from app.tasks.repository.model_version_queries import (
     get_active_model,
+    list_active_per_dataset,  # Phase V #2: 新增 window-function query
     list_versions_by_dataset as list_models_by_dataset,
 )
 
@@ -54,6 +55,19 @@ class ModelService:
             if v.is_active:
                 return v
         return versions[0] if versions else None
+
+    @staticmethod
+    async def get_active_for_all_datasets(
+        db: AsyncSession,
+        task_type: Optional[str] = None,
+    ) -> Dict[int, ModelVersion]:
+        """Phase V #2 优化: 单 query 拿全部 dataset 的「最优模型」.
+
+        替代 ``/api/models/active`` 端点里 for-dataset 循环.
+        之前: N datasets → N+1 query.
+        现在: 1 query (ROW_NUMBER OVER PARTITION BY dataset_id).
+        """
+        return await list_active_per_dataset(db, task_type=task_type)
 
     @staticmethod
     async def activate(
