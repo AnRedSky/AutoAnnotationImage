@@ -4,6 +4,27 @@
 
 > 本项目使用 [uv](https://github.com/astral-sh/uv) 进行依赖管理。
 
+## v3.1.0 Phase T — 已完成（2026-07-30）
+
+后端架构拆分部署 + P0 改进闭环。完整交付包：
+
+| Commit | 内容 |
+|---|---|
+| `321f44c` | `docs/38-*`: 后端架构现状评估与拆分部署方案 v1.0 |
+| `f4ca7d9` | `feat`: P0-1 (Worker SIGTERM handler) + P0-2 (`/api/health` 503) + 5 shim 清理 |
+| `eaef9b6` | `test`: 端到端 e2e 脚本（SIGTERM + health） |
+| `de50f36` | `docs/40-*`: 健康端到端验证 |
+| `24f163f` | `docs/41-*`: Celery worker 端到端验证（首次） |
+| `04bac85` | `docs/41-*`: thread pool `terminate_job` NotImplementedError 根因补全 |
+
+**关键结论**：
+- 当前拆分部署形态（API + worker-train + worker-annotate 三容器）适用单 dev / 小团队 / 单机 / CPU / ≤100 并发场景
+- **P0-1 单元/e2e 全过**（在 Linux + prefork pool 生产路径下推断会通过）
+- **P0-2 真服务 HTTP 503 已验**
+- 真生产 (Linux + prefork) 端到段验证是 Phase U backlog 唯一未满足项
+
+详见 `backend/docs/40-...md` / `41-...md` / `38-...md`。
+
 ## 环境要求
 
 - Python 3.10+
