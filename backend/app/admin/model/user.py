@@ -20,7 +20,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str] = mapped_column(String(100), nullable=True)
     role: Mapped[str] = mapped_column(
-        Enum("admin", "annotator", "viewer", name="user_role"),
+        Enum("super_admin", "admin", "annotator", "viewer", name="user_role"),
         default="annotator", nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

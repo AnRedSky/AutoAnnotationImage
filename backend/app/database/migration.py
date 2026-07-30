@@ -67,6 +67,22 @@ TENANT_MIGRATIONS = [
 ]
 
 
+# v3.2.0 MT-7: user.role ENUM 加 super_admin
+# MySQL 需要 MODIFY COLUMN; SQLite 用 VARCHAR, 无需改
+def _get_mysql_user_role_enum(conn) -> str | None:
+    """查 user.role 列的 ENUM 定义."""
+    try:
+        rows = conn.execute(text(
+            "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "  AND TABLE_NAME = 'user' AND COLUMN_NAME = 'role' LIMIT 1"
+        ))
+        row = rows.first()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 # v3.1.0 Phase V #4: 索引补全
 #   热路径查询: WHERE is_active=true ORDER BY created_at DESC (model list, /api/models/)
 #   已有索引: ForeignKey (dataset_id) + index=True (task_type) + row.id PK
@@ -318,6 +334,28 @@ async def ensure_v2_0_0_schema(
         added.extend(result)
     except Exception as e:  # noqa: BLE001
         err = f"model_name 列加长失败: {e!r}"
+        errors.append(err)
+        if verbose:
+            print(f"  [err]  {err}")
+
+    # v3.2.0 MT-7: user.role ENUM 加 super_admin (MySQL MODIFY COLUMN)
+    try:
+        current_enum = await _get_mysql_user_role_enum(conn)
+        if current_enum and "super_admin" not in current_enum:
+            await conn.execute(text(
+                "ALTER TABLE `user` "
+                "MODIFY COLUMN `role` "
+                "ENUM('super_admin','admin','annotator','viewer') "
+                "NOT NULL DEFAULT 'annotator'"
+            ))
+            msg = "user.role ENUM + super_admin"
+            if verbose:
+                print(f"  [mod]  {msg}")
+            added.append(msg)
+        elif current_enum and "super_admin" in current_enum:
+            skipped.append("user.role ENUM already has super_admin")
+    except Exception as e:
+        err = f"user.role ENUM 扩展失败: {e!r}"
         errors.append(err)
         if verbose:
             print(f"  [err]  {err}")
