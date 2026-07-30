@@ -58,12 +58,12 @@ class AdminApp(AppInterface):
         from app.admin.api import user as user_api
         from app.admin.api import stats as stats_api
         from app.admin.api import system as system_api
-        from app.admin.api import tenant as tenant_api  # v3.2.0 MT-7
+        from app.admin.api import team as team_api  # v3.3.0
         return [
             RouteEntry(user_api, "/api/users", ["用户管理"]),
             RouteEntry(stats_api, "/api/stats", ["统计分析"]),
             RouteEntry(system_api, "/api", ["系统"]),
-            RouteEntry(tenant_api, "/api/tenants", ["多租户管理"]),  # v3.2.0 MT-7
+            RouteEntry(team_api, "/api/teams", ["团队管理"]),  # v3.3.0
         ]
 
     def register_events(self) -> list[str]:

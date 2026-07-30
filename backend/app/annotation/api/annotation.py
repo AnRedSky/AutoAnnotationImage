@@ -55,11 +55,13 @@ async def save_annotation(
     if not img:
         raise HTTPException(404, "Image not found")
 
-    # P0-4: 非 admin 只能标注自己 dataset 的图片
+    # v3.3.0: 权限检查升级 (owner + team_member)
     from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
     ds = await db.get(Dataset, img.dataset_id)
-    if not ds or (not current_user.is_admin() and ds.owner_id != current_user.id):
-        raise HTTPException(403, "无权限标注此数据集的图片")
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     label = await db.get(Category, req.label_id)
     if not label:
@@ -557,13 +559,12 @@ async def list_annotations(
     - 分页 + 按 action 过滤 (confirm / correct)
     - 返回图片名 + 用户名 + 耗时 + 时间
     """
-    # P1-2: 非 admin 只能看自己 dataset 的标注日志
     from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
     ds = await db.get(Dataset, dataset_id)
     if not ds:
         raise HTTPException(404, "Dataset not found")
-    if not current_user.is_admin() and ds.owner_id != current_user.id:
-        raise HTTPException(403, "无权限查看此数据集的标注日志")
+    await assert_can_access_dataset(db, current_user, ds)
 
     from app.admin.model.user import User as UserModel
     base = (

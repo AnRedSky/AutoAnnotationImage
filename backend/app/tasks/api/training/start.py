@@ -209,8 +209,8 @@ async def start_training(
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限对此数据集启训练")
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset, require_write=True)
 
     result = await TrainingService.start_training(
         db,

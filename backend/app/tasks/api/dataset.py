@@ -162,9 +162,9 @@ async def delete_dataset(
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
-    # P0-2: 非 admin 只能删自己的 dataset
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限删除此数据集")
+    # v3.3.0: 权限检查升级 (owner + team_member)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 业务规则: 仅 draft / done 可删
     await DatasetService.assert_can_delete(db, dataset)

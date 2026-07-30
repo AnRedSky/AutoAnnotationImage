@@ -85,9 +85,9 @@ async def upload_images(
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
-    # P0-3: 非 admin 只能向自己的 dataset 上传
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限向此数据集上传图片")
+    # v3.3.0: 权限检查升级 (owner + team_member)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset, require_write=True)
 
     results = []
     for file in files:
