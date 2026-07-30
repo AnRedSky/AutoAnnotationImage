@@ -27,6 +27,15 @@ from app.admin.model.user import User  # noqa: E402
 from app.middleware.security.security import hash_password  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
+# 测试模式: 禁用 rate_limit, 避免合跑时 login fixture 触发滑动窗口 429
+# (conftest 的 auth_headers fixture 每个测试都 login, 5 次/分钟限制很快触发)
+try:
+    from app.middleware.http.rate_limit import RATE_LIMIT_PROFILES
+    for _profile in RATE_LIMIT_PROFILES.values():
+        _profile.enabled = False
+except Exception:
+    pass  # rate_limit 模块未装也无所谓
+
 
 @pytest.fixture(scope="session")
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
