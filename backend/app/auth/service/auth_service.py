@@ -41,10 +41,11 @@ class AuthService:
         - 标准声明 (sub/iat/exp/jti/iss/aud) 由 create_access_token 强制注入
         - `role` 等业务字段通过 extra_claims 注入, 与 sub 保持平级
         - 移除冗余的 `id` 字段 (sub 已持有用户 ID)
+        v3.2.0 MT-2: 加 tenant_id 到 JWT (多租户上下文)
         """
         return create_access_token(
             data={"sub": str(user.id), "username": user.username},
-            extra_claims={"role": user.role},
+            extra_claims={"role": user.role, "tenant_id": getattr(user, "tenant_id", None) or 1},
         )
 
     @staticmethod

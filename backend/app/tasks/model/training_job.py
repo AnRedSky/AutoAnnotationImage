@@ -75,6 +75,9 @@ class TrainingJob(Base):
     num_classes = Column(Integer, nullable=True)
     class_names = Column(JSON, nullable=True)
 
+    # v3.2.0 MT-3: 多租户 — tenant_id 隔离
+    tenant_id = Column(Integer, ForeignKey("tenant.id"), nullable=True, default=1, index=True)
+
     # 关系
     user = relationship("User")
     dataset = relationship("Dataset")

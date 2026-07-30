@@ -55,6 +55,18 @@ MIGRATIONS = [
 ]
 
 
+# v3.2.0 MT-1~MT-3: 多租户 — 新表 + 业务表加 tenant_id
+# 新表 (tenant, user_tenant_role) 由 ORM create_all 自动建.
+# 已有表需要 ALTER ADD COLUMN tenant_id (nullable, default 1).
+TENANT_MIGRATIONS = [
+    ("user",            "tenant_id", "INTEGER", "1"),
+    ("dataset",         "tenant_id", "INTEGER", "1"),
+    ("model_version",   "tenant_id", "INTEGER", "1"),
+    ("training_jobs",   "tenant_id", "INTEGER", "1"),
+    ("annotation_log",  "tenant_id", "INTEGER", "1"),
+]
+
+
 # v3.1.0 Phase V #4: 索引补全
 #   热路径查询: WHERE is_active=true ORDER BY created_at DESC (model list, /api/models/)
 #   已有索引: ForeignKey (dataset_id) + index=True (task_type) + row.id PK
@@ -237,6 +249,36 @@ async def ensure_v2_0_0_schema(
             added.append(msg)
         except Exception as e:  # noqa: BLE001
             # 单列失败不阻塞其他列
+            err = f"{table}.{column}: {e!r}"
+            errors.append(err)
+            if verbose:
+                print(f"  [err]  {err}")
+
+    # v3.2.0 MT-3: 多租户 — 业务表加 tenant_id 列 (幂等)
+    for table, column, sqltype, default in TENANT_MIGRATIONS:
+        try:
+            if not await _table_exists(conn, table):
+                continue
+            if await _column_exists(conn, table, column):
+                continue
+            sql = (
+                f"ALTER TABLE `{table}` "
+                f"ADD COLUMN `{column}` {sqltype} DEFAULT {default}"
+            )
+            await conn.execute(text(sql))
+            # 加索引
+            idx_name = f"ix_{table}_{column}"
+            try:
+                await conn.execute(text(
+                    f"CREATE INDEX `{idx_name}` ON `{table}` (`{column}`)"
+                ))
+            except Exception:
+                pass
+            msg = f"{table}.{column}"
+            if verbose:
+                print(f"  [add]  {msg}")
+            added.append(msg)
+        except Exception as e:
             err = f"{table}.{column}: {e!r}"
             errors.append(err)
             if verbose:

@@ -24,6 +24,8 @@ os.environ["APP_DEBUG"] = "False"
 from app.main import app  # noqa: E402
 from app.database import get_db, Base  # noqa: E402
 from app.admin.model.user import User  # noqa: E402
+from app.admin.model.tenant import Tenant  # noqa: E402  (v3.2.0 MT-1: tenant 表)
+from app.admin.model.user_tenant_role import UserTenantRole  # noqa: E402  (v3.2.0 MT-2)
 from app.middleware.security.security import hash_password  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
@@ -152,6 +154,8 @@ async def celery_eager(db_session):
     from app.tasks.workers.celery_app import celery_app
     from app.database import Base, engine
     import app.admin.model as _admin_model, app.tasks.model as _tasks_model, app.annotation.model as _annotation_model  # noqa: F401  触发 metadata 注册
+    import app.admin.model.tenant as _tenant_model  # noqa: F401  (v3.2.0 MT-1)
+    import app.admin.model.user_tenant_role as _ut_role_model  # noqa: F401  (v3.2.0 MT-2)
 
     # 在 app 引擎上 create_all (幂等)
     async with engine.begin() as conn:

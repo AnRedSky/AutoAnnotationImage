@@ -40,6 +40,12 @@ class Dataset(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # v3.2.0 MT-3: 多租户 — tenant_id 隔离
+    # nullable + default=1: 兼容旧数据 (无 tenant 的 dataset 归 default tenant)
+    tenant_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tenant.id"), nullable=True, default=1, index=True,
+    )
+
     # Relationships (跨应用: 引用 admin/tasks/annotation 下的模型, 通过类名解析)
     owner = relationship("User", back_populates="datasets")
     categories = relationship("Category", back_populates="dataset", cascade="all, delete-orphan")

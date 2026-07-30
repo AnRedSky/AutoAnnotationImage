@@ -33,10 +33,22 @@ async def init_db():
     # 必须在 create_all 之前 import models, 避免 Base.metadata 为空导致建不出表
     import app.tasks.model  # noqa: F401
     import app.admin.model  # noqa: F401
+    import app.admin.model.tenant  # noqa: F401  (v3.2.0 MT-1: tenant 表)
+    import app.admin.model.user_tenant_role  # noqa: F401  (v3.2.0 MT-2: per-tenant 角色)
     import app.annotation.model  # noqa: F401
     import app.database.migration as dbm  # noqa: PLC0415
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # v3.2.0 MT-1: 首次部署自动创建 default tenant (id=1)
+        from sqlalchemy import text
+        result = await conn.execute(text("SELECT COUNT(*) FROM tenant"))
+        if result.scalar() == 0:
+            await conn.execute(text(
+                "INSERT INTO tenant (id, name, slug, status, max_users, max_datasets, created_at) "
+                "VALUES (1, 'default', 'default', 'active', 50, 100, NOW())"
+            ))
+            import logging  # noqa: PLC0415
+            logging.getLogger(__name__).info("[init_db] 创建 default tenant (id=1)")
         # 补 v2.0.0 新增列 (训练任务 / 模型版本 / 图像的任务类型 + 任务专属指标)
         result = await dbm.ensure_v2_0_0_schema(conn, verbose=settings.APP_DEBUG)
         if result["added"]:
