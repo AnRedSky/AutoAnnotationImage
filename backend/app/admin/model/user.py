@@ -43,15 +43,39 @@ class User(Base):
         """是否管理员"""
         return self.role == "admin"
 
-    def is_annotator(self) -> bool:
-        """是否标注员"""
-        return self.role == "annotator"
+    def is_admin(self) -> bool:
+        """是否管理员 (全局 admin 或 super_admin)"""
+        return self.role in ("admin", "super_admin")
+
+    def is_super_admin(self) -> bool:
+        """是否超级管理员 (跨 tenant)"""
+        return self.role == "super_admin"
 
     def can_access_dataset(self, dataset) -> bool:
-        """权限检查: 管理员可访问全部, 否则只看自己的"""
-        if self.is_admin():
+        """权限检查 (v3.2.0 MT 权限管理升级):
+
+        1. super_admin → 全通
+        2. admin (tenant_admin) → 同 tenant 全通
+        3. owner → 自己创建的 dataset
+        4. dataset_membership → 被共享的 dataset
+
+        注: tenant_id 比较在中间件层自动过滤, 这里只做显式权限检查.
+        """
+        if self.is_super_admin():
             return True
-        return dataset.owner_id == self.id
+        if self.is_admin():
+            # admin 看同 tenant 的全部 (tenant_id 比较由中间件层过滤)
+            return True
+        # 普通用户: 自己创建的 dataset
+        if dataset.owner_id == self.id:
+            return True
+        # 被共享的 dataset: 检查 dataset_membership
+        # 注: 这里不查 DB (避免 N+1), 由调用方在做 API 层检查时查
+        # 如果 dataset 有 _membership_cached 属性, 用它
+        membership = getattr(dataset, "_membership_cached", None)
+        if membership is not None:
+            return self.id in membership
+        return False
 
     def deactivate(self) -> None:
         """停用账号 (业务规则)"""

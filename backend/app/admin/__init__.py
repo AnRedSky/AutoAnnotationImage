@@ -47,20 +47,23 @@ class AdminApp(AppInterface):
         return _admin_router
 
     def get_routes(self) -> list[RouteEntry]:
-        """返回 3 个路由条目: user / stats / system
+        """返回 4 个路由条目: user / stats / system / tenant
 
         system 路由挂在 /api (而不是 /api/admin), 因为它是无鉴权的系统级端点.
+        tenant 路由挂在 /api/tenants (v3.2.0 MT-7 多租户管理).
 
         注意: app.{name}.api 包的 __init__ 已经把每个子 router 重新导出为同名属性
-        (user / system / stats), 因此 user_api 本身就是 APIRouter, 无需 .router
+        (user / system / stats / tenant), 因此 user_api 本身就是 APIRouter, 无需 .router
         """
         from app.admin.api import user as user_api
         from app.admin.api import stats as stats_api
         from app.admin.api import system as system_api
+        from app.admin.api import tenant as tenant_api  # v3.2.0 MT-7
         return [
             RouteEntry(user_api, "/api/users", ["用户管理"]),
             RouteEntry(stats_api, "/api/stats", ["统计分析"]),
             RouteEntry(system_api, "/api", ["系统"]),
+            RouteEntry(tenant_api, "/api/tenants", ["多租户管理"]),  # v3.2.0 MT-7
         ]
 
     def register_events(self) -> list[str]:
