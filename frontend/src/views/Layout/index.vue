@@ -22,6 +22,16 @@ const menus = [
   { path: '/training', icon: Promotion, title: '训练任务', subtitle: 'Training' }
 ]
 
+// v3.2.0 MT-10: 管理员菜单组 (仅 admin 可见)
+const adminMenus = [
+  { path: '/admin/users', icon: User, title: '用户管理', subtitle: 'Users' },
+  { path: '/admin/tenants', icon: Folder, title: '租户管理', subtitle: 'Tenants' },
+  { path: '/admin/roles', icon: EditPen, title: '角色权限', subtitle: 'Roles' },
+  { path: '/admin/audit', icon: Odometer, title: '审计日志', subtitle: 'Audit' }
+]
+
+const isAdmin = computed(() => userStore.user?.role?.includes('admin'))
+
 /**
  * 选中的菜单: 之前用 route.path 精确匹配, 导致 /datasets/29 落不到 /datasets
  * 改用前缀匹配, 让详情页也能高亮所属的一级菜单
@@ -43,7 +53,8 @@ const onLogout = async () => {
 /** 命中的菜单: 优先 longest prefix 匹配, 都没有则回退 dashboard */
 const matchedMenu = computed(() => {
   const path = activePath.value
-  const candidates = menus.filter((m) => path === m.path || path.startsWith(m.path + '/'))
+  const allMenus = isAdmin.value ? [...menus, ...adminMenus] : menus
+  const candidates = allMenus.filter((m) => path === m.path || path.startsWith(m.path + '/'))
   if (candidates.length === 0) return menus[0]
   return candidates.sort((a, b) => b.path.length - a.path.length)[0]
 })
@@ -93,6 +104,22 @@ const breadcrumbs = computed(() => {
         class="app-menu"
       >
         <el-menu-item v-for="m in menus" :key="m.path" :index="m.path">
+          <el-icon class="menu-icon">
+            <component :is="m.icon" />
+          </el-icon>
+          <template #title>
+            <div class="menu-title">
+              <span class="zh">{{ m.title }}</span>
+              <span class="en">{{ m.subtitle }}</span>
+            </div>
+          </template>
+        </el-menu-item>
+
+        <!-- v3.2.0 MT-10: 管理员菜单组 -->
+        <template v-if="isAdmin && !collapsed">
+          <div class="menu-divider">管理</div>
+        </template>
+        <el-menu-item v-for="m in (isAdmin ? adminMenus : [])" :key="m.path" :index="m.path">
           <el-icon class="menu-icon">
             <component :is="m.icon" />
           </el-icon>
@@ -401,6 +428,15 @@ const breadcrumbs = computed(() => {
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0;
+}
+
+.menu-divider {
+  padding: 12px 20px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-placeholder);
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .caret { color: var(--text-placeholder); font-size: 12px; }

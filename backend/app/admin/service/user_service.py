@@ -41,7 +41,8 @@ class UserService:
 
     @staticmethod
     async def list_active(db: AsyncSession, skip: int = 0, limit: int = 100) -> List[User]:
-        return await list_active_users(db, skip=skip, limit=limit)
+        # list_active_users 不支持 skip/limit, 直接返回全量 (admin 端点数据量小)
+        return await list_active_users(db)
 
     @staticmethod
     async def count(db: AsyncSession) -> int:

@@ -573,3 +573,13 @@ export const tenantApi = {
   unshareDataset: (datasetId: number, userId: number) =>
     http.delete(`/tenants/datasets/${datasetId}/share/${userId}`),
 }
+
+// ============== 用户管理 (v3.2.0 MT-10) ==============
+export const userApi = {
+  list: () => http.get('/users/'),
+  get: (id: number) => http.get(`/users/${id}`),
+  activate: (id: number) => http.post(`/users/${id}/activate`),
+  deactivate: (id: number) => http.post(`/users/${id}/deactivate`),
+  changeRole: (id: number, newRole: string) =>
+    http.post(`/users/${id}/role`, { new_role: newRole }),
+}

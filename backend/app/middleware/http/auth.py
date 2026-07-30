@@ -134,8 +134,8 @@ async def get_current_user_with_payload(
 
 
 async def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """要求管理员权限"""
-    if current_user.role != "admin":
+    """要求管理员权限 (v3.2.0: admin 或 super_admin)"""
+    if not current_user.is_admin():
         raise HTTPException(status_code=403, detail="Admin permission required")
     return current_user
 

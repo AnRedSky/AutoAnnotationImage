@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 
 const router = createRouter({
@@ -20,7 +21,12 @@ const router = createRouter({
         { path: 'annotate', name: 'Annotate', component: () => import('@/views/Annotate/index.vue'), meta: { title: '人工标注' } },
         { path: 'annotate/:datasetId', name: 'AnnotateWithDs', component: () => import('@/views/Annotate/index.vue'), meta: { title: '人工标注' } },
         { path: 'training', name: 'Training', component: () => import('@/views/Training/index.vue'), meta: { title: '模型训练' } },
-        { path: 'models', name: 'Models', component: () => import('@/views/Models/index.vue'), meta: { title: '模型管理' } }
+        { path: 'models', name: 'Models', component: () => import('@/views/Models/index.vue'), meta: { title: '模型管理' } },
+        // v3.2.0 MT-10: 管理员功能页面
+        { path: 'admin/users', name: 'AdminUsers', component: () => import('@/views/Admin/Users.vue'), meta: { title: '用户管理', subtitle: '用户管理', requireAdmin: true } },
+        { path: 'admin/tenants', name: 'AdminTenants', component: () => import('@/views/Admin/Tenants.vue'), meta: { title: '租户管理', subtitle: '租户管理', requireAdmin: true } },
+        { path: 'admin/roles', name: 'AdminRoles', component: () => import('@/views/Admin/Roles.vue'), meta: { title: '角色权限', subtitle: '角色权限', requireAdmin: true } },
+        { path: 'admin/audit', name: 'AdminAudit', component: () => import('@/views/Admin/AuditLog.vue'), meta: { title: '审计日志', subtitle: '审计日志', requireAdmin: true } }
       ]
     },
     { path: '/:pathMatch(.*)*', redirect: '/' }
@@ -38,6 +44,10 @@ router.beforeEach((to, _from, next) => {
   } else if (!store.token) {
     // token 过期/未登录：携带 redirect，登录后回跳原页面
     next({ path: '/login', query: { redirect: to.fullPath } })
+  } else if (to.meta.requireAdmin && !store.user?.role?.includes('admin')) {
+    // v3.2.0 MT-10: 管理员页面权限守卫
+    ElMessage.warning('需要管理员权限')
+    next({ path: '/dashboard' })
   } else {
     next()
   }
