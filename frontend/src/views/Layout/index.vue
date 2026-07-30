@@ -25,7 +25,7 @@ const menus = [
 // v3.2.0 MT-10: 管理员菜单组 (仅 admin 可见)
 const adminMenus = [
   { path: '/admin/users', icon: User, title: '用户管理', subtitle: 'Users' },
-  { path: '/admin/tenants', icon: Folder, title: '租户管理', subtitle: 'Tenants' },
+  { path: '/admin/teams', icon: Folder, title: '团队管理', subtitle: 'Teams' },
   { path: '/admin/roles', icon: EditPen, title: '角色权限', subtitle: 'Roles' },
   { path: '/admin/audit', icon: Odometer, title: '审计日志', subtitle: 'Audit' }
 ]
@@ -172,7 +172,6 @@ const breadcrumbs = computed(() => {
                 <div class="username">{{ userStore.user?.username || '用户' }}</div>
                 <div class="role">
                   {{ userStore.user?.role || 'annotator' }}
-                  <span v-if="userStore.user?.tenant_id" class="tenant-badge">T{{ userStore.user.tenant_id }}</span>
                 </div>
               </div>
               <el-icon class="caret"><ArrowDown /></el-icon>

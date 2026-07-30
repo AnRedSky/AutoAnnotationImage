@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { tenantApi, userApi, datasetApi } from '@/api'
+import { teamApi, userApi, datasetApi } from '@/api'
 import { useUserStore } from '@/stores/user'
 
 const userStore = useUserStore()
-const tenantId = computed(() => userStore.user?.tenant_id || 1)
 
-interface TenantUser {
+interface TeamItem {
+  id: number
+  name: string
+  slug: string
+  my_role: string
+}
+
+interface TeamMemberItem {
   user_id: number
   username: string
   email: string | null
   role: string
-  assigned_at: string | null
+  joined_at: string | null
 }
 
 interface DatasetItem {
   id: number
   name: string
   owner_id: number
+  team_id: number | null
 }
 
 interface UserItem {
@@ -27,46 +34,54 @@ interface UserItem {
   role: string
 }
 
-const tabActive = ref('users')
-const tenantUsers = ref<TenantUser[]>([])
+const tabActive = ref('teams')
+const teams = ref<TeamItem[]>([])
+const teamMembers = ref<TeamMemberItem[]>([])
 const allUsers = ref<UserItem[]>([])
 const datasets = ref<DatasetItem[]>([])
 const loading = ref(false)
+const selectedTeamId = ref<number | undefined>()
 
-// 角色分配
-const assignDialog = ref(false)
-const assignUserId = ref<number | undefined>()
-const assignRole = ref('annotator')
+// 团队成员邀请
+const inviteDialog = ref(false)
+const inviteUserId = ref<number | undefined>()
+const inviteRole = ref('annotator')
 
-// dataset 共享
+// 数据集共享
 const shareDialog = ref(false)
 const shareDatasetId = ref<number | undefined>()
-const shareUserId = ref<number | undefined>()
-const shareRole = ref('viewer')
+const shareTeamId = ref<number | undefined>()
 
-const tenantRoles = [
-  { label: '租户管理员', value: 'tenant_admin' },
+const teamRoles = [
+  { label: '队长', value: 'leader' },
   { label: '标注员', value: 'annotator' },
   { label: '观察者', value: 'viewer' }
 ]
 
-const shareRoles = [
-  { label: '标注员', value: 'annotator' },
-  { label: '观察者', value: 'viewer' }
-]
+const roleLabel = (role: string) => teamRoles.find(r => r.value === role)?.label || role
 
-const roleLabel = (role: string) => tenantRoles.find(r => r.value === role)?.label || role
-
-const loadTenantUsers = async () => {
+const loadTeams = async () => {
   loading.value = true
   try {
-    const res: any = await tenantApi.listUsers(tenantId.value)
-    tenantUsers.value = res.items || []
+    const res: any = await teamApi.list()
+    teams.value = res.items || []
+    if (teams.value.length > 0 && !selectedTeamId.value) {
+      selectedTeamId.value = teams.value[0].id
+      await loadTeamMembers()
+    }
   } catch (e: any) {
-    ElMessage.error('加载租户用户失败: ' + (e?.response?.data?.detail || e?.message))
+    ElMessage.error('加载团队失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
     loading.value = false
   }
+}
+
+const loadTeamMembers = async () => {
+  if (!selectedTeamId.value) return
+  try {
+    const res: any = await teamApi.listMembers(selectedTeamId.value)
+    teamMembers.value = res.items || []
+  } catch {}
 }
 
 const loadAllUsers = async () => {
@@ -83,61 +98,75 @@ const loadDatasets = async () => {
   } catch {}
 }
 
-const onAssignUser = async () => {
-  if (!assignUserId.value) {
+const onTeamChange = () => loadTeamMembers()
+
+const onInvite = async () => {
+  if (!selectedTeamId.value || !inviteUserId.value) {
     ElMessage.warning('请选择用户')
     return
   }
   try {
-    await tenantApi.assignUser(tenantId.value, {
-      user_id: assignUserId.value,
-      role: assignRole.value
+    await teamApi.inviteMember(selectedTeamId.value, {
+      user_id: inviteUserId.value,
+      role: inviteRole.value
     })
-    ElMessage.success('用户分配成功')
-    assignDialog.value = false
-    assignUserId.value = undefined
-    await loadTenantUsers()
+    ElMessage.success('邀请成功')
+    inviteDialog.value = false
+    inviteUserId.value = undefined
+    await loadTeamMembers()
   } catch (e: any) {
-    ElMessage.error('分配失败: ' + (e?.response?.data?.detail || e?.message))
+    ElMessage.error('邀请失败: ' + (e?.response?.data?.detail || e?.message))
   }
 }
 
-const onRemoveUser = async (u: TenantUser) => {
+const onRemoveMember = async (m: TeamMemberItem) => {
+  if (!selectedTeamId.value) return
   try {
-    await ElMessageBox.confirm(`确认从租户移除用户 "${u.username}"？`, '提示', { type: 'warning' })
+    await ElMessageBox.confirm(`确认移除 "${m.username}"？`, '提示', { type: 'warning' })
   } catch { return }
   try {
-    await tenantApi.removeUser(tenantId.value, u.user_id)
+    await teamApi.removeMember(selectedTeamId.value, m.user_id)
     ElMessage.success('移除成功')
-    await loadTenantUsers()
+    await loadTeamMembers()
   } catch (e: any) {
     ElMessage.error('移除失败: ' + (e?.response?.data?.detail || e?.message))
   }
 }
 
 const onShareDataset = async () => {
-  if (!shareDatasetId.value || !shareUserId.value) {
-    ElMessage.warning('请选择数据集和用户')
+  if (!shareDatasetId.value || !shareTeamId.value) {
+    ElMessage.warning('请选择数据集和团队')
     return
   }
   try {
-    await tenantApi.shareDataset(shareDatasetId.value, {
-      user_id: shareUserId.value,
-      role: shareRole.value
-    })
+    await teamApi.shareDataset(shareDatasetId.value, shareTeamId.value)
     ElMessage.success('共享成功')
     shareDialog.value = false
     shareDatasetId.value = undefined
-    shareUserId.value = undefined
+    shareTeamId.value = undefined
+    await loadDatasets()
   } catch (e: any) {
     ElMessage.error('共享失败: ' + (e?.response?.data?.detail || e?.message))
+  }
+}
+
+const onUnshare = async (d: DatasetItem) => {
+  try {
+    await ElMessageBox.confirm(`确认取消共享 "${d.name}"？`, '提示', { type: 'warning' })
+  } catch { return }
+  try {
+    await teamApi.unshareDataset(d.id)
+    ElMessage.success('取消共享成功')
+    await loadDatasets()
+  } catch (e: any) {
+    ElMessage.error('取消共享失败: ' + (e?.response?.data?.detail || e?.message))
   }
 }
 
 const fmtDate = (s: string | null) => s ? new Date(s).toLocaleString('zh-CN') : '-'
 
 onMounted(async () => {
-  await Promise.all([loadTenantUsers(), loadAllUsers(), loadDatasets()])
+  await Promise.all([loadTeams(), loadAllUsers(), loadDatasets()])
 })
 </script>
 
@@ -145,33 +174,36 @@ onMounted(async () => {
   <div class="admin-page">
     <div class="page-header">
       <h2>角色权限</h2>
-      <p>管理租户用户角色和数据集共享</p>
+      <p>管理团队成员角色和数据集共享</p>
     </div>
 
     <el-tabs v-model="tabActive" class="role-tabs">
-      <!-- 租户用户角色 -->
-      <el-tab-pane label="租户用户" name="users">
+      <!-- 团队成员 -->
+      <el-tab-pane label="团队成员" name="teams">
         <el-card shadow="never" class="main-card">
           <div class="card-toolbar">
-            <el-button type="primary" @click="assignDialog = true">分配用户</el-button>
+            <el-select v-model="selectedTeamId" placeholder="选择团队" style="width: 200px" @change="onTeamChange">
+              <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.id" />
+            </el-select>
+            <el-button type="primary" :disabled="!selectedTeamId" @click="inviteDialog = true">邀请成员</el-button>
           </div>
-          <el-table :data="tenantUsers" v-loading="loading" stripe>
+          <el-table :data="teamMembers" v-loading="loading" stripe>
             <el-table-column prop="user_id" label="ID" width="70" />
             <el-table-column prop="username" label="用户名" min-width="120" />
             <el-table-column prop="email" label="邮箱" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">{{ row.email || '-' }}</template>
             </el-table-column>
-            <el-table-column label="角色" width="140">
+            <el-table-column label="角色" width="120">
               <template #default="{ row }">
-                <el-tag size="small">{{ roleLabel(row.role) }}</el-tag>
+                <el-tag :type="row.role === 'leader' ? 'warning' : 'success'" size="small">{{ roleLabel(row.role) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="分配时间" width="170">
-              <template #default="{ row }">{{ fmtDate(row.assigned_at) }}</template>
+            <el-table-column label="加入时间" width="170">
+              <template #default="{ row }">{{ fmtDate(row.joined_at) }}</template>
             </el-table-column>
             <el-table-column label="操作" width="110" fixed="right">
               <template #default="{ row }">
-                <el-button size="small" type="danger" plain @click="onRemoveUser(row)">移除</el-button>
+                <el-button v-if="row.role !== 'leader'" size="small" type="danger" plain @click="onRemoveMember(row)">移除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -182,22 +214,33 @@ onMounted(async () => {
       <el-tab-pane label="数据集共享" name="share">
         <el-card shadow="never" class="main-card">
           <div class="card-toolbar">
-            <el-button type="primary" @click="shareDialog = true">共享数据集</el-button>
+            <el-button type="primary" @click="shareDialog = true">共享给团队</el-button>
           </div>
           <el-table :data="datasets" stripe>
             <el-table-column prop="id" label="ID" width="70" />
             <el-table-column prop="name" label="名称" min-width="160" />
-            <el-table-column prop="owner_id" label="Owner ID" width="100" />
+            <el-table-column prop="owner_id" label="Owner" width="80" />
+            <el-table-column label="团队" width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.team_id" size="small" type="success">已共享</el-tag>
+                <span v-else class="muted">个人</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.team_id" size="small" type="warning" plain @click="onUnshare(row)">取消共享</el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </el-card>
       </el-tab-pane>
     </el-tabs>
 
-    <!-- 分配用户对话框 -->
-    <el-dialog v-model="assignDialog" title="分配用户到租户" width="440px">
+    <!-- 邀请成员对话框 -->
+    <el-dialog v-model="inviteDialog" title="邀请成员" width="440px">
       <el-form label-position="top">
         <el-form-item label="选择用户">
-          <el-select v-model="assignUserId" filterable placeholder="搜索用户名" style="width: 100%">
+          <el-select v-model="inviteUserId" filterable placeholder="搜索用户名" style="width: 100%">
             <el-option
               v-for="u in allUsers"
               :key="u.id"
@@ -207,39 +250,29 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="角色">
-          <el-radio-group v-model="assignRole">
-            <el-radio v-for="r in tenantRoles" :key="r.value" :value="r.value">{{ r.label }}</el-radio>
+          <el-radio-group v-model="inviteRole">
+            <el-radio v-for="r in teamRoles" :key="r.value" :value="r.value">{{ r.label }}</el-radio>
           </el-radio-group>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="assignDialog = false">取消</el-button>
-        <el-button type="primary" @click="onAssignUser">确认</el-button>
+        <el-button @click="inviteDialog = false">取消</el-button>
+        <el-button type="primary" @click="onInvite">确认</el-button>
       </template>
     </el-dialog>
 
     <!-- 共享数据集对话框 -->
-    <el-dialog v-model="shareDialog" title="共享数据集" width="440px">
+    <el-dialog v-model="shareDialog" title="共享数据集给团队" width="440px">
       <el-form label-position="top">
         <el-form-item label="数据集">
           <el-select v-model="shareDatasetId" filterable placeholder="选择数据集" style="width: 100%">
             <el-option v-for="d in datasets" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="共享给">
-          <el-select v-model="shareUserId" filterable placeholder="选择用户" style="width: 100%">
-            <el-option
-              v-for="u in allUsers"
-              :key="u.id"
-              :label="u.username"
-              :value="u.id"
-            />
+        <el-form-item label="共享给团队">
+          <el-select v-model="shareTeamId" filterable placeholder="选择团队" style="width: 100%">
+            <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.id" />
           </el-select>
-        </el-form-item>
-        <el-form-item label="角色">
-          <el-radio-group v-model="shareRole">
-            <el-radio v-for="r in shareRoles" :key="r.value" :value="r.value">{{ r.label }}</el-radio>
-          </el-radio-group>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -256,6 +289,7 @@ onMounted(async () => {
 .page-header h2 { margin: 0 0 4px; font-size: 22px; }
 .page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
 .main-card { border-radius: 12px; }
-.card-toolbar { margin-bottom: 16px; }
+.card-toolbar { margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+.muted { color: var(--text-placeholder); font-size: 12px; }
 .role-tabs :deep(.el-tabs__item) { font-size: 14px; font-weight: 500; }
 </style>

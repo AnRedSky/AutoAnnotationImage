@@ -24,7 +24,7 @@ const router = createRouter({
         { path: 'models', name: 'Models', component: () => import('@/views/Models/index.vue'), meta: { title: '模型管理' } },
         // v3.2.0 MT-10: 管理员功能页面
         { path: 'admin/users', name: 'AdminUsers', component: () => import('@/views/Admin/Users.vue'), meta: { title: '用户管理', subtitle: '用户管理', requireAdmin: true } },
-        { path: 'admin/tenants', name: 'AdminTenants', component: () => import('@/views/Admin/Tenants.vue'), meta: { title: '租户管理', subtitle: '租户管理', requireAdmin: true } },
+        { path: 'admin/teams', name: 'AdminTeams', component: () => import('@/views/Admin/Teams.vue'), meta: { title: '团队管理', subtitle: '团队管理' } },
         { path: 'admin/roles', name: 'AdminRoles', component: () => import('@/views/Admin/Roles.vue'), meta: { title: '角色权限', subtitle: '角色权限', requireAdmin: true } },
         { path: 'admin/audit', name: 'AdminAudit', component: () => import('@/views/Admin/AuditLog.vue'), meta: { title: '审计日志', subtitle: '审计日志', requireAdmin: true } }
       ]

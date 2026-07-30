@@ -31,18 +31,14 @@ const eventTypeTag = (type: string) => {
 const loadLogs = async () => {
   loading.value = true
   try {
-    // 后端暂无 /api/audit/logs 端点; 用 /api/tenants/{tid}/audit 临时替代
-    // 这里先调 /api/auth/me 拿 tenant_id 然后查 (后端需加端点)
-    const res: any = await http.get('/auth/me')
-    const tid = res.tenant_id || 1
+    // 后端暂无 /api/audit/logs 端点; 显示空表 + 提示
     try {
-      const r: any = await http.get(`/tenants/${tid}/audit`, {
+      const r: any = await http.get('/admin/audit-logs', {
         params: { page: page.value, page_size: pageSize.value }
       })
       logs.value = r.items || []
       total.value = r.total || 0
     } catch {
-      // 后端可能还没有 audit 查询端点; 显示空表 + 提示
       logs.value = []
       total.value = 0
       ElMessage.info('审计日志查询端点尚未实现')

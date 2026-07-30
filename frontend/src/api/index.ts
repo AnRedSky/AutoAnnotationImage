@@ -555,23 +555,22 @@ export const exportApiV2 = {
     withToken(`${http.defaults.baseURL}/export/coco-seg/${datasetId}?include_pending=${includePending}`),
 }
 
-// ============== 多租户管理 (v3.2.0 MT-9) ==============
-export const tenantApi = {
-  list: () => http.get('/tenants'),
-  create: (data: { name: string; slug: string; max_users?: number; max_datasets?: number }) =>
-    http.post('/tenants', data),
-  get: (id: number) => http.get(`/tenants/${id}`),
-  updateStatus: (id: number, status: 'active' | 'suspended') =>
-    http.patch(`/tenants/${id}/status`, { status }),
-  listUsers: (id: number) => http.get(`/tenants/${id}/users`),
-  assignUser: (id: number, data: { user_id: number; role?: string }) =>
-    http.post(`/tenants/${id}/users`, data),
-  removeUser: (id: number, userId: number) =>
-    http.delete(`/tenants/${id}/users/${userId}`),
-  shareDataset: (datasetId: number, data: { user_id: number; role?: string }) =>
-    http.post(`/tenants/datasets/${datasetId}/share`, data),
-  unshareDataset: (datasetId: number, userId: number) =>
-    http.delete(`/tenants/datasets/${datasetId}/share/${userId}`),
+// ============== 团队管理 (v3.3.0) ==============
+export const teamApi = {
+  list: () => http.get('/teams'),
+  create: (data: { name: string; slug: string; description?: string; max_members?: number }) =>
+    http.post('/teams', data),
+  get: (id: number) => http.get(`/teams/${id}`),
+  remove: (id: number) => http.delete(`/teams/${id}`),
+  listMembers: (id: number) => http.get(`/teams/${id}/members`),
+  inviteMember: (id: number, data: { user_id: number; role?: string }) =>
+    http.post(`/teams/${id}/members`, data),
+  removeMember: (id: number, userId: number) =>
+    http.delete(`/teams/${id}/members/${userId}`),
+  shareDataset: (datasetId: number, teamId: number) =>
+    http.post(`/teams/datasets/${datasetId}/share`, null, { params: { team_id: teamId } }),
+  unshareDataset: (datasetId: number) =>
+    http.delete(`/teams/datasets/${datasetId}/share`),
 }
 
 // ============== 用户管理 (v3.2.0 MT-10) ==============
