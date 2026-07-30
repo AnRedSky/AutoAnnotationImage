@@ -32,6 +32,8 @@ async def init_db():
     """
     # 必须在 create_all 之前 import models, 避免 Base.metadata 为空导致建不出表
     import app.tasks.model  # noqa: F401
+    import app.tasks.model.dataset_membership  # noqa: F401  (v3.2.0 MT-5)
+    import app.tasks.model.audit_log  # noqa: F401  (v3.2.0 MT-6)
     import app.admin.model  # noqa: F401
     import app.admin.model.tenant  # noqa: F401  (v3.2.0 MT-1: tenant 表)
     import app.admin.model.user_tenant_role  # noqa: F401  (v3.2.0 MT-2: per-tenant 角色)

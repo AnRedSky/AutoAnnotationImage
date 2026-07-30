@@ -26,6 +26,8 @@ from app.database import get_db, Base  # noqa: E402
 from app.admin.model.user import User  # noqa: E402
 from app.admin.model.tenant import Tenant  # noqa: E402  (v3.2.0 MT-1: tenant 表)
 from app.admin.model.user_tenant_role import UserTenantRole  # noqa: E402  (v3.2.0 MT-2)
+from app.tasks.model.dataset_membership import DatasetMembership  # noqa: E402  (v3.2.0 MT-5)
+from app.tasks.model.audit_log import AuditLog  # noqa: E402  (v3.2.0 MT-6)
 from app.middleware.security.security import hash_password  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
