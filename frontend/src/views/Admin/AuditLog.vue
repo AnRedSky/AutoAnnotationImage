@@ -112,9 +112,11 @@ onMounted(loadLogs)
 </template>
 
 <style scoped>
+@import '@/styles/admin.css';
+
 .admin-page { max-width: 1200px; }
 .page-header { margin-bottom: 20px; }
-.page-header h2 { margin: 0 0 4px; font-size: 22px; }
+.page-header h2 { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--text-primary); }
 .page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
 .main-card { border-radius: 12px; }
 .detail-code { font-size: 12px; color: var(--text-secondary); }

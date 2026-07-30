@@ -170,15 +170,33 @@ onMounted(loadProfile)
 </template>
 
 <style scoped>
-.profile-page { max-width: 720px; }
-.page-header { margin-bottom: 20px; }
-.page-header h2 { margin: 0 0 4px; font-size: 22px; }
+@import '@/styles/admin.css';
+
+.profile-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  max-width: 720px;
+}
+.page-header { margin-bottom: 24px; }
+.page-header h2 { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--text-primary); }
 .page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.info-card { border-radius: 12px; margin-bottom: 20px; }
-.card-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; }
+.info-card {
+  border-radius: 12px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border-soft);
+}
+.info-card :deep(.el-card__header) {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+.card-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.card-title :deep(.el-icon) { font-size: 18px; color: var(--brand-primary); }
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
 .info-item { display: flex; flex-direction: column; gap: 4px; }
 .info-label { font-size: 12px; color: var(--text-secondary); }
-.info-value { font-size: 14px; font-weight: 500; }
+.info-value { font-size: 14px; font-weight: 500; color: var(--text-primary); }
 .profile-form { max-width: 400px; }
 </style>

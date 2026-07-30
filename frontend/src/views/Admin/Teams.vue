@@ -381,6 +381,8 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+@import '@/styles/admin.css';
+
 .admin-page { max-width: 1200px; }
 .page-header { margin-bottom: 20px; }
 .page-header h2 { margin: 8px 0 4px; font-size: 22px; }

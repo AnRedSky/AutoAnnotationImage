@@ -4,16 +4,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { userApi } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { Search, Refresh, Plus, Delete, Key } from '@element-plus/icons-vue'
+import '@/styles/admin.css'
 
 const userStore = useUserStore()
 
 interface UserItem {
-  id: number
-  username: string
-  email: string | null
-  role: string
-  is_active: boolean
-  created_at: string | null
+  id: number; username: string; email: string | null; role: string
+  is_active: boolean; created_at: string | null
 }
 
 const allUsers = ref<UserItem[]>([])
@@ -22,16 +19,13 @@ const searchText = ref('')
 const currentPage = ref(1)
 const pageSize = ref(15)
 
-// 角色编辑
 const roleDialog = ref(false)
 const editingUser = ref<UserItem | null>(null)
 const newRole = ref('')
 
-// 创建用户
 const createDialog = ref(false)
 const createForm = ref({ username: '', password: '', email: '', role: 'annotator' })
 
-// 重置密码
 const resetDialog = ref(false)
 const resetUser = ref<UserItem | null>(null)
 const resetPassword = ref('')
@@ -43,131 +37,117 @@ const roles = [
   { label: '观察者', value: 'viewer', desc: '只读权限' }
 ]
 
-const roleTagType = (role: string) => {
-  if (role === 'super_admin') return 'danger'
-  if (role === 'admin') return 'warning'
-  if (role === 'annotator') return 'success'
-  return 'info'
-}
-const roleLabel = (role: string) => roles.find(r => r.value === role)?.label || role
+const roleTagType = (r: string) => r === 'super_admin' ? 'danger' : r === 'admin' ? 'warning' : r === 'annotator' ? 'success' : 'info'
+const roleLabel = (r: string) => roles.find(x => x.value === r)?.label || r
 
 const filteredUsers = computed(() => {
   if (!searchText.value) return allUsers.value
   const q = searchText.value.toLowerCase()
-  return allUsers.value.filter(u =>
-    u.username.toLowerCase().includes(q) ||
-    (u.email || '').toLowerCase().includes(q) ||
-    u.role.toLowerCase().includes(q)
-  )
+  return allUsers.value.filter(u => u.username.toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q) || u.role.toLowerCase().includes(q))
 })
-const pagedUsers = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredUsers.value.slice(start, start + pageSize.value)
-})
+const pagedUsers = computed(() => filteredUsers.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
 
-const isSelf = (userId: number) => userStore.user?.id === userId
-const canManage = (target: UserItem) => {
-  if (isSelf(target.id)) return false
-  if (target.role === 'super_admin' && userStore.user?.role !== 'super_admin') return false
-  return true
-}
+// 统计
+const stats = computed(() => ({
+  total: allUsers.value.length,
+  active: allUsers.value.filter(u => u.is_active).length,
+  admins: allUsers.value.filter(u => u.role.includes('admin')).length,
+  annotators: allUsers.value.filter(u => u.role === 'annotator').length,
+}))
+
+const isSelf = (id: number) => userStore.user?.id === id
+const canManage = (t: UserItem) => !isSelf(t.id) && !(t.role === 'super_admin' && userStore.user?.role !== 'super_admin')
 
 const loadUsers = async () => {
   loading.value = true
-  try {
-    const res: any = await userApi.list()
-    allUsers.value = res.items || []
-  } catch (e: any) {
-    ElMessage.error('加载用户列表失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    loading.value = false
-  }
+  try { const res: any = await userApi.list(); allUsers.value = res.items || [] }
+  catch (e: any) { ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message)) }
+  finally { loading.value = false }
 }
 
-const onToggleActive = async (user: UserItem) => {
-  const action = user.is_active ? '停用' : '激活'
-  try { await ElMessageBox.confirm(`确认${action}用户 "${user.username}"？`, '提示', { type: 'warning' }) } catch { return }
-  try {
-    if (user.is_active) await userApi.deactivate(user.id)
-    else await userApi.activate(user.id)
-    ElMessage.success(`${action}成功`)
-    await loadUsers()
-  } catch (e: any) { ElMessage.error(`${action}失败: ` + (e?.response?.data?.detail || e?.message)) }
+const onToggleActive = async (u: UserItem) => {
+  const a = u.is_active ? '停用' : '激活'
+  try { await ElMessageBox.confirm(`确认${a}用户 "${u.username}"？`, '提示', { type: 'warning' }) } catch { return }
+  try { u.is_active ? await userApi.deactivate(u.id) : await userApi.activate(u.id); ElMessage.success(`${a}成功`); await loadUsers() }
+  catch (e: any) { ElMessage.error(`${a}失败: ` + (e?.response?.data?.detail || e?.message)) }
 }
 
-const onEditRole = (user: UserItem) => {
-  editingUser.value = user; newRole.value = user.role; roleDialog.value = true
-}
+const onEditRole = (u: UserItem) => { editingUser.value = u; newRole.value = u.role; roleDialog.value = true }
 const onSaveRole = async () => {
   if (!editingUser.value) return
-  try {
-    await userApi.changeRole(editingUser.value.id, newRole.value)
-    ElMessage.success('角色修改成功'); roleDialog.value = false; await loadUsers()
-  } catch (e: any) { ElMessage.error('修改失败: ' + (e?.response?.data?.detail || e?.message)) }
+  try { await userApi.changeRole(editingUser.value.id, newRole.value); ElMessage.success('角色修改成功'); roleDialog.value = false; await loadUsers() }
+  catch (e: any) { ElMessage.error('修改失败: ' + (e?.response?.data?.detail || e?.message)) }
 }
 
 const onCreate = async () => {
   if (!createForm.value.username || !createForm.value.password) { ElMessage.warning('用户名和密码必填'); return }
   try {
-    await userApi.create({
-      username: createForm.value.username,
-      password: createForm.value.password,
-      email: createForm.value.email || undefined,
-      role: createForm.value.role
-    })
-    ElMessage.success('用户创建成功')
-    createDialog.value = false
-    createForm.value = { username: '', password: '', email: '', role: 'annotator' }
-    await loadUsers()
+    await userApi.create({ username: createForm.value.username, password: createForm.value.password, email: createForm.value.email || undefined, role: createForm.value.role })
+    ElMessage.success('用户创建成功'); createDialog.value = false
+    createForm.value = { username: '', password: '', email: '', role: 'annotator' }; await loadUsers()
   } catch (e: any) { ElMessage.error('创建失败: ' + (e?.response?.data?.detail || e?.message)) }
 }
 
-const onDelete = async (user: UserItem) => {
-  try { await ElMessageBox.confirm(`确认删除用户 "${user.username}"？此操作不可恢复。`, '危险操作', { type: 'error', confirmButtonText: '确认删除', cancelButtonText: '取消' }) } catch { return }
-  try {
-    await userApi.remove(user.id)
-    ElMessage.success('删除成功'); await loadUsers()
-  } catch (e: any) { ElMessage.error('删除失败: ' + (e?.response?.data?.detail || e?.message)) }
+const onDelete = async (u: UserItem) => {
+  try { await ElMessageBox.confirm(`确认删除用户 "${u.username}"？此操作不可恢复。`, '危险操作', { type: 'error', confirmButtonText: '确认删除' }) } catch { return }
+  try { await userApi.remove(u.id); ElMessage.success('删除成功'); await loadUsers() }
+  catch (e: any) { ElMessage.error('删除失败: ' + (e?.response?.data?.detail || e?.message)) }
 }
 
-const onResetPassword = (user: UserItem) => {
-  resetUser.value = user; resetPassword.value = ''; resetDialog.value = true
-}
+const onResetPassword = (u: UserItem) => { resetUser.value = u; resetPassword.value = ''; resetDialog.value = true }
 const onSaveResetPassword = async () => {
   if (!resetUser.value || !resetPassword.value) { ElMessage.warning('请输入新密码'); return }
-  try {
-    await userApi.resetPassword(resetUser.value.id, resetPassword.value)
-    ElMessage.success('密码重置成功'); resetDialog.value = false
-  } catch (e: any) { ElMessage.error('重置失败: ' + (e?.response?.data?.detail || e?.message)) }
+  try { await userApi.resetPassword(resetUser.value.id, resetPassword.value); ElMessage.success('密码重置成功'); resetDialog.value = false }
+  catch (e: any) { ElMessage.error('重置失败: ' + (e?.response?.data?.detail || e?.message)) }
 }
 
 const fmtDate = (s: string | null) => s ? new Date(s).toLocaleString('zh-CN') : '-'
-
 onMounted(loadUsers)
 </script>
 
 <template>
   <div class="admin-page">
+    <!-- 页头 -->
     <div class="page-header">
-      <h2>用户管理</h2>
-      <p>管理系统用户账号（仅管理员可见）</p>
+      <div class="page-header-left">
+        <h2>用户管理</h2>
+        <p>管理系统用户账号（仅管理员可见）</p>
+      </div>
     </div>
 
+    <!-- 统计卡 -->
+    <div class="stat-row">
+      <div class="stat-card stat-card--brand">
+        <div class="stat-card__num">{{ stats.total }}</div>
+        <div class="stat-card__label">总用户数</div>
+      </div>
+      <div class="stat-card stat-card--success">
+        <div class="stat-card__num">{{ stats.active }}</div>
+        <div class="stat-card__label">活跃用户</div>
+      </div>
+      <div class="stat-card stat-card--warm">
+        <div class="stat-card__num">{{ stats.admins }}</div>
+        <div class="stat-card__label">管理员</div>
+      </div>
+      <div class="stat-card stat-card--purple">
+        <div class="stat-card__num">{{ stats.annotators }}</div>
+        <div class="stat-card__label">标注员</div>
+      </div>
+    </div>
+
+    <!-- 主卡片 -->
     <el-card shadow="never" class="main-card">
       <div class="card-toolbar">
-        <el-input v-model="searchText" placeholder="搜索用户名/邮箱/角色" :prefix-icon="Search" clearable style="width: 300px" @input="currentPage = 1" />
+        <el-input v-model="searchText" placeholder="搜索用户名/邮箱/角色" :prefix-icon="Search" clearable style="width: 280px" @input="currentPage = 1" />
         <el-button :icon="Refresh" circle @click="loadUsers" />
         <el-button type="primary" :icon="Plus" @click="createDialog = true">添加用户</el-button>
         <span class="total-count">共 {{ filteredUsers.length }} 个用户</span>
       </div>
 
-      <el-table :data="pagedUsers" v-loading="loading" stripe style="width: 100%">
+      <el-table :data="pagedUsers" v-loading="loading" stripe class="data-table" style="width: 100%">
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="username" label="用户名" min-width="120">
-          <template #default="{ row }">
-            {{ row.username }}
-            <el-tag v-if="isSelf(row.id)" size="small" type="primary" effect="plain" class="self-tag">我</el-tag>
-          </template>
+          <template #default="{ row }">{{ row.username }}<el-tag v-if="isSelf(row.id)" size="small" type="primary" effect="plain" class="self-tag">我</el-tag></template>
         </el-table-column>
         <el-table-column prop="email" label="邮箱" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ row.email || '-' }}</template>
@@ -198,7 +178,7 @@ onMounted(loadUsers)
 
     <!-- 角色编辑 -->
     <el-dialog v-model="roleDialog" title="修改用户角色" width="480px">
-      <div v-if="editingUser" class="role-dialog-body">
+      <div v-if="editingUser">
         <div class="dialog-row"><span class="dialog-label">用户</span><strong>{{ editingUser.username }}</strong></div>
         <div class="dialog-row"><span class="dialog-label">当前角色</span><el-tag :type="roleTagType(editingUser.role)" size="small">{{ roleLabel(editingUser.role) }}</el-tag></div>
         <el-divider />
@@ -228,8 +208,8 @@ onMounted(loadUsers)
 
     <!-- 重置密码 -->
     <el-dialog v-model="resetDialog" title="重置用户密码" width="440px">
-      <div v-if="resetUser" class="role-dialog-body">
-        <p>用户: <strong>{{ resetUser.username }}</strong></p>
+      <div v-if="resetUser">
+        <div class="dialog-row"><span class="dialog-label">用户</span><strong>{{ resetUser.username }}</strong></div>
         <el-divider />
         <el-input v-model="resetPassword" type="password" show-password placeholder="输入新密码 (至少 6 位)" />
       </div>
@@ -239,21 +219,5 @@ onMounted(loadUsers)
 </template>
 
 <style scoped>
-.admin-page { max-width: 1200px; }
-.page-header { margin-bottom: 20px; }
-.page-header h2 { margin: 0 0 4px; font-size: 22px; }
-.page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.main-card { border-radius: 12px; }
-.card-toolbar { margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
-.total-count { font-size: 13px; color: var(--text-secondary); margin-left: auto; }
-.self-tag { margin-left: 6px; }
-.pager { margin-top: 16px; display: flex; justify-content: flex-end; }
-.role-dialog-body { padding: 0 4px; }
-.dialog-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
-.dialog-label { color: var(--text-secondary); font-size: 13px; width: 70px; }
-.role-radio-group { display: flex; flex-direction: column; gap: 12px; }
-.role-radio { display: flex; align-items: flex-start; height: auto; }
-.role-info { display: flex; flex-direction: column; }
-.role-name { font-weight: 500; font-size: 14px; }
-.role-desc { color: var(--text-placeholder); font-size: 12px; margin-top: 2px; }
+/* admin.css 已通过 @import 加载, 这里只放页面特有样式 */
 </style>
