@@ -68,7 +68,7 @@ onMounted(loadLogs)
     </div>
 
     <el-card shadow="never" class="main-card">
-      <el-table :data="logs" v-loading="loading" stripe style="width: 100%">
+      <el-table :data="logs" v-loading="loading" stripe class="data-table" style="width: 100%">
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="user_id" label="用户ID" width="80" />
         <el-table-column label="事件类型" width="180">
@@ -114,11 +114,5 @@ onMounted(loadLogs)
 <style scoped>
 @import '@/styles/admin.css';
 
-.admin-page { max-width: 1200px; }
-.page-header { margin-bottom: 20px; }
-.page-header h2 { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--text-primary); }
-.page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.main-card { border-radius: 12px; }
 .detail-code { font-size: 12px; color: var(--text-secondary); }
-.pager { margin-top: 16px; display: flex; justify-content: flex-end; }
 </style>

@@ -173,6 +173,7 @@ onMounted(loadProfile)
 @import '@/styles/admin.css';
 
 .profile-page {
+  padding: 16px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -180,8 +181,6 @@ onMounted(loadProfile)
   max-width: 720px;
 }
 .page-header { margin-bottom: 24px; }
-.page-header h2 { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--text-primary); }
-.page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
 .info-card {
   border-radius: 12px;
   margin-bottom: 20px;

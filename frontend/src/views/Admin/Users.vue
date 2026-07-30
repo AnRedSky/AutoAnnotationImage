@@ -107,14 +107,6 @@ onMounted(loadUsers)
 
 <template>
   <div class="admin-page">
-    <!-- 页头 -->
-    <div class="page-header">
-      <div class="page-header-left">
-        <h2>用户管理</h2>
-        <p>管理系统用户账号（仅管理员可见）</p>
-      </div>
-    </div>
-
     <!-- 统计卡 -->
     <div class="stat-row">
       <div class="stat-card stat-card--brand">
@@ -135,6 +127,14 @@ onMounted(loadUsers)
       </div>
     </div>
 
+    <!-- 页头 -->
+    <div class="page-header">
+      <div class="page-header-left">
+        <h2>用户管理 <span class="subtitle">Users</span></h2>
+        <p>管理系统用户账号（仅管理员可见）</p>
+      </div>
+    </div>
+
     <!-- 主卡片 -->
     <el-card shadow="never" class="main-card">
       <div class="card-toolbar">
@@ -144,7 +144,7 @@ onMounted(loadUsers)
         <span class="total-count">共 {{ filteredUsers.length }} 个用户</span>
       </div>
 
-      <el-table :data="pagedUsers" v-loading="loading" stripe class="data-table" style="width: 100%">
+      <el-table :data="pagedUsers" v-loading="loading" stripe class="data-table">
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="username" label="用户名" min-width="120">
           <template #default="{ row }">{{ row.username }}<el-tag v-if="isSelf(row.id)" size="small" type="primary" effect="plain" class="self-tag">我</el-tag></template>
@@ -219,5 +219,5 @@ onMounted(loadUsers)
 </template>
 
 <style scoped>
-/* admin.css 已通过 @import 加载, 这里只放页面特有样式 */
+/* admin.css 已通过 @import 加载 */
 </style>

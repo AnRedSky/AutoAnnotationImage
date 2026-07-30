@@ -1,102 +1,117 @@
 /**
  * Admin pages shared styles (v3.3.0)
- * 统一用户管理 / 团队管理 / 审计日志 / 个人中心的页面布局
- * 在各页面 <style> 中 @import 或直接用 class
+ * 布局对齐 Training 页面标杆:
+ * - page: flex column, height 100%, padding 16px
+ * - table-wrapper: flex:1, overflow auto, border+radius, min-height 420px
+ * - th: bg-soft, cell padding 8px
+ * - pager: sticky bottom, border-top, z-index 5
  */
 
-/* ============ 页面 flex 布局 (与 Datasets 对齐) ============ */
+/* ============ 页面 flex 布局 (对齐 Training) ============ */
 .admin-page {
+  padding: 16px;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  max-width: 1280px;
 }
 
-/* ============ 页头 ============ */
+/* ============ 页头 (对齐 Training) ============ */
 .page-header {
-  margin-bottom: 20px;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
+  margin-bottom: 16px;
   gap: 16px;
   flex-shrink: 0;
 }
 .page-header-left { flex: 1; min-width: 0; }
 .page-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 4px;
   font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+}
+.page-header h2 .subtitle {
+  color: var(--text-placeholder);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
 }
 .page-header p {
   margin: 0;
-  color: var(--text-secondary);
   font-size: 13px;
+  color: var(--text-secondary);
   line-height: 1.5;
 }
 
-/* ============ 统计卡 (页头下方) ============ */
+/* ============ 统计卡 (对齐 TrainingStatsRow) ============ */
 .stat-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
   flex-shrink: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
 }
 .stat-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md, 10px);
-  padding: 16px 20px;
   position: relative;
   overflow: hidden;
+  border-radius: var(--radius-lg, 12px) !important;
+  background: #fff !important;
+  border: 1px solid var(--border-soft);
+  padding: 20px 22px;
 }
 .stat-card::before {
   content: '';
   position: absolute;
-  inset: 0 0 auto 0;
+  top: 0; left: 0; right: 0;
   height: 3px;
   opacity: 0.85;
 }
 .stat-card--brand::before { background: var(--gradient-brand); }
 .stat-card--success::before { background: var(--gradient-success); }
-.stat-card--warm::before { background: var(--gradient-warn); }
+.stat-card--warm::before { background: var(--gradient-warm); }
 .stat-card--purple::before { background: var(--gradient-purple); }
 .stat-card__num {
-  font-size: 28px;
-  font-weight: 700;
+  font-size: 26px;
+  font-weight: 600;
   line-height: 1.1;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
 .stat-card__label {
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-secondary);
-  margin-top: 4px;
+  margin-top: 6px;
 }
 
-/* ============ 主卡片 ============ */
+/* ============ 主卡片 (对齐 Training 的 table-wrapper) ============ */
 .main-card {
-  border-radius: 12px;
   flex: 1 1 0;
-  min-height: 0;
+  min-height: 420px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md, 10px);
+  background: #fff;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .main-card :deep(.el-card__body) {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  padding: 16px;
 }
 
 /* ============ 工具栏 ============ */
 .card-toolbar {
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -109,20 +124,38 @@
   margin-left: auto;
 }
 
-/* ============ 表格 ============ */
+/* ============ 表格 (对齐 TrainingJobsTable) ============ */
 .data-table {
   flex: 1 1 0;
   min-height: 0;
+  height: 100% !important;
+  width: 100% !important;
+  font-size: 13px;
+}
+.data-table :deep(.el-table) {
+  height: 100% !important;
+}
+.data-table :deep(.el-table .el-table__cell) {
+  padding: 8px 0 !important;
+}
+.data-table :deep(.el-table th.el-table__cell) {
+  font-size: 13px !important;
+  font-weight: 600;
+  background: var(--bg-soft) !important;
 }
 
-/* ============ 分页栏 ============ */
+/* ============ 分页栏 (对齐 Training 的 .pager) ============ */
 .pager {
   flex-shrink: 0;
   margin-top: 12px;
   padding: 8px 0;
   display: flex;
   justify-content: flex-end;
+  background: #fff;
   border-top: 1px solid var(--border-soft);
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
 }
 
 /* ============ 空状态 ============ */
@@ -155,7 +188,10 @@
 .dialog-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
 .dialog-label { color: var(--text-secondary); font-size: 13px; width: 70px; }
 
-/* ============ 详情视图返回按钮 ============ */
-.back-btn {
-  margin-bottom: 12px;
+/* ============ 返回按钮 (详情视图) ============ */
+.back-btn { margin-bottom: 12px; }
+
+/* ============ 响应式 (小屏统计卡 2 列) ============ */
+@media (max-width: 768px) {
+  .stat-row { grid-template-columns: repeat(2, 1fr); }
 }

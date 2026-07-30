@@ -227,7 +227,7 @@ onMounted(async () => {
           <el-button type="primary" :icon="Plus" @click="createDialog = true">创建团队</el-button>
         </div>
 
-        <el-table :data="teams" v-loading="loading" stripe style="width: 100%">
+        <el-table :data="teams" v-loading="loading" stripe class="data-table" style="width: 100%">
           <el-table-column prop="id" label="ID" width="70" />
           <el-table-column prop="name" label="名称" min-width="140" />
           <el-table-column prop="slug" label="短标识" min-width="120">
@@ -262,7 +262,7 @@ onMounted(async () => {
     <template v-if="view === 'detail' && selectedTeam">
       <div class="page-header">
         <el-button :icon="ArrowLeft" text @click="onBackToList">返回团队列表</el-button>
-        <h2>{{ selectedTeam.name }} <span class="slug-badge">{{ selectedTeam.slug }}</span></h2>
+      <h2>{{ selectedTeam.name }} <span class="slug-badge">{{ selectedTeam.slug }}</span></h2>
         <p>{{ selectedTeam.description || '无描述' }} · 我的角色: {{ roleLabel(selectedTeam.my_role) }}</p>
       </div>
 
@@ -277,7 +277,7 @@ onMounted(async () => {
           >邀请成员</el-button>
         </div>
 
-        <el-table :data="teamMembers" v-loading="memberLoading" stripe>
+        <el-table :data="teamMembers" v-loading="memberLoading" stripe class="data-table">
           <el-table-column prop="user_id" label="ID" width="70" />
           <el-table-column prop="username" label="用户名" min-width="120" />
           <el-table-column prop="email" label="邮箱" min-width="180" show-overflow-tooltip>
@@ -383,25 +383,6 @@ onMounted(async () => {
 <style scoped>
 @import '@/styles/admin.css';
 
-.admin-page { max-width: 1200px; }
-.page-header { margin-bottom: 20px; }
-.page-header h2 { margin: 8px 0 4px; font-size: 22px; }
-.page-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.main-card { border-radius: 12px; }
-.card-toolbar { margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+/* Teams.vue 特有样式 */
 .member-count { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
-.slug-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 6px;
-  background: var(--border-soft);
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--text-secondary);
-}
-.role-radio-group { display: flex; flex-direction: column; gap: 12px; }
-.role-radio { display: flex; align-items: flex-start; height: auto; }
-.role-name { font-weight: 500; }
-.role-desc { color: var(--text-placeholder); font-size: 12px; margin-left: 8px; }
-.role-dialog-body p { margin: 8px 0; }
 </style>
