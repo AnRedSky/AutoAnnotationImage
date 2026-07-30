@@ -37,12 +37,13 @@ def test_workers_registered_in_app():
     from app.tasks.workers.celery_app import celery_app
     task_names = set(celery_app.tasks.keys())
     # 关键: 分割任务必须注册
-    seg_train = "app.tasks.workers.segmentation.train_segmentation_task"
-    seg_auto = "app.tasks.workers.segmentation.auto_annotate_segmentation_task"
+    # v3.0.0 Stage S5/S6 后: 拆到 segmentation/{train,auto_annotate} 子包
+    seg_train = "app.tasks.workers.segmentation.train.train_segmentation_task"
+    seg_auto = "app.tasks.workers.segmentation.auto_annotate.auto_annotate_segmentation_task"
     assert seg_train in task_names, f"{seg_train} not registered"
     assert seg_auto in task_names, f"{seg_auto} not registered"
-    # 检测任务也应注册
-    det_train = "app.tasks.workers.detection.train_detection_task"
+    # 检测任务也应注册 (v3.0.0 同样拆到 detection/{train,auto_annotate} 子包)
+    det_train = "app.tasks.workers.detection.train.train_detection_task"
     assert det_train in task_names, f"{det_train} not registered"
 
 
@@ -137,7 +138,8 @@ def test_train_segmentation_task_is_callable(celery_eager):
 
     # 只验证 task 对象存在, 参数签名正确, 不实际执行 (避免 DB 依赖)
     assert callable(train_segmentation_task)
-    assert train_segmentation_task.name == "app.tasks.workers.segmentation.train_segmentation_task"
+    # v3.0.0 Stage S5/S6 后: task 在 segmentation.train 子包
+    assert train_segmentation_task.name == "app.tasks.workers.segmentation.train.train_segmentation_task"
     # 验证参数签名包含 dataset_id / user_id (从源码注释)
     import inspect
     sig = inspect.signature(train_segmentation_task.run)
@@ -155,8 +157,9 @@ def test_auto_annotate_segmentation_task_is_callable(celery_eager):
     from app.tasks.workers.segmentation import auto_annotate_segmentation_task
 
     assert callable(auto_annotate_segmentation_task)
+    # v3.0.0 Stage S5/S6 后: task 在 segmentation.auto_annotate 子包
     assert auto_annotate_segmentation_task.name == (
-        "app.tasks.workers.segmentation.auto_annotate_segmentation_task"
+        "app.tasks.workers.segmentation.auto_annotate.auto_annotate_segmentation_task"
     )
     import inspect
     sig = inspect.signature(auto_annotate_segmentation_task.run)
