@@ -19,13 +19,13 @@ const menus = [
   { path: '/datasets', icon: Folder, title: '数据集', subtitle: 'Datasets' },
   { path: '/annotate', icon: EditPen, title: '标注工作台', subtitle: 'Annotate' },
   { path: '/models', icon: Grid, title: '模型版本', subtitle: 'Models' },
-  { path: '/training', icon: Promotion, title: '训练任务', subtitle: 'Training' }
+  { path: '/training', icon: Promotion, title: '训练任务', subtitle: 'Training' },
+  { path: '/teams', icon: User, title: '团队管理', subtitle: 'Teams' }
 ]
 
-// v3.2.0 MT-10: 管理员菜单组 (仅 admin 可见)
+// v3.3.0: 管理员菜单组 (仅 admin 可见)
 const adminMenus = [
   { path: '/admin/users', icon: User, title: '用户管理', subtitle: 'Users' },
-  { path: '/admin/teams', icon: Folder, title: '团队管理', subtitle: 'Teams' },
   { path: '/admin/roles', icon: EditPen, title: '角色权限', subtitle: 'Roles' },
   { path: '/admin/audit', icon: Odometer, title: '审计日志', subtitle: 'Audit' }
 ]

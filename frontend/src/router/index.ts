@@ -22,9 +22,10 @@ const router = createRouter({
         { path: 'annotate/:datasetId', name: 'AnnotateWithDs', component: () => import('@/views/Annotate/index.vue'), meta: { title: '人工标注' } },
         { path: 'training', name: 'Training', component: () => import('@/views/Training/index.vue'), meta: { title: '模型训练' } },
         { path: 'models', name: 'Models', component: () => import('@/views/Models/index.vue'), meta: { title: '模型管理' } },
-        // v3.2.0 MT-10: 管理员功能页面
+        // v3.3.0: 团队管理 (全部用户可见)
+        { path: 'teams', name: 'Teams', component: () => import('@/views/Admin/Teams.vue'), meta: { title: '团队管理', subtitle: '团队管理' } },
+        // v3.3.0: 管理员功能页面 (仅 admin 可见)
         { path: 'admin/users', name: 'AdminUsers', component: () => import('@/views/Admin/Users.vue'), meta: { title: '用户管理', subtitle: '用户管理', requireAdmin: true } },
-        { path: 'admin/teams', name: 'AdminTeams', component: () => import('@/views/Admin/Teams.vue'), meta: { title: '团队管理', subtitle: '团队管理' } },
         { path: 'admin/roles', name: 'AdminRoles', component: () => import('@/views/Admin/Roles.vue'), meta: { title: '角色权限', subtitle: '角色权限', requireAdmin: true } },
         { path: 'admin/audit', name: 'AdminAudit', component: () => import('@/views/Admin/AuditLog.vue'), meta: { title: '审计日志', subtitle: '审计日志', requireAdmin: true } }
       ]
