@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { User, Lock, Message, Promotion, Picture, Lightning } from '@element-plus/icons-vue'
 import { authApi } from '@/api'
-import { useUserStore } from '@/stores/user'
+import { useUserStore, parseTenantFromToken } from '@/stores/user'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -26,14 +26,17 @@ const onLogin = async () => {
     const tk = res.access_token
     if (!tk) throw new Error('未获取到 token')
     // token 统一由 store 管理（setAuth 同步写入 localStorage['token']）
+    // v3.2.0 MT-9: 从 JWT 解析 tenant_id
+    const tenantId = parseTenantFromToken(tk)
     try {
       const me: any = await authApi.me()
-      userStore.setAuth(tk, { id: me.id, username: me.username, role: me.role })
+      userStore.setAuth(tk, { id: me.id, username: me.username, role: me.role, tenant_id: tenantId })
     } catch {
       userStore.setAuth(tk, {
         id: res.user_id,
         username: loginForm.username,
-        role: 'annotator'
+        role: 'annotator',
+        tenant_id: tenantId
       })
     }
     ElMessage.success('登录成功')

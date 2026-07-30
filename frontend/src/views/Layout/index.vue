@@ -143,7 +143,10 @@ const breadcrumbs = computed(() => {
               </el-avatar>
               <div class="user-info">
                 <div class="username">{{ userStore.user?.username || '用户' }}</div>
-                <div class="role">{{ userStore.user?.role || 'annotator' }}</div>
+                <div class="role">
+                  {{ userStore.user?.role || 'annotator' }}
+                  <span v-if="userStore.user?.tenant_id" class="tenant-badge">T{{ userStore.user.tenant_id }}</span>
+                </div>
               </div>
               <el-icon class="caret"><ArrowDown /></el-icon>
             </div>
@@ -388,6 +391,18 @@ const breadcrumbs = computed(() => {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+.tenant-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--brand-primary);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
 .caret { color: var(--text-placeholder); font-size: 12px; }
 
 /* ============ 主区 ============ */

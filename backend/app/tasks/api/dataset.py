@@ -170,6 +170,14 @@ async def delete_dataset(
     await DatasetService.assert_can_delete(db, dataset)
 
     counts = await DatasetService.cascade_delete(db, dataset)
+
+    # MT-8: 审计日志
+    from app.tasks.service.audit_service import log_audit
+    await log_audit(db, user_id=current_user.id, event_type="dataset_deleted",
+                    resource_type="dataset", resource_id=dataset_id,
+                    detail={"name": dataset.name, "cascade_counts": counts})
+    await db.commit()
+
     return {
         "success": True,
         "deleted_id": dataset_id,

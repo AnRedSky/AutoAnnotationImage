@@ -554,3 +554,22 @@ export const exportApiV2 = {
   cocoSeg: (datasetId: number, includePending = false) =>
     withToken(`${http.defaults.baseURL}/export/coco-seg/${datasetId}?include_pending=${includePending}`),
 }
+
+// ============== 多租户管理 (v3.2.0 MT-9) ==============
+export const tenantApi = {
+  list: () => http.get('/tenants'),
+  create: (data: { name: string; slug: string; max_users?: number; max_datasets?: number }) =>
+    http.post('/tenants', data),
+  get: (id: number) => http.get(`/tenants/${id}`),
+  updateStatus: (id: number, status: 'active' | 'suspended') =>
+    http.patch(`/tenants/${id}/status`, { status }),
+  listUsers: (id: number) => http.get(`/tenants/${id}/users`),
+  assignUser: (id: number, data: { user_id: number; role?: string }) =>
+    http.post(`/tenants/${id}/users`, data),
+  removeUser: (id: number, userId: number) =>
+    http.delete(`/tenants/${id}/users/${userId}`),
+  shareDataset: (datasetId: number, data: { user_id: number; role?: string }) =>
+    http.post(`/tenants/datasets/${datasetId}/share`, data),
+  unshareDataset: (datasetId: number, userId: number) =>
+    http.delete(`/tenants/datasets/${datasetId}/share/${userId}`),
+}

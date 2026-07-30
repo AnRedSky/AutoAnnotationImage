@@ -223,6 +223,15 @@ async def start_training(
         learning_rate=learning_rate,
         pretrained_model_path=pretrained_model_path,
     )
+
+    # MT-8: 审计日志
+    from app.tasks.service.audit_service import log_audit
+    await log_audit(db, user_id=current_user.id, event_type="training_started",
+                    resource_type="training_job", resource_id=result.get("job_id"),
+                    detail={"dataset_id": dataset_id, "base_model": base_model,
+                            "epochs": epochs, "model_name": model_name})
+    await db.commit()
+
     return TrainStartResponse(**result)
 
 

@@ -15,10 +15,26 @@ export interface UserInfo {
   id: number
   username: string
   role: string
+  tenant_id: number  // v3.2.0 MT-9: 多租户
 }
 
 /** token 在 localStorage 中的唯一 key */
 export const TOKEN_KEY = 'token'
+
+/**
+ * 从 JWT payload 解析 tenant_id (v3.2.0 MT-9)
+ * JWT 格式: header.payload.signature, payload 是 base64url JSON
+ */
+export function parseTenantFromToken(token: string): number {
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2) return 1
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+    return payload.tenant_id || 1
+  } catch {
+    return 1
+  }
+}
 
 export const useUserStore = defineStore('user', () => {
   const token = ref<string | null>(localStorage.getItem(TOKEN_KEY))
