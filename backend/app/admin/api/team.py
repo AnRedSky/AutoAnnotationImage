@@ -6,11 +6,17 @@ Team Management API (v3.3.0)
   - GET    /api/teams              列出我的团队
   - POST   /api/teams              创建团队 (任何用户)
   - GET    /api/teams/{id}         团队详情
-  - DELETE /api/teams/{id}         删除团队 (仅队长)
+  - DELETE /api/teams/{id}         删除团队 (仅 manager/owner)
   - GET    /api/teams/{id}/members  团队成员列表
-  - POST   /api/teams/{id}/members  邀请成员 (仅队长)
-  - DELETE /api/teams/{id}/members/{uid}  移除成员 (仅队长)
-  - POST   /api/datasets/{id}/share  把数据集共享给团队 (仅 owner)
+  - POST   /api/teams/{id}/members  邀请成员 (仅 manager/admin)
+  - DELETE /api/teams/{id}/members/{uid}  移除成员 (仅 manager/admin)
+  - POST   /api/datasets/{id}/share  把数据集共享给团队 (仅 owner/manager)
+  - DELETE /api/datasets/{id}/share  取消共享 (仅 owner/manager)
+
+角色:
+  - manager (可管理): 管理成员 + 配置数据集权限 + 编辑标注
+  - editor (可编辑): 可对共享数据集进行标注
+  - viewer (仅阅读): 只读
 """
 from typing import Optional
 
@@ -22,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.admin.model.user import User
 from app.tasks.model.team import Team
-from app.tasks.model.team_member import TeamMember, TEAM_ROLES
+from app.tasks.model.team_member import TeamMember, TEAM_ROLES, WRITE_ROLES
 from app.tasks.model.dataset import Dataset
 from app.middleware.http.auth import get_current_user
 
@@ -37,10 +43,48 @@ class TeamCreate(BaseModel):
     description: Optional[str] = None
     max_members: int = 20
 
-
 class MemberInvite(BaseModel):
     user_id: int
-    role: str = "annotator"
+    role: str = "editor"  # manager / editor / viewer
+
+class MemberRoleUpdate(BaseModel):
+    role: str  # manager / editor / viewer
+
+
+# ============== Helper: 权限检查 ==============
+
+async def _get_member_or_403(db: AsyncSession, team_id: int, user_id: int) -> TeamMember:
+    """查 TeamMember, 不存在则 403."""
+    result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(403, "无权限: 非团队成员")
+    return member
+
+
+async def _assert_can_manage(db: AsyncSession, team: Team, user: User) -> TeamMember:
+    """要求可管理权限 (manager) 或 admin 或 owner."""
+    if user.is_admin() or team.owner_id == user.id:
+        # admin/owner 自动有 manager 权限
+        # 但仍需返回 member 对象 (owner 可能不在 team_member 表里)
+        result = await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team.id,
+                TeamMember.user_id == user.id,
+            )
+        )
+        return result.scalar_one_or_none() or TeamMember(
+            team_id=team.id, user_id=user.id, role="manager"
+        )
+    member = await _get_member_or_403(db, team.id, user.id)
+    if not member.can_manage():
+        raise HTTPException(403, "无权限: 需要「可管理」角色")
+    return member
 
 
 # ============== Team CRUD ==============
@@ -82,7 +126,6 @@ async def create_team(
     current_user: User = Depends(get_current_user),
 ):
     """创建团队 (任何已登录用户)."""
-    # slug 唯一检查
     existing = await db.execute(select(Team).where(Team.slug == body.slug))
     if existing.scalar_one_or_none():
         raise HTTPException(409, f"Team slug '{body.slug}' already exists")
@@ -97,11 +140,11 @@ async def create_team(
     db.add(team)
     await db.flush()
 
-    # 创建者自动加入为 leader
+    # 创建者自动加入为 manager
     member = TeamMember(
         team_id=team.id,
         user_id=current_user.id,
-        role="leader",
+        role="manager",
     )
     db.add(member)
     await db.commit()
@@ -119,17 +162,8 @@ async def get_team(
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-
-    # 权限: admin 或团队成员
     if not current_user.is_admin():
-        tm = await db.execute(
-            select(TeamMember).where(
-                TeamMember.team_id == team_id,
-                TeamMember.user_id == current_user.id,
-            )
-        )
-        if not tm.scalar_one_or_none():
-            raise HTTPException(403, "无权限查看此团队")
+        await _get_member_or_403(db, team_id, current_user.id)
 
     return {
         "id": team.id,
@@ -148,12 +182,12 @@ async def delete_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """删除团队 (仅队长或 admin)."""
+    """删除团队 (仅 owner 或 admin)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     if not current_user.is_admin() and team.owner_id != current_user.id:
-        raise HTTPException(403, "仅队长可删除团队")
+        raise HTTPException(403, "仅创建者可删除团队")
 
     await db.delete(team)
     await db.commit()
@@ -173,14 +207,7 @@ async def list_members(
     if not team:
         raise HTTPException(404, "Team not found")
     if not current_user.is_admin():
-        tm = await db.execute(
-            select(TeamMember).where(
-                TeamMember.team_id == team_id,
-                TeamMember.user_id == current_user.id,
-            )
-        )
-        if not tm.scalar_one_or_none():
-            raise HTTPException(403, "无权限查看此团队")
+        await _get_member_or_403(db, team_id, current_user.id)
 
     result = await db.execute(
         select(TeamMember, User)
@@ -210,15 +237,14 @@ async def invite_member(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """邀请成员加入团队 (仅队长或 admin)."""
+    """邀请成员 (仅 manager/admin/owner)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-    if not current_user.is_admin() and team.owner_id != current_user.id:
-        raise HTTPException(403, "仅队长可邀请成员")
+    await _assert_can_manage(db, team, current_user)
 
     if body.role not in TEAM_ROLES:
-        raise HTTPException(400, f"Invalid role: {body.role}")
+        raise HTTPException(400, f"无效角色: {body.role}, 可选: {TEAM_ROLES}")
 
     user = await db.get(User, body.user_id)
     if not user:
@@ -232,14 +258,14 @@ async def invite_member(
         )
     )
     if existing.scalar_one_or_none():
-        raise HTTPException(409, "User already in this team")
+        raise HTTPException(409, "用户已在团队中")
 
-    # 配额检查
+    # 配额
     count_result = await db.execute(
         select(TeamMember).where(TeamMember.team_id == team_id)
     )
     if len(count_result.scalars().all()) >= team.max_members:
-        raise HTTPException(400, f"Team is full (max {team.max_members})")
+        raise HTTPException(400, f"团队已满 (上限 {team.max_members})")
 
     member = TeamMember(
         team_id=team_id,
@@ -251,21 +277,26 @@ async def invite_member(
     return {"team_id": team_id, "user_id": body.user_id, "role": body.role}
 
 
-@router.delete("/{team_id}/members/{user_id}")
-async def remove_member(
+@router.put("/{team_id}/members/{user_id}")
+async def update_member_role(
     team_id: int,
     user_id: int,
+    body: MemberRoleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """移除成员 (仅队长或 admin; 队长不能被移除)."""
+    """修改成员角色 (仅 manager/admin/owner)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-    if not current_user.is_admin() and team.owner_id != current_user.id:
-        raise HTTPException(403, "仅队长可移除成员")
-    if user_id == team.owner_id:
-        raise HTTPException(400, "Cannot remove team owner")
+    await _assert_can_manage(db, team, current_user)
+
+    if body.role not in TEAM_ROLES:
+        raise HTTPException(400, f"无效角色: {body.role}")
+
+    # owner 不能被降级
+    if user_id == team.owner_id and body.role != "manager":
+        raise HTTPException(400, "创建者必须保持「可管理」角色")
 
     result = await db.execute(
         select(TeamMember).where(
@@ -275,11 +306,42 @@ async def remove_member(
     )
     member = result.scalar_one_or_none()
     if not member:
-        raise HTTPException(404, "Member not found")
+        raise HTTPException(404, "成员不存在")
+
+    member.role = body.role
+    await db.commit()
+    return {"team_id": team_id, "user_id": user_id, "role": member.role}
+
+
+@router.delete("/{team_id}/members/{user_id}")
+async def remove_member(
+    team_id: int,
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """移除成员 (仅 manager/admin/owner; owner 不能被移除)."""
+    team = await db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    await _assert_can_manage(db, team, current_user)
+
+    if user_id == team.owner_id:
+        raise HTTPException(400, "不能移除团队创建者")
+
+    result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(404, "成员不存在")
 
     await db.delete(member)
     await db.commit()
-    return {"success": True, "detail": f"User {user_id} removed from team {team_id}"}
+    return {"success": True, "detail": f"用户 {user_id} 已从团队 {team_id} 移除"}
 
 
 # ============== 数据集共享 ==============

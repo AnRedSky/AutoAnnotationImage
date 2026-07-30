@@ -56,20 +56,20 @@ const inviteRole = ref('annotator')
 // 改成员角色
 const roleDialog = ref(false)
 const editingMember = ref<TeamMemberItem | null>(null)
-const editMemberRole = ref('annotator')
+const editMemberRole = ref('editor')
 
 const teamRoles = [
-  { label: '队长', value: 'leader', desc: '管理成员 + 编辑数据集' },
-  { label: '标注员', value: 'annotator', desc: '可标注共享数据集' },
-  { label: '观察者', value: 'viewer', desc: '只读' }
+  { label: '可管理', value: 'manager', desc: '管理成员 + 配置数据集权限 + 编辑标注' },
+  { label: '可编辑', value: 'editor', desc: '可对共享数据集进行标注' },
+  { label: '仅阅读', value: 'viewer', desc: '只读' }
 ]
 
 const roleLabel = (role: string) => teamRoles.find(r => r.value === role)?.label || role
-const roleTagType = (role: string) => role === 'leader' ? 'warning' : role === 'annotator' ? 'success' : 'info'
+const roleTagType = (role: string) => role === 'manager' ? 'warning' : role === 'editor' ? 'success' : 'info'
 
 const canManage = computed(() => {
   if (!selectedTeam.value) return false
-  return selectedTeam.value.my_role === 'leader' || userStore.user?.role?.includes('admin') === true
+  return selectedTeam.value.my_role === 'manager' || userStore.user?.role?.includes('admin') === true
 })
 
 const fmtDate = (s: string | null) => s ? new Date(s).toLocaleString('zh-CN') : '-'
@@ -192,13 +192,8 @@ const onEditMemberRole = (m: TeamMemberItem) => {
 
 const onSaveMemberRole = async () => {
   if (!selectedTeam.value || !editingMember.value) return
-  // 先移除再重新邀请 (后端无 update 端点)
   try {
-    await teamApi.removeMember(selectedTeam.value.id, editingMember.value.user_id)
-    await teamApi.inviteMember(selectedTeam.value.id, {
-      user_id: editingMember.value.user_id,
-      role: editMemberRole.value
-    })
+    await teamApi.updateMemberRole(selectedTeam.value.id, editingMember.value.user_id, editMemberRole.value)
     ElMessage.success('角色修改成功')
     roleDialog.value = false
     await loadTeamMembers()
@@ -251,7 +246,7 @@ onMounted(async () => {
             <template #default="{ row }">
               <el-button size="small" type="primary" plain @click="onEnterTeam(row)">进入管理</el-button>
               <el-button
-                v-if="row.my_role === 'leader'"
+                v-if="row.my_role === 'manager'"
                 size="small" type="danger" plain :icon="Delete"
                 @click="onDelete(row)"
               >删除</el-button>
@@ -299,12 +294,12 @@ onMounted(async () => {
           <el-table-column label="操作" width="180" fixed="right" v-if="canManage">
             <template #default="{ row }">
               <el-button
-                v-if="row.role !== 'leader'"
+                v-if="row.role !== 'manager'"
                 size="small" :icon="Setting"
                 @click="onEditMemberRole(row)"
               >改角色</el-button>
               <el-button
-                v-if="row.role !== 'leader'"
+                v-if="row.role !== 'manager'"
                 size="small" type="danger" plain
                 @click="onRemoveMember(row)"
               >移除</el-button>

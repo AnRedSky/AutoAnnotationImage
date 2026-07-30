@@ -565,6 +565,8 @@ export const teamApi = {
   listMembers: (id: number) => http.get(`/teams/${id}/members`),
   inviteMember: (id: number, data: { user_id: number; role?: string }) =>
     http.post(`/teams/${id}/members`, data),
+  updateMemberRole: (id: number, userId: number, role: string) =>
+    http.put(`/teams/${id}/members/${userId}`, { role }),
   removeMember: (id: number, userId: number) =>
     http.delete(`/teams/${id}/members/${userId}`),
   shareDataset: (datasetId: number, teamId: number) =>

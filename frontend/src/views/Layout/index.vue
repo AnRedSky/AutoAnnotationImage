@@ -26,7 +26,6 @@ const menus = [
 // v3.3.0: 管理员菜单组 (仅 admin 可见)
 const adminMenus = [
   { path: '/admin/users', icon: User, title: '用户管理', subtitle: 'Users' },
-  { path: '/admin/roles', icon: EditPen, title: '角色权限', subtitle: 'Roles' },
   { path: '/admin/audit', icon: Odometer, title: '审计日志', subtitle: 'Audit' }
 ]
 

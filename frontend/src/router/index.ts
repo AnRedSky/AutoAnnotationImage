@@ -28,7 +28,6 @@ const router = createRouter({
         { path: 'profile', name: 'Profile', component: () => import('@/views/Profile/index.vue'), meta: { title: '个人中心', subtitle: '个人中心' } },
         // v3.3.0: 管理员功能页面 (仅 admin 可见)
         { path: 'admin/users', name: 'AdminUsers', component: () => import('@/views/Admin/Users.vue'), meta: { title: '用户管理', subtitle: '用户管理', requireAdmin: true } },
-        { path: 'admin/roles', name: 'AdminRoles', component: () => import('@/views/Admin/Roles.vue'), meta: { title: '角色权限', subtitle: '角色权限', requireAdmin: true } },
         { path: 'admin/audit', name: 'AdminAudit', component: () => import('@/views/Admin/AuditLog.vue'), meta: { title: '审计日志', subtitle: '审计日志', requireAdmin: true } }
       ]
     },

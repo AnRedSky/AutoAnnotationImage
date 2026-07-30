@@ -2,7 +2,10 @@
 TeamMember ORM Model — 团队成员 (v3.3.0)
 =========================================
 
-per-team 角色: leader / annotator / viewer
+per-team 角色:
+  - manager (可管理): 管理成员 + 配置数据集权限 + 编辑标注
+  - editor (可编辑): 可对共享数据集进行标注
+  - viewer (仅阅读): 只读
 """
 from datetime import datetime
 
@@ -12,7 +15,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.common.base_model import Base
 
 
-TEAM_ROLES = ("leader", "annotator", "viewer")
+TEAM_ROLES = ("manager", "editor", "viewer")
+
+# 可写角色: manager + editor (viewer 不可写)
+WRITE_ROLES = ("manager", "editor")
 
 
 class TeamMember(Base):
@@ -31,13 +37,21 @@ class TeamMember(Base):
     )
     role: Mapped[str] = mapped_column(
         Enum(*TEAM_ROLES, name="team_role"),
-        default="annotator", nullable=False,
+        default="editor", nullable=False,
     )
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
     team = relationship("Team", back_populates="members")
     user = relationship("User", foreign_keys=[user_id])
+
+    def can_manage(self) -> bool:
+        """是否可管理 (manager)"""
+        return self.role == "manager"
+
+    def can_edit(self) -> bool:
+        """是否可编辑 (manager + editor)"""
+        return self.role in WRITE_ROLES
 
     def __repr__(self) -> str:
         return f"<TeamMember team={self.team_id} user={self.user_id} role={self.role}>"

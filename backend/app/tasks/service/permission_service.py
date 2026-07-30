@@ -4,6 +4,11 @@
 
 async 版 can_access_dataset — 检查 owner / team_member.
 供 API 层调用, 避免 15 处端点各自实现.
+
+团队角色权限:
+  - manager (可管理): 可标注 + 可管理成员/数据集
+  - editor (可编辑): 可标注
+  - viewer (仅阅读): 只读
 """
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -11,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.model.user import User
 from app.tasks.model.dataset import Dataset
-from app.tasks.model.team_member import TeamMember
+from app.tasks.model.team_member import TeamMember, WRITE_ROLES
 
 
 async def assert_can_access_dataset(
@@ -28,11 +33,6 @@ async def assert_can_access_dataset(
       2. owner → 全通
       3. team_member (dataset.team_id 非空) → 通过
          - require_write=True 时, viewer 角色被拒
-
-    用法:
-      dataset = await db.get(Dataset, dataset_id)
-      if not dataset: raise HTTPException(404, ...)
-      await assert_can_access_dataset(db, current_user, dataset)
     """
     if current_user.is_admin():
         return
@@ -47,7 +47,7 @@ async def assert_can_access_dataset(
         )
         member = result.scalar_one_or_none()
         if member:
-            if require_write and member.role == "viewer":
+            if require_write and member.role not in WRITE_ROLES:
                 raise HTTPException(403, "只读权限, 不可修改")
             return
     raise HTTPException(403, "无权限访问此数据集")
