@@ -177,3 +177,110 @@ NO REDIS marker after 6s polling
 **给未来人**:
 - 不要被"我们在 worker 真跑、sigterm handler 装了"蒙蔽 — 真实段到段 (`revoke → marker 在 Redis`) 在 Windows threads pool 上**不成立**
 - 真生产部署 (Linux + prefork) 应该 OK, 但**部署后做一次端到端测试很重要**
+
+
+---
+
+## 五、补遗: 12:22 系统提示命中的根因复现 + 精确代码路径 (2026-07-30 12:22)
+
+> **本节新增**：本次会话期间，system 提示 `proc_18ef87205d55 matched "ERROR": pidbox command error: NotImplementedError(thread pool does not implement kill_job)`。  
+> **这不是新发现** — 它正是 §四 §"根因"所述的精确代码路径。本节把它**实证**。
+
+### 5.1 重新发一个长任务 + revoke 真复现
+
+复刻了 docs/41 §四 步骤：用 **fresh worker (`proc_2c9af31b96b4`, PID 29312)**，提交真任务 `c1701540...`，8s 后调 `revoke(terminate=True, signal="SIGTERM")`。
+
+外部观测：
+- `revoke()` 客户端 30ms 内返 (无异常)
+- **10s 后 Redis 中仍无 `train_emergency:` 标记** (SIGTERM handler 未触发)
+- worker 仍 active 那个 task
+- 任务最终自己跑完 (5 epochs in 93.11s, val_acc=0.6111, model_version_id=219 写入 DB)
+
+### 5.2 worker stdout 精确 traceback (来自 fresh worker log buffer)
+
+```
+[2026-07-30 12:22:13,734: INFO/MainProcess] Terminating c1701540-...-548f5d (15)
+[2026-07-30 12:22:13,734: ERROR/MainProcess] pidbox command error: 
+  NotImplementedError("<class 'celery.concurrency.thread.TaskPool'> does not implement kill_job")
+Traceback (most recent call last):
+  File ".../kombu/pidbox.py", line 102, in dispatch
+    reply = handle(method, arguments)
+  File ".../kombu/pidbox.py", line 124, in handle_cast
+    return self.handle(method, arguments)
+  File ".../kombu/pidbox.py", line 118, in handle
+    return self.handlers[method](self.state, **arguments)
+  File ".../celery/worker/control.py", line 149, in revoke
+    task_ids = _revoke(state, task_ids, terminate, signal, **kwargs)
+  File ".../celery/worker/control.py", line 224, in _revoke
+    request.terminate(state.consumer.pool, signal=signum)
+  File ".../celery/worker/request.py", line 416, in terminate
+    pool.terminate_job(self.worker_pid, signal)
+  File ".../celery/concurrency/base.py", line 113, in terminate_job
+    raise NotImplementedError(
+NotImplementedError: <class 'celery.concurrency.thread.TaskPool'> does not implement kill_job
+```
+
+### 5.3 栈帧解读 — 根因链
+
+```
+client                                      worker
+   |                                            |
+   |  revoke(task_id, terminate=True, SIGTERM) |
+   +--broker------------------------------------>+
+                                                v
+                                          pidbox.handle("revoke")
+                                                v
+                                          _revoke(...)              # celery/worker/control.py:149
+                                                v
+                                          request.terminate(pool, signal="SIGTERM")
+                                                v
+                                          pool.terminate_job(worker_pid, signal)
+                                                v
+                                          raise NotImplementedError  # thread pool 没实现
+                                                |
+                                                v
+                                          pidbox.handle 内的 except 把异常吞了
+                                          ERROR 行被记录, 但 NOT 传给 client
+                                                |
+client 看到 pong                                 task 继续跑
+```
+
+### 5.4 celery 5.3 各 pool 类型对 terminate_job 支持情况
+
+| Pool 类型 | 是否实现 terminate_job | Platform 限制 |
+|---|---|---|
+| `solo` | ✓ (Terminator has pid) | Windows/Linux OK |
+| `threads` | **✗ NotImplementedError raise** (本机验证) | Python GIL + Windows 架构 |
+| `prefork` | ✓ (每个 child 独立 PID) | **Linux only** (Windows 不可用) |
+| `eventlet` (gevent) | 取决于版本 | 看 celery 文档 |
+| `gevent` | 取决于版本 | 看 celery 文档 |
+
+**对当前任务：本机 (Windows) 上 `--pool=prefork` 不可用**, 只能用 `--pool=solo` (无意义) 或 `--pool=threads` (revoke 不真生效)。**真生产路径**:
+- Linux + `--pool=prefork` → terminate_job 真发 SIGTERM 给 worker child PID → 我们的 signal_handlers 真被触发 → Redis emergency marker 真写入。
+
+### 5.5 意味着什么 (升级 docs/41 §四 §根因)
+
+**更正前一条判断**：
+| 项 | docs/41 §四原始判断 | 实证后发现 |
+|---|---|---|
+| 根因 | "Celery 5.3 signal 参数不在 threads pool 下生效" | **更精确**: `pool.terminate_job()` 在 threads pool 下根本没实现, raise NotImplementedError |
+| 修复方向 | "Linux + prefork 推断 work" | 该判断成立, 但补全: NotImplementedError 必须先被实现; 否则即便真 Linux + prefork (它有实现), 升级到 celery 6.x 也可能再变 |
+
+### 5.6 给未来 Phase U 的精确行动项
+
+1. **真生产路径 (Linux + prefork) 的端到端真验证** — 必须先在 Linux sandbox (Docker compose up + 真发 cancel) 跑一次, 才能盖章"P0-1 端到段成立". 这是当前唯一 **未满足先决条件**.
+2. **当前 Linux 真生产路径 推断会 work 的依据**:
+   - 我们的 `signal_handlers.install_sigterm_handler()` 在 `_worker_main()` 调, 进 main thread (Unix 上 prefork pool 才正确)
+   - 真 prefork 后, child 是 fork 出来独立 PID
+   - revoke 调到 worker 后, `_revoke(...).terminate(pool, signal)` 路径走 `pool.terminate_job(pid, SIGTERM)` (prefork pool 真实现)
+   - `os.kill(pid, SIGTERM)` 真发到 fork 出来的 child PID
+   - child main thread 的 SIGTERM handler 触发 (`install_sigterm_handler` 已装)
+   - handler 写 `train_emergency:{task_id}` 到 Redis
+
+3. **替代路径** (如果 Linux sandbox 不可用): 改 worker pool 为 `--pool=solo` 在 Linux, 验证 SIGTERM 真发到单进程 worker 的 pid (celery `solo` 有 terminate_job 实现). 这能覆盖 SIGTERM handler 链, 但缺失"prefork worker child 隔离"测试.
+
+### 5.7 实事求是 (诚实收尾)
+
+**docs/41 §四** 的判断对了一半 (linux + prefork 推断 work), 但**"为什么 SIGTERM 没触发"的真正根因是 `pool.terminate_job()` 抛 NotImplementedError**, 不是 "celery 5.3 不传 signal". 这条线索现在被本节完整捕获.
+
+**给未来人**: 真要在 Windows 验 P0-1 端到段时, 改 `--pool=solo` 也行不通, 因为 solo 仍然是单进程, NotImplementedError 不会改变. 唯一可靠的本地端到段验证仍是 e2e_sigterm_p0_1.py (单进程 in-process SIGTERM 测试).
