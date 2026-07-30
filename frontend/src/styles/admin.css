@@ -144,7 +144,7 @@
   background: var(--bg-soft) !important;
 }
 
-/* ============ 分页栏 (对齐 Training 的 .pager) ============ */
+/* ============ 分页栏 (固定底部, 不悬浮) ============ */
 .pager {
   flex-shrink: 0;
   margin-top: 12px;
@@ -153,15 +153,20 @@
   justify-content: flex-end;
   background: #fff;
   border-top: 1px solid var(--border-soft);
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
 }
 
 /* ============ 空状态 ============ */
 .empty-hint {
   padding: 48px 0;
   text-align: center;
+}
+
+/* ============ 行操作按钮 (不换行) ============ */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 /* ============ Tag 内联 ============ */

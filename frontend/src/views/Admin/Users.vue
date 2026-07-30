@@ -161,12 +161,14 @@ onMounted(loadUsers)
         <el-table-column label="创建时间" width="160">
           <template #default="{ row }">{{ fmtDate(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="300" fixed="right">
+        <el-table-column label="操作" width="380" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" :disabled="!canManage(row)" @click="onEditRole(row)">改角色</el-button>
-            <el-button size="small" :icon="Key" :disabled="!canManage(row)" @click="onResetPassword(row)">重置密码</el-button>
-            <el-button size="small" :type="row.is_active ? 'danger' : 'success'" plain :disabled="!canManage(row)" @click="onToggleActive(row)">{{ row.is_active ? '停用' : '激活' }}</el-button>
-            <el-button size="small" type="danger" :icon="Delete" :disabled="!canManage(row)" @click="onDelete(row)">删除</el-button>
+            <div class="row-actions">
+              <el-button size="small" :disabled="!canManage(row)" @click="onEditRole(row)">改角色</el-button>
+              <el-button size="small" :icon="Key" :disabled="!canManage(row)" @click="onResetPassword(row)">重置密码</el-button>
+              <el-button size="small" :type="row.is_active ? 'danger' : 'success'" plain :disabled="!canManage(row)" @click="onToggleActive(row)">{{ row.is_active ? '停用' : '激活' }}</el-button>
+              <el-button size="small" type="danger" :icon="Delete" :disabled="!canManage(row)" @click="onDelete(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
