@@ -569,16 +569,26 @@ async def list_annotations(
     stmt = base.order_by(AnnotationLog.id.desc()).offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(stmt)).all()
 
+    # v3.1.0 Phase V #5: 批量预查 category name, 消除 N+1 (每条 log 走 2 次 db.get)
+    # 之前: for log in rows: db.get(Category, from_label_id) + db.get(Category, to_label_id)
+    # N 条 log → 2N 次 query. 现在: 1 次 batch query.
+    cat_ids: set = set()
+    for log, _fn, _u in rows:
+        if log.from_label_id:
+            cat_ids.add(log.from_label_id)
+        if log.to_label_id:
+            cat_ids.add(log.to_label_id)
+    cat_name_map: dict[int, str] = {}
+    if cat_ids:
+        cat_rows = (await db.execute(
+            select(Category.id, Category.name).where(Category.id.in_(cat_ids))
+        )).all()
+        cat_name_map = {r[0]: r[1] for r in cat_rows}
+
     items = []
     for log, filename, username in rows:
-        from_lab = None
-        to_lab = None
-        if log.from_label_id:
-            fc = await db.get(Category, log.from_label_id)
-            from_lab = fc.name if fc else None
-        if log.to_label_id:
-            tc = await db.get(Category, log.to_label_id)
-            to_lab = tc.name if tc else None
+        from_lab = cat_name_map.get(log.from_label_id) if log.from_label_id else None
+        to_lab = cat_name_map.get(log.to_label_id) if log.to_label_id else None
         items.append({
             "id": log.id,
             "image_id": log.image_id,
