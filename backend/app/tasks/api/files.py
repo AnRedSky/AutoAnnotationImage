@@ -168,7 +168,8 @@ async def get_image_thumbnail(
     """
     返回图片缩略图 (JPEG 格式, 最长边 = size)
     - 必须鉴权 + 校验数据集权限
-    - 使用 PIL 实时缩放, 不缓存磁盘 (简单实现)
+    - 优先用进程内 LRU 缓存 (Phase V: 同一 image_id+size 第二次起 1ms 内返)
+    - 缓存 miss 时用 PIL 缩放, 不缓存磁盘
     - 缺失图片返回 404
     """
     result = await db.execute(
@@ -187,35 +188,51 @@ async def get_image_thumbnail(
     if not storage_service.exists(img.storage_path):
         raise HTTPException(status_code=404, detail="Image file missing on storage")
 
-    try:
+    # 缩略图 cache 加载器: PIL 编码一次. LRU 在 app/common/cache/thumbnail_cache.py.
+    from app.common.cache.thumbnail_cache import thumbnail_for
+
+    def loader(image_id_: int, size_: int) -> bytes:
+        """cache miss 时调用. 必须读 storage + PIL 编一次."""
         from PIL import Image as PILImage
         from io import BytesIO
-        content = await storage_service.load(img.storage_path)
+        from pathlib import Path as _P
+        from app.utils.async_helpers import run_async_in_worker
+
+        # cache 调到 loader 在 worker thread 内, 但 storage_service.load 是 async.
+        # 用 run_async_in_worker 同步驱动 async 协程.
+        content = run_async_in_worker(storage_service.load(img.storage_path))
+        if not content:
+            raise RuntimeError(f"image {image_id_} empty")
         pil_img = PILImage.open(BytesIO(content))
-        # 等比缩放
-        pil_img.thumbnail((size, size), PILImage.LANCZOS)
-        # 统一转 RGB
+        pil_img.thumbnail((size_, size_), PILImage.LANCZOS)
         if pil_img.mode not in ("RGB", "L"):
             pil_img = pil_img.convert("RGB")
         buf = BytesIO()
         pil_img.save(buf, format="JPEG", quality=80)
-        thumb_bytes = buf.getvalue()
-        return Response(
-            content=thumb_bytes,
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": "private, max-age=86400",
-                "Content-Length": str(len(thumb_bytes)),
-            },
-        )
+        return buf.getvalue()
+
+    # 先读 storage 一遍拿 bytes (loader 内部也读; 但 cache miss 时不重复 PIL)
+    # 简化: cache key = (image_id, size), value = encoded JPEG bytes.
+    # 第一次: loader 调 -> PIL encode -> store
+    # 第二次: cache hit -> 直接返, loader 完全不调
+    try:
+        thumb_bytes = thumbnail_for(image_id, size, loader=loader)
     except Exception as e:
         # 缩略图生成失败时回退到原图
         logger.warning("thumbnail generation failed for image %s: %s", image_id, e)
         content = await storage_service.load(img.storage_path)
-        from pathlib import Path as _P
         ext = _P(img.storage_path).suffix.lower()
         return Response(
             content=content,
             media_type=_MIME_MAP.get(ext, "application/octet-stream"),
             headers={"Cache-Control": "private, max-age=3600"},
         )
+
+    return Response(
+        content=thumb_bytes,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "Content-Length": str(len(thumb_bytes)),
+        },
+    )
