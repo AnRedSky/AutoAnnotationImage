@@ -12,7 +12,6 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tasks.model.audit_log import AuditLog
-from app.middleware.tenant import TenantContext
 
 
 async def log_audit(
@@ -24,21 +23,12 @@ async def log_audit(
     resource_id: Optional[int] = None,
     detail: Optional[dict] = None,
     ip_address: Optional[str] = None,
+    team_id: Optional[int] = None,
 ) -> None:
-    """写入审计日志 (best-effort, 不抛异常阻断主流程).
-
-    Args:
-        db: 当前请求的 AsyncSession
-        user_id: 操作者 ID
-        event_type: 事件类型 (见 AUDIT_EVENT_TYPES)
-        resource_type: 资源类型 (dataset / model / training_job / user)
-        resource_id: 资源 ID
-        detail: 额外细节 (JSON)
-        ip_address: 客户端 IP
-    """
+    """写入审计日志 (best-effort, 不抛异常阻断主流程)."""
     try:
         log = AuditLog(
-            tenant_id=TenantContext.get(),
+            team_id=team_id,
             user_id=user_id,
             event_type=event_type,
             resource_type=resource_type,
@@ -47,6 +37,6 @@ async def log_audit(
             ip_address=ip_address,
         )
         db.add(log)
-        await db.flush()  # flush 但不 commit (由调用方 commit)
+        await db.flush()
     except Exception:
-        pass  # best-effort: 审计失败不阻断业务
+        pass

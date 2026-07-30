@@ -54,15 +54,7 @@ except Exception as e:  # noqa: BLE001
     import logging
     logging.getLogger(__name__).warning(f"setup_slow_sql_monitor failed: {e!r}")
 
-# v3.2.0 MT-4: 绑定多租户自动过滤 (do_orm_execute event)
-# TenantContext.get() 非 None 时, 自动给 SELECT 加 WHERE tenant_id = :tid
-try:
-    from app.database.tenant_filter import setup_tenant_filter_v2
-    setup_tenant_filter_v2(engine)
-except Exception as e:  # noqa: BLE001
-    import logging
-    logging.getLogger(__name__).warning(f"setup_tenant_filter_v2 failed: {e!r}")
 
-
+# Re-export for convenience
 # Re-export for convenience
 __all__ = ["engine", "AsyncSessionLocal"]

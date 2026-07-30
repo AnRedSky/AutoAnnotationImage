@@ -44,11 +44,6 @@ class ModelVersion(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
-    # v3.2.0 MT-3: 多租户 — tenant_id 隔离
-    tenant_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("tenant.id"), nullable=True, default=1, index=True,
-    )
-
     # ============== Active Record 业务方法 ==============
 
     def primary_metric_value(self) -> float:

@@ -153,11 +153,6 @@ MiddlewareRegistry.discover()
 _mw_count = MiddlewareRegistry.apply(app)
 logger.info(f"Total {_mw_count} middlewares applied via MiddlewareRegistry.apply()")
 
-# v3.2.0 MT-4: 多租户中间件 — 从 JWT 解析 tenant_id 注入 contextvar
-# 必须在 auth 中间件之后 (有 token 才能解析), 在路由之前
-from app.middleware.tenant import TenantMiddleware  # noqa: E402
-app.add_middleware(TenantMiddleware)
-
 # ============================================================
 #  路由自动挂载 (Stage 2.7)
 # ============================================================

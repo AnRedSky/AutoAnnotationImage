@@ -45,7 +45,7 @@ class AuthService:
         """
         return create_access_token(
             data={"sub": str(user.id), "username": user.username},
-            extra_claims={"role": user.role, "tenant_id": getattr(user, "tenant_id", None) or 1},
+            extra_claims={"role": user.role},
         )
 
     @staticmethod

@@ -31,8 +31,9 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tenant_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("tenant.id"), nullable=True, default=1, index=True,
+    # v3.3.0: team_id (nullable, 审计可按团队归档)
+    team_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("team.id"), nullable=True, default=None, index=True,
     )
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("user.id"), nullable=False, index=True,
