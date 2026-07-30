@@ -74,7 +74,7 @@ class UserService:
         new_role: str,
     ) -> User:
         """修改用户角色 (业务规则: 角色必须合法)"""
-        valid_roles = ("admin", "annotator", "viewer")
+        valid_roles = ("super_admin", "admin", "annotator", "viewer")
         if new_role not in valid_roles:
             raise HTTPException(400, f"Invalid role: {new_role}, must be one of {valid_roles}")
         user.role = new_role

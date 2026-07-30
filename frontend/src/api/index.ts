@@ -573,12 +573,22 @@ export const teamApi = {
     http.delete(`/teams/datasets/${datasetId}/share`),
 }
 
-// ============== 用户管理 (v3.2.0 MT-10) ==============
+// ============== 用户管理 (v3.3.0) ==============
 export const userApi = {
   list: () => http.get('/users/'),
   get: (id: number) => http.get(`/users/${id}`),
+  create: (data: { username: string; password: string; email?: string; role?: string }) =>
+    http.post('/users/', data),
+  remove: (id: number) => http.delete(`/users/${id}`),
   activate: (id: number) => http.post(`/users/${id}/activate`),
   deactivate: (id: number) => http.post(`/users/${id}/deactivate`),
   changeRole: (id: number, newRole: string) =>
     http.post(`/users/${id}/role`, { new_role: newRole }),
+  resetPassword: (id: number, newPassword: string) =>
+    http.post(`/users/${id}/reset-password`, { new_password: newPassword }),
+  // 个人中心
+  getProfile: () => http.get('/users/me/profile'),
+  updateProfile: (data: { email?: string }) => http.put('/users/me/profile', data),
+  changePassword: (data: { old_password: string; new_password: string }) =>
+    http.post('/users/me/change-password', data),
 }
