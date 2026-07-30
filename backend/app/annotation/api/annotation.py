@@ -557,6 +557,14 @@ async def list_annotations(
     - 分页 + 按 action 过滤 (confirm / correct)
     - 返回图片名 + 用户名 + 耗时 + 时间
     """
+    # P1-2: 非 admin 只能看自己 dataset 的标注日志
+    from app.tasks.model.dataset import Dataset
+    ds = await db.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    if not current_user.is_admin() and ds.owner_id != current_user.id:
+        raise HTTPException(403, "无权限查看此数据集的标注日志")
+
     from app.admin.model.user import User as UserModel
     base = (
         select(AnnotationLog, Image.filename, UserModel.username)

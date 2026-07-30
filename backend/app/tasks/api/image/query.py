@@ -48,6 +48,10 @@ async def list_images(
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
+    # P1-4: 非 admin 只能看自己 dataset 的图片
+    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限查看此数据集的图片")
+
     # 类别映射: id -> name
     cat_rows = (await db.execute(
         select(Category).where(Category.dataset_id == dataset_id)

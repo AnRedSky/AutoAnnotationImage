@@ -52,6 +52,10 @@ async def list_models(
         stmt = stmt.where(ModelVersion.dataset_id == dataset_id)
     if active is not None:
         stmt = stmt.where(ModelVersion.is_active == active)  # noqa: E712
+    # P1-1: 非 admin 只看自己 dataset 的 model
+    if not current_user.is_admin():
+        own_ds = select(Dataset.id).where(Dataset.owner_id == current_user.id)
+        stmt = stmt.where(ModelVersion.dataset_id.in_(own_ds))
     stmt = stmt.order_by(ModelVersion.created_at.desc())
     result = await db.execute(stmt)
     models = result.scalars().all()
