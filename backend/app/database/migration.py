@@ -55,6 +55,20 @@ MIGRATIONS = [
 ]
 
 
+# v3.1.0 Phase V #4: 索引补全
+#   热路径查询: WHERE is_active=true ORDER BY created_at DESC (model list, /api/models/)
+#   已有索引: ForeignKey (dataset_id) + index=True (task_type) + row.id PK
+#   缺索引: model_version.is_active (高基数 Boolean); model_version.created_at (ORDER BY)
+#
+#   注意: 新表自动从 ORM 声明建 (index=True 已加到 model_version.py)
+#        老表需要 CREATE INDEX 手动补, 用 _ensure_indexes 幂等运行
+INDEXES = [
+    # Phase V #4: 优化 /api/models/active + /api/models/ 端点排序/过滤
+    ("model_version", "is_active",    "ix_model_version_is_active"),
+    ("model_version", "created_at",   "ix_model_version_created_at"),
+]
+
+
 # v3.0.0: annotation_log.action ENUM 扩展 (加 mark_unqualified / unmark_unqualified)
 # MySQL 需 MODIFY COLUMN; SQLite 用 VARCHAR 存储, 无需迁移
 _ANNOTATION_LOG_ACTION_TARGETS = (
@@ -228,6 +242,19 @@ async def ensure_v2_0_0_schema(
             if verbose:
                 print(f"  [err]  {err}")
 
+    # v3.1.0 Phase V #4: 索引补全 (model_version.is_active + created_at)
+    try:
+        result = await _ensure_indexes(conn, verbose=verbose)
+        added.extend(result.get("created", []))
+        skipped.extend(result.get("skipped", []))
+        if result.get("errors"):
+            errors.extend(result["errors"])
+    except Exception as e:  # noqa: BLE001
+        err = f"model_version 索引补全失败: {e!r}"
+        errors.append(err)
+        if verbose:
+            print(f"  [err]  {err}")
+
     # v3.0.0: annotation_log.action ENUM 扩展 (幂等, MySQL 才需要)
     try:
         result = await ensure_annotation_log_action_enum(conn, verbose=verbose)
@@ -305,3 +332,55 @@ async def _ensure_column_varchar_length(
         if verbose:
             print(f"  [mod]  {msg}")
     return applied
+
+
+# v3.1.0 Phase V #4: 索引补全 helpers
+async def _mysql_index_exists(conn: AsyncConnection, table: str, index_name: str) -> bool:
+    """查询 MySQL 索引是否存在 (stat 表查 index 列表)."""
+    try:
+        rows = await conn.execute(text(
+            "SELECT 1 FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "  AND TABLE_NAME = :t AND INDEX_NAME = :i LIMIT 1"
+        ), {"t": table, "i": index_name})
+        return rows.first() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _ensure_indexes(conn: AsyncConnection, *, verbose: bool = False) -> dict:
+    """v3.1.0 Phase V #4: 幂等补全 INDEXES 声明的索引.
+
+    Returns: {"created": [...], "skipped": [...], "errors": [...]}
+    """
+    created: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    for table, column, index_name in INDEXES:
+        try:
+            # 表不存在 -> 跳过 (新建表会从 ORM 声明自动建索引)
+            if not await _table_exists(conn, table):
+                msg = f"{table}.{column} (idx {index_name}): 表不存在, 跳过"
+                if verbose:
+                    print(f"  [skip] {msg}")
+                skipped.append(msg)
+                continue
+            if await _mysql_index_exists(conn, table, index_name):
+                msg = f"{index_name}: 已存在"
+                if verbose:
+                    print(f"  [skip] {msg}")
+                skipped.append(msg)
+                continue
+            # CREATE INDEX
+            sql = f"CREATE INDEX `{index_name}` ON `{table}` (`{column}`)"
+            await conn.execute(text(sql))
+            msg = f"{index_name} ON {table}({column})"
+            if verbose:
+                print(f"  [idx]  {msg}")
+            created.append(msg)
+        except Exception as e:  # noqa: BLE001
+            err = f"{index_name}: {e!r}"
+            errors.append(err)
+            if verbose:
+                print(f"  [err]  {err}")
+    return {"created": created, "skipped": skipped, "errors": errors}

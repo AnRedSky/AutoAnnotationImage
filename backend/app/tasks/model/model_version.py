@@ -41,8 +41,8 @@ class ModelVersion(Base):
     dice_score: Mapped[float] = mapped_column(Float, nullable=True)
     training_log: Mapped[dict] = mapped_column(JSON, nullable=True)
     confusion_matrix: Mapped[list] = mapped_column(JSON, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     # ============== Active Record 业务方法 ==============
 
