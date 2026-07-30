@@ -77,14 +77,22 @@ async def list_active_per_dataset(
     """
     # 子查询: 按 dataset_id partition 内排序
     # Note: ROW_NUMBER 跨数据库方言. SQLAlchemy 用 func.row_number().
+    # Phase V #2 v2: is_active DESC 作为 ORDER BY 首位, 保证 is_active=true 的 model
+    # 永远 rn=1 (与旧 get_active_for_dataset 语义一致: 先找 is_active=true, 找不到才 fallback)
     row_num = func.row_number().over(
         partition_by=ModelVersion.dataset_id,
         order_by=(
+            # 1. is_active=true 优先 (DESC: True(1) 排前)
+            ModelVersion.is_active.desc(),
+            # 2. map_50 NULL 排后 + desc
             case((ModelVersion.map_50.is_(None), 1), else_=0),
             ModelVersion.map_50.desc(),
+            # 3. miou NULL 排后 + desc
             case((ModelVersion.miou.is_(None), 1), else_=0),
             ModelVersion.miou.desc(),
+            # 4. accuracy desc
             ModelVersion.accuracy.desc(),
+            # 5. created_at desc (新模型优先)
             ModelVersion.created_at.desc(),
         ),
     ).label("rn")
