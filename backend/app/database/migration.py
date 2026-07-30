@@ -242,36 +242,6 @@ async def ensure_v2_0_0_schema(
             if verbose:
                 print(f"  [err]  {err}")
 
-    # v3.2.0 MT-3: 多租户 — 业务表加 tenant_id 列 (幂等)
-    for table, column, sqltype, default in TENANT_MIGRATIONS:
-        try:
-            if not await _table_exists(conn, table):
-                continue
-            if await _column_exists(conn, table, column):
-                continue
-            sql = (
-                f"ALTER TABLE `{table}` "
-                f"ADD COLUMN `{column}` {sqltype} DEFAULT {default}"
-            )
-            await conn.execute(text(sql))
-            # 加索引
-            idx_name = f"ix_{table}_{column}"
-            try:
-                await conn.execute(text(
-                    f"CREATE INDEX `{idx_name}` ON `{table}` (`{column}`)"
-                ))
-            except Exception:
-                pass
-            msg = f"{table}.{column}"
-            if verbose:
-                print(f"  [add]  {msg}")
-            added.append(msg)
-        except Exception as e:
-            err = f"{table}.{column}: {e!r}"
-            errors.append(err)
-            if verbose:
-                print(f"  [err]  {err}")
-
     # v3.1.0 Phase V #4: 索引补全 (model_version.is_active + created_at)
     try:
         result = await _ensure_indexes(conn, verbose=verbose)
