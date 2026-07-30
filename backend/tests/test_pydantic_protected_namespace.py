@@ -17,8 +17,8 @@ def test_schema_no_protected_namespace_warning():
         )
         from app.schemas.segmentation import SegmentationTrainRequest  # noqa: PLC0415
         from app.schemas.detection import DetectionTrainRequest  # noqa: PLC0415
-        from app.api.auto_annotate import AutoAnnotateRequest  # noqa: PLC0415
-        from app.api.image import PreviewConfidenceRequest  # noqa: PLC0415
+        from app.tasks.api.auto_annotate import AutoAnnotateRequest  # noqa: PLC0415
+        from app.tasks.api.preview import PreviewConfidenceRequest  # noqa: PLC0415
 
         # 实例化每个有 model_name 的 schema
         TrainStartRequest(dataset_id=1, model_name="v1")

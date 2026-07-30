@@ -5,7 +5,7 @@ Unit tests for filter_predictions_to_categories
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from app.services.ai_service import filter_predictions_to_categories, _norm_label
+from app.common.ml.ai_service import filter_predictions_to_categories, _norm_label
 
 
 def test_norm():

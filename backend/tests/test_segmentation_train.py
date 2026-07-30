@@ -17,7 +17,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 from PIL import Image as PILImage
 
-from app.models import ModelVersion
+from app.tasks.model.model_version import ModelVersion
 from app.common.enums import TaskType
 
 
@@ -105,7 +105,7 @@ async def test_seg_train_endpoint_creates_task(
     mock_result = MagicMock()
     mock_result.id = "celery-task-id-1234"
     with patch(
-        "app.workers.segmentation_tasks.train_segmentation_task.delay",
+        "app.tasks.workers.segmentation.train_segmentation_task.delay",
         return_value=mock_result,
     ) as mock_delay:
         r = await client.post(

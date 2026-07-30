@@ -11,7 +11,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 
 def test_clear_bboxes_route_registered():
-    from app.api.detection import router  # noqa: PLC0415
+    from app.tasks.api.detection import router  # noqa: PLC0415
     paths = [r.path for r in router.routes if hasattr(r, "path")]
     methods_by_path = {}
     for r in router.routes:
@@ -29,7 +29,7 @@ def test_clear_bboxes_route_registered():
 def test_clear_route_before_dynamic_route():
     """/annotations/clear/{image_id} 必须在 /annotations/{bbox_id} 之前声明,
     否则 FastAPI 会把 'clear' 解析成 bbox_id -> 触发 422 校验错误"""
-    from app.api.detection import router  # noqa: PLC0415
+    from app.tasks.api.detection import router  # noqa: PLC0415
     clear_idx = None
     dynamic_idx = None
     for idx, r in enumerate(router.routes):

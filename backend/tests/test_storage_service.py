@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.storage_service import StorageService
+from app.common.storage.storage_service import StorageService
 
 
 # ============== 1. compute_hash ==============

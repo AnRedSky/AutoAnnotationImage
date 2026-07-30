@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# 测试与覆盖率
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.cache/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 文档/计划 (不参与运行)
+docs/
+README.md
+*.md
+
+# 当前构建产物 / 临时
+*.log
+logs/
+backend.out.log
+backend.err.log
+celery.log
+celery.pid
+backend.pid
+
+# 模型/数据：极少数情况下需要随镜像启动预置，
+# 默认排除，体量大走 volume 挂载。
+models/
+models/cache/
+models/runs/
+models/seg_runs/
+models/data/
+uploads/
+demo/
+
+# 大体积原生依赖缓存 (在 host 上保留，容器里会重装)
+.mypy_cache/
+.ruff_cache/
+
+# 镜像构建本身不需要
+.git/
+.gitignore
+.dockerignore
+Dockerfile*
+compose*.y*ml

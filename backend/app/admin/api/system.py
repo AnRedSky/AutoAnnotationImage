@@ -12,7 +12,7 @@ System API: Health / Info / Metrics (app/admin/api/)
 - 注册中心快照 (AppRegistry + PluginRegistry)
 - 进程级资源 (CPU/内存/线程数)
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,8 +23,18 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health_check(db: AsyncSession = Depends(get_db)):
-    """系统健康检查 (无需鉴权)"""
+async def health_check(response: Response, db: AsyncSession = Depends(get_db)):
+    """系统健康检查 (无需鉴权).
+
+    返回状态契约:
+    - 数据库不可用 → **HTTP 503** (K8s readiness probe / 阿里云 SLB 才会停止路由)
+    - Redis 不可用 → HTTP 200 + status=degraded (业务有 cache fallback)
+    - MinIO 不可用 → HTTP 200 + status=degraded (导出端点会受影响, 但 API 元服务还在)
+    - 全部可用 → HTTP 200 + status=ok
+
+    设计动机 (v3.1.0 Phase T, 落档 P0-2):
+    老版本一律返 200, 让 LB 持续把流量路由到 DB 已挂的实例.
+    """
     import platform
     import time
 
@@ -46,7 +56,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "latency_ms": round((time.time() - t0) * 1000, 2),
         }
     except Exception as e:
-        result["status"] = "degraded"
+        result["status"] = "unhealthy"  # 比 "degraded" 更准确地描述 DB 挂
         result["checks"]["database"] = {"ok": False, "err": str(e)[:200]}
 
     # Redis
@@ -67,6 +77,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         }
         await r.aclose()
     except Exception as e:
+        if result["status"] == "ok":  # DB 健康时, redis 挂 = degraded
+            result["status"] = "degraded"
         result["checks"]["redis"] = {"ok": False, "err": str(e)[:200]}
 
     # MinIO
@@ -82,7 +94,15 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                 "latency_ms": round((time.time() - t0) * 1000, 2),
             }
     except Exception as e:
+        if result["status"] == "ok":
+            result["status"] = "degraded"
         result["checks"]["minio"] = {"ok": False, "err": str(e)[:200]}
+
+    # 状态码契约: DB 挂 → 503, 其余 degraded → 200
+    if result["status"] == "unhealthy":
+        # 这种情形健康端点必须 503, 否则 K8s readiness probe / LB 持续路由到死实例
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content=result)
 
     return result
 

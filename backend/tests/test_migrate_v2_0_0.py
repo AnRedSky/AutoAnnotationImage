@@ -62,7 +62,7 @@ async def test_migrate_v2_0_0_idempotent(file_db):
     try:
         # 1) 建 v2.0.0 完整表
         async with local_engine.begin() as conn:
-            import app.models  # noqa: F401, PLC0415
+            import app.admin.model as _admin_model, app.tasks.model as _tasks_model, app.annotation.model as _annotation_model  # noqa: F401, PLC0415
             from app.database import Base  # noqa: PLC0415
             await conn.run_sync(Base.metadata.create_all)
 
@@ -129,7 +129,7 @@ async def test_init_db_runs_migration_automatically():
         try:
             # 1) 建完整 v2.0.0 表
             async with test_engine.begin() as conn:
-                import app.models  # noqa: F401, PLC0415
+                import app.admin.model as _admin_model, app.tasks.model as _tasks_model, app.annotation.model as _annotation_model  # noqa: F401, PLC0415
                 from app.database import Base  # noqa: PLC0415
                 await conn.run_sync(Base.metadata.create_all)
 

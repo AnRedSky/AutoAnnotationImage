@@ -12,14 +12,14 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 
 def test_stats_endpoint_registered():
-    from app.api.detection import router  # noqa: PLC0415
+    from app.tasks.api.detection import router  # noqa: PLC0415
     paths = [r.path for r in router.routes if hasattr(r, "path")]
     assert "/stats/{dataset_id}" in paths
 
 
 def test_stats_response_shape():
     """验证返回字段完整 (前端依赖)"""
-    from app.api.detection import detection_stats  # noqa: PLC0415
+    from app.tasks.api.detection import detection_stats  # noqa: PLC0415
     import inspect
     sig = inspect.signature(detection_stats)
     # 参数: dataset_id, db, current_user

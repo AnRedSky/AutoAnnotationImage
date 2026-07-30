@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 
-from app.ml.detection.yolo_predict import (
+from app.tasks.ml.detection.yolo_predict import (
     YoloBox,
     predict_yolo,
     predict_image_grouped,

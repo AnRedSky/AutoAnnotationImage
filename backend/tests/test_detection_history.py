@@ -16,9 +16,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # 模拟 _run_async 立即跑协程, 不开新线程
-import app.core.celery_utils as cu
+from app.utils.async_helpers import run_async_in_worker  # noqa: F401
 
-real_run_async = cu.run_async_in_worker
+real_run_async = run_async_in_worker
 
 
 def fake_run_async(coro, *args, **kwargs):
@@ -35,8 +35,9 @@ def fake_run_async(coro, *args, **kwargs):
 
 
 # patch
-cu.run_async_in_worker = fake_run_async
-import app.workers.detection_tasks as dt  # noqa
+run_async_in_worker = fake_run_async
+
+import app.tasks.workers.detection as dt  # noqa
 dt._run_async = fake_run_async
 
 
@@ -51,7 +52,7 @@ def fake_update_history(task_id, history):
 
 
 # patch
-import app.workers.tasks as t
+import app.tasks.workers as t
 t._update_training_history = fake_update_history
 
 
@@ -109,7 +110,7 @@ def run_train_cb_test():
             # 写 DB (mock: 不实际写, 只计数)
             async def _update_job_history():
                 # from app.database import AsyncSessionLocal
-                # from app.models.training_job import TrainingJob
+                # from app.tasks.model.training_job import TrainingJob
                 # async with AsyncSessionLocal() as db:
                 #     j = await db.get(TrainingJob, job_id)
                 #     if not j: return

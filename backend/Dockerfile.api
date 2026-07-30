@@ -1,0 +1,17 @@
+# API-only stage - shared dependencies from base
+# 复用 base 已装的依赖镜像，仅重声明 CMD 为 uvicorn + 增加 HEALTHCHECK。
+FROM base AS api
+
+USER app
+
+ENV APP_PORT=8000
+
+# 服务级健康检查（覆盖 base 的占位检查）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
+    CMD curl -fsS "http://127.0.0.1:${APP_PORT}/api/health" || exit 1
+
+# --proxy-headers: 让反向代理/Nginx 转发时获取真实 IP/Host。
+# --forwarded-allow-ips="*": compose 内 Traefik/前端直连都常见。
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]

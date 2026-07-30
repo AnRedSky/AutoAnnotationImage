@@ -23,7 +23,7 @@ os.environ["APP_DEBUG"] = "False"
 
 from app.main import app  # noqa: E402
 from app.database import get_db, Base  # noqa: E402
-from app.models.user import User  # noqa: E402
+from app.admin.model.user import User  # noqa: E402
 from app.middleware.security.security import hash_password  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
@@ -140,9 +140,9 @@ async def celery_eager(db_session):
        DATABASE_URL 设为 ":memory:" + StaticPool, app 引擎共享同一连接,
        所以这里只需对 app 引擎也跑一次 create_all (幂等).
     """
-    from app.workers.celery_app import celery_app
+    from app.tasks.workers.celery_app import celery_app
     from app.database import Base, engine
-    import app.models  # noqa: F401  触发 metadata 注册
+    import app.admin.model as _admin_model, app.tasks.model as _tasks_model, app.annotation.model as _annotation_model  # noqa: F401  触发 metadata 注册
 
     # 在 app 引擎上 create_all (幂等)
     async with engine.begin() as conn:

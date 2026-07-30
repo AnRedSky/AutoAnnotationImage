@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.ml.detection.yolo_train import (
+from app.tasks.ml.detection.yolo_train import (
     YoloTrainError,
     train_yolo,
     cleanup_old_runs,

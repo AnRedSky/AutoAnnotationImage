@@ -27,8 +27,9 @@ import pytest
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from app.models import BBoxAnnotation, TrainingJob
-from app.ml.detection.yolo_dataset import (
+from app.annotation.model.bbox_annotation import BBoxAnnotation
+from app.tasks.model.training_job import TrainingJob
+from app.tasks.ml.detection.yolo_dataset import (
     split_train_val,
     annotations_to_yolo_lines,
     export_yolo_dataset,
@@ -221,7 +222,7 @@ async def test_train_endpoint_creates_task(
     mock_result = MagicMock()
     mock_result.id = "fake-celery-task-id-1234"
     with patch(
-        "app.workers.detection_tasks.train_detection_task.delay",
+        "app.tasks.workers.detection.train_detection_task.delay",
         return_value=mock_result,
     ) as m:
         resp = await client.post(
@@ -259,7 +260,7 @@ async def test_train_endpoint_wrong_task_type(
     cls_ds_id = resp.json()["id"]
 
     with patch(
-        "app.workers.detection_tasks.train_detection_task.delay"
+        "app.tasks.workers.detection.train_detection_task.delay"
     ) as m:
         r = await client.post(
             "/api/detection/train", headers=auth_headers,
@@ -281,10 +282,10 @@ async def test_train_endpoint_redis_down_503(
         client, auth_headers
     )
     with patch(
-        "app.api.detection.redis_client.ping",
+        "app.tasks.api.detection.redis_client.ping",
         side_effect=ConnectionError("redis down"),
     ), patch(
-        "app.workers.detection_tasks.train_detection_task.delay"
+        "app.tasks.workers.detection.train_detection_task.delay"
     ) as m:
         r = await client.post(
             "/api/detection/train", headers=auth_headers,
@@ -309,7 +310,7 @@ async def test_auto_annotate_endpoint_validation(
     cls_ds = resp.json()["id"]
     mock_result = MagicMock(); mock_result.id = "x"
     with patch(
-        "app.workers.detection_tasks.auto_annotate_detection_task.delay",
+        "app.tasks.workers.detection.auto_annotate_detection_task.delay",
         return_value=mock_result,
     ) as m:
         r = await client.post(
@@ -325,7 +326,7 @@ async def test_auto_annotate_endpoint_validation(
         client, auth_headers, name="ds_aa"
     )
     with patch(
-        "app.workers.detection_tasks.auto_annotate_detection_task.delay"
+        "app.tasks.workers.detection.auto_annotate_detection_task.delay"
     ) as m:
         r = await client.post(
             "/api/detection/auto-annotate",
@@ -344,8 +345,8 @@ async def test_job_progress_endpoint_returns_state(
 ):
     """GET /jobs/{id}/progress 返回 ORM 字段 (含 task_type='detection')"""
     # 直接 DB 插一行, 避免依赖 Celery
-    from app.models.user import User
-    from app.models.dataset import Dataset
+    from app.admin.model.user import User
+    from app.tasks.model.dataset import Dataset
     user = (await db_session.execute(select(User).limit(1))).scalars().first()
     if user is None:
         pytest.skip("no user row")

@@ -20,12 +20,12 @@ import torch
 import torch.nn as nn
 from PIL import Image as PILImage
 
-from app.ml.segmentation.seg_train import (
+from app.tasks.ml.segmentation.seg_train import (
     _compute_mIoU,
     _build_model,
     train_segmentation,
 )
-from app.ml.segmentation.seg_dataset import SegmentationPairDataset
+from app.tasks.ml.segmentation.seg_dataset import SegmentationPairDataset
 
 
 # ============== 工具 ==============
@@ -150,7 +150,7 @@ def test_train_segmentation_mock_model(tmp_path):
         # v2.5.27: seg_train 现在传可选 5th 参数 metrics dict
         progress_calls.append((stage, current, total, info, metrics))
 
-    with patch("app.ml.segmentation.seg_train._build_model") as mock_build:
+    with patch("app.tasks.ml.segmentation.seg_train._build_model") as mock_build:
         mock_build.return_value = _TinyModel(num_classes=3, h=32, w=32)
         out = train_segmentation(
             images=images, masks=masks,

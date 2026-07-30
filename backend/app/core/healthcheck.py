@@ -8,29 +8,31 @@ Quick Healthcheck - 编译所有 backend/app + scripts 下的 Python 文件
 通过 console_script `healthcheck` 调用: `uv run healthcheck`
 """
 import py_compile
-import pathlib
 import sys
-
-# 自动锚到当前脚本所在目录，再 +1 (即 backend/)。
-# 这样无论从哪个 cwd 启动都能找到正确的目标。
-ROOT = pathlib.Path(__file__).resolve().parent.parent / "app"
-SCRIPTS_ROOT = pathlib.Path(__file__).resolve().parent
-SKIP = ("migrations", "venv", "__pycache__", "node_modules")
+from pathlib import Path
 
 
-def _iter_py_files(base: pathlib.Path):
+def _backend_root() -> Path:
+    """app/core/healthcheck.py → 上 2 层 = backend/ 根"""
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _iter_py_files(base: Path):
+    """递归找 .py，跳过缓存目录与 venv"""
+    skip = ("__pycache__", "venv", ".venv", "node_modules")
     for p in base.rglob("*.py"):
-        s = str(p)
-        if any(k in s for k in SKIP):
+        if any(k in p.parts for k in skip):
             continue
-        yield s
+        yield str(p)
 
 
 def main() -> int:
+    backend = _backend_root()
+    targets = [backend / "app", backend / "scripts"]
     errors: list[tuple[str, str]] = []
     total = 0
 
-    for root in (ROOT, SCRIPTS_ROOT):
+    for root in targets:
         if not root.exists():
             continue
         for f in _iter_py_files(root):
@@ -42,10 +44,10 @@ def main() -> int:
                 last_line = str(msg).splitlines()[-1] if msg else "error"
                 errors.append((f, last_line))
 
-    print(f"Total py files checked: {total}")
+    print(f"Healthcheck: scanned {total} python files under backend/app & backend/scripts")
     if errors:
-        print(f"FAILED: {len(errors)} errors")
-        for f, msg in errors[:10]:
+        print(f"FAILED: {len(errors)} syntax errors")
+        for f, msg in errors[:20]:
             print(f"  - {f}: {msg}")
         return 1
     print("OK: all Python files compile cleanly")

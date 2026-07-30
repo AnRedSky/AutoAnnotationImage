@@ -13,7 +13,7 @@ import io
 import pytest
 from PIL import Image as PILImage
 
-from app.models.segmentation_mask import SegmentationMask
+from app.annotation.model.segmentation_mask import SegmentationMask
 
 
 # ============== 工具 ==============

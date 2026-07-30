@@ -30,19 +30,19 @@ def test_workers_registered_in_app():
     单测可独立验证, 显式 import 各 worker 模块以触发 @celery_app.task 装饰器.
     """
     # 显式 import 触发 task 注册
-    from app.workers import tasks  # noqa: F401
-    from app.workers import detection_tasks  # noqa: F401
-    from app.workers import segmentation_tasks  # noqa: F401
+    from app.tasks.workers import (
+        classification, detection, segmentation,  # noqa: F401
+    )
 
-    from app.workers.celery_app import celery_app
+    from app.tasks.workers.celery_app import celery_app
     task_names = set(celery_app.tasks.keys())
     # 关键: 分割任务必须注册
-    seg_train = "app.workers.segmentation_tasks.train_segmentation_task"
-    seg_auto = "app.workers.segmentation_tasks.auto_annotate_segmentation_task"
+    seg_train = "app.tasks.workers.segmentation.train_segmentation_task"
+    seg_auto = "app.tasks.workers.segmentation.auto_annotate_segmentation_task"
     assert seg_train in task_names, f"{seg_train} not registered"
     assert seg_auto in task_names, f"{seg_auto} not registered"
     # 检测任务也应注册
-    det_train = "app.workers.detection_tasks.train_detection_task"
+    det_train = "app.tasks.workers.detection.train_detection_task"
     assert det_train in task_names, f"{det_train} not registered"
 
 
@@ -58,11 +58,12 @@ async def test_auto_annotate_detection_eager_p0_fix(
 
     这里通过直接调用 _write_results 风格的代码段, 验证 ORM 写入路径
     """
-    from app.models import BBoxAnnotation, AnnotationLog
-    from app.models.image import Image
-    from app.models.dataset import Dataset
-    from app.models.category import Category
-    from app.models.user import User
+    from app.annotation.model.bbox_annotation import BBoxAnnotation
+    from app.tasks.model.annotation_log import AnnotationLog
+    from app.tasks.model.image import Image
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.model.category import Category
+    from app.admin.model.user import User
 
     # 准备基础数据
     user = User(
@@ -132,11 +133,11 @@ def test_train_segmentation_task_is_callable(celery_eager):
        在 pytest :memory: 环境下不稳. 此处只验证任务可调用 + 返回结构正确.
        详细流程验证通过 test_segmentation_train.py (单独模块) + E2E 测试覆盖.
     """
-    from app.workers.segmentation_tasks import train_segmentation_task
+    from app.tasks.workers.segmentation import train_segmentation_task
 
     # 只验证 task 对象存在, 参数签名正确, 不实际执行 (避免 DB 依赖)
     assert callable(train_segmentation_task)
-    assert train_segmentation_task.name == "app.workers.segmentation_tasks.train_segmentation_task"
+    assert train_segmentation_task.name == "app.tasks.workers.segmentation.train_segmentation_task"
     # 验证参数签名包含 dataset_id / user_id (从源码注释)
     import inspect
     sig = inspect.signature(train_segmentation_task.run)
@@ -151,11 +152,11 @@ def test_auto_annotate_segmentation_task_is_callable(celery_eager):
 
     同上: 详细 DB 流程依赖复杂环境, 此处只验证 task 元数据.
     """
-    from app.workers.segmentation_tasks import auto_annotate_segmentation_task
+    from app.tasks.workers.segmentation import auto_annotate_segmentation_task
 
     assert callable(auto_annotate_segmentation_task)
     assert auto_annotate_segmentation_task.name == (
-        "app.workers.segmentation_tasks.auto_annotate_segmentation_task"
+        "app.tasks.workers.segmentation.auto_annotate_segmentation_task"
     )
     import inspect
     sig = inspect.signature(auto_annotate_segmentation_task.run)

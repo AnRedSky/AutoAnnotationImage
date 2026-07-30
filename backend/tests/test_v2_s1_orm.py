@@ -9,11 +9,15 @@
 import pytest
 from datetime import datetime
 
-from app.models import (
-    User, Dataset, Image, Category,
-    BBoxAnnotation, SegmentationMask, ModelVersion,
-    AnnotationLog, TrainingJob,
-)
+from app.admin.model.user import User
+from app.tasks.model.dataset import Dataset
+from app.tasks.model.image import Image
+from app.tasks.model.category import Category
+from app.annotation.model.bbox_annotation import BBoxAnnotation
+from app.annotation.model.segmentation_mask import SegmentationMask
+from app.tasks.model.model_version import ModelVersion
+from app.tasks.model.annotation_log import AnnotationLog
+from app.tasks.model.training_job import TrainingJob
 
 
 def _new_engine_session():

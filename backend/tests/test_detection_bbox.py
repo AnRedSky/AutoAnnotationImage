@@ -17,8 +17,8 @@ import pytest
 from PIL import Image
 from sqlalchemy import select
 
-from app.models import BBoxAnnotation
-from app.services.bbox_service import (
+from app.annotation.model.bbox_annotation import BBoxAnnotation
+from app.common.geometry.bbox_service import (
     BBox, iou, nms, class_wise_nms,
     normalized_to_pixels, pixels_to_normalized,
     validate_normalized_bbox, bbox_to_yolo_line, yolo_line_to_bbox,

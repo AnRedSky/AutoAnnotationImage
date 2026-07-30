@@ -1,27 +1,35 @@
-# 一键部署 Docker Compose
-# =========================================
-# 启动: docker compose up -d
-# 停止: docker compose down
-# 重建: docker compose build --no-cache
+# =============================================================================
+#  Image Annotation System - Docker Compose (v3.x)
+# -----------------------------------------------------------------------------
+#  拆分：
+#    - api          : FastAPI / Uvicorn     (Dockerfile.api)
+#    - worker-train : 训练任务 worker         (Dockerfile.worker, queue=train)
+#    - worker-annot : 自动标注 worker         (Dockerfile.worker, queue=annotate)
+#    - 可选：beat    : 周期任务 worker (按需)
 #
-# 端口分配 (与后端 .env.docker 配合使用):
-#   8000  FastAPI 后端
-#   5173  Vue 前端 (开发模式 HMR)
-#   3306  MySQL 8
-#   6379  Redis 7
-#   9000  MinIO API
-#   9001  MinIO Console (Web UI)
-
-version: '3.8'
+#  启动:
+#    docker compose up -d
+#  停止:
+#    docker compose down
+#  重建 (依赖变了):
+#    docker compose build --no-cache api worker-train worker-annot
+#
+#  端口：
+#    8000  FastAPI
+#    5173  Vue 前端
+#    3306  MySQL
+#    6379  Redis
+#    9000/9001  MinIO
+# =============================================================================
 
 services:
-  # ============ 基础服务 ============
+  # ================== 基础设施 ==================
   mysql:
     image: mysql:8.0
     container_name: annotation_mysql
     environment:
-      MYSQL_ROOT_PASSWORD: root123
-      MYSQL_DATABASE: image_annotation
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_annotation}
       MYSQL_CHARACTER_SET_SERVER: utf8mb4
       MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
     ports:
@@ -29,7 +37,7 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root123}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -52,8 +60,8 @@ services:
     container_name: annotation_minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -65,14 +73,22 @@ services:
       timeout: 10s
       retries: 3
 
-  # ============ 应用服务 ============
-  backend:
-    build: ./backend
-    container_name: annotation_backend
+  # ================== 应用服务 ==================
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    image: annotation/api:local
+    container_name: annotation_api
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
       - ./backend/.env.docker
+    environment:
+      # 显式覆盖相对路径为容器内绝对路径；任何依赖 .env 的路径解析都正确
+      APP_PORT: "8000"
+      APP_HOST: "0.0.0.0"
     depends_on:
       mysql:
         condition: service_healthy
@@ -81,29 +97,79 @@ services:
       minio:
         condition: service_started
     volumes:
-      - ./backend:/app
+      - ./backend:/app                  # host bind (dev hot-reload via --reload, 可选)
       - model_data:/app/models
       - upload_data:/app/uploads
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - api_logs:/app/logs
+    # 默认 development 行为（uvicorn 不带 --reload）；
+    # 由 env APP_ENV / APP_DEBUG 控制表现层
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --proxy-headers --forwarded-allow-ips "*"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
-  celery-worker:
-    build: ./backend
-    container_name: annotation_celery
+  # 训练 worker：CPU/GPU 密集，并发 1
+  worker-train:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    image: annotation/worker:local
+    container_name: annotation_worker_train
+    restart: unless-stopped
     env_file:
       - ./backend/.env.docker
+    environment:
+      APP_PORT: "8000"     # 与 api 同，便于 inspect ping host 取一致
+      INFERENCE_DEVICE: ${INFERENCE_DEVICE:-cpu}
     depends_on:
       redis:
         condition: service_healthy
       mysql:
         condition: service_healthy
-      backend:
+      api:
         condition: service_started
     volumes:
       - ./backend:/app
       - model_data:/app/models
       - upload_data:/app/uploads
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+      - api_logs:/app/logs
+    command: >
+      celery -A app.tasks.workers.celery_app worker
+      --loglevel=info --pool=threads --concurrency=1 -Q train
 
+  # 标注 worker：I/O 密集，可高并发
+  worker-annotate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    image: annotation/worker:local
+    container_name: annotation_worker_annotate
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env.docker
+    environment:
+      APP_PORT: "8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+      - model_data:/app/models
+      - upload_data:/app/uploads
+      - api_logs:/app/logs
+    command: >
+      celery -A app.tasks.workers.celery_app worker
+      --loglevel=info --pool=threads --concurrency=4 -Q annotate
+
+  # ================== 前端（保留原状） ==================
   frontend:
     image: node:20-alpine
     container_name: annotation_frontend
@@ -114,7 +180,7 @@ services:
       - ./frontend:/app
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     depends_on:
-      - backend
+      - api
 
 volumes:
   mysql_data:
@@ -122,3 +188,4 @@ volumes:
   minio_data:
   model_data:
   upload_data:
+  api_logs:

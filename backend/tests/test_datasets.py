@@ -7,8 +7,8 @@ Test: Dataset API
 import pytest
 from sqlalchemy import select
 
-from app.models.image import Image
-from app.models.category import Category
+from app.tasks.model.image import Image
+from app.tasks.model.category import Category
 
 
 @pytest.mark.asyncio

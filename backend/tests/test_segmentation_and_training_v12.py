@@ -14,7 +14,7 @@ def test_segmentation_routes_registered():
     """分割任务核心 API 路由必须全部注册
     实际路由: /masks/upload/{image_id} (POST) /masks/{image_id} (GET/DELETE) /masks/replace (POST)
     """
-    from app.api.segmentation import router  # noqa: PLC0415
+    from app.tasks.api.segmentation import router  # noqa: PLC0415
     paths = [r.path for r in router.routes if hasattr(r, "path")]
     methods_by_path = {}
     for r in router.routes:
@@ -30,7 +30,7 @@ def test_segmentation_routes_registered():
 
 def test_segmentation_upload_get_delete():
     """上传/下载/删除 mask 三个动作必须注册 (POST/GET/DELETE)"""
-    from app.api.segmentation import router  # noqa: PLC0415
+    from app.tasks.api.segmentation import router  # noqa: PLC0415
     methods_by_path = {}
     for r in router.routes:
         if hasattr(r, "path") and hasattr(r, "methods"):
@@ -55,7 +55,7 @@ def test_training_schema_includes_task_type():
     TrainingJobOut 应含 task_type 字段 (或后端通过额外机制传)
     """
     from app.schemas.training import TrainingJobOut  # noqa: PLC0415
-    from app.models.training_job import TrainingJob  # noqa: PLC0415
+    from app.tasks.model.training_job import TrainingJob  # noqa: PLC0415
     # 后端 TrainingJob 模型必须含 task_type 字段
     model_cols = {c.name for c in TrainingJob.__table__.columns}
     assert "task_type" in model_cols, (
@@ -76,7 +76,7 @@ def test_training_schema_includes_task_type():
 
 def test_training_history_supports_segmentation_fields():
     """v2.5.0 S12.4 训练历史 API 路由必须存在 (用于拉取 miou/pixel_acc/dice 曲线)"""
-    from app.api.training import router  # noqa: PLC0415
+    from app.tasks.api.training import router  # noqa: PLC0415
     paths = [r.path for r in router.routes if hasattr(r, "path")]
     history_paths = [p for p in paths if "history" in p]
     assert len(history_paths) >= 1, (
@@ -87,7 +87,7 @@ def test_training_history_supports_segmentation_fields():
 def test_segmentation_mask_endpoint_signature():
     """v2.5.0 S12.3b 关键: /masks/{image_id} GET 路由必须存在
     (供前端 segmentationApi.getMask 调用)"""
-    from app.api.segmentation import router  # noqa: PLC0415
+    from app.tasks.api.segmentation import router  # noqa: PLC0415
     found = False
     for r in router.routes:
         if hasattr(r, "path") and "/masks/{image_id}" in r.path:

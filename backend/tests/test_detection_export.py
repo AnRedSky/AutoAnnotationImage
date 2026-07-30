@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from PIL import Image as PILImage
 
-from app.models import ModelVersion
+from app.tasks.model.model_version import ModelVersion
 from app.common.enums import TaskType
 
 

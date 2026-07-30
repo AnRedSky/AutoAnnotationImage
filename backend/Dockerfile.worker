@@ -1,0 +1,31 @@
+# Worker-only stage - Celery + 任务注册
+# 复用 base 已装的依赖镜像。
+#
+# 启动两种形态可同时存在（同一镜像、不同 CMD）：
+#   - train    : 训练任务，CPU/GPU 密集，建议 concurrency=1
+#   - annotate : 自动标注任务，I/O 密集，可 concurrency>=2
+#
+# 通过环境变量 CELERY_QUEUES 默认消费 train 与 annotate 两个队列，
+# ops 上按需将不同 worker 实例指向不同队列，实现"业务分离、复用二进制"。
+FROM base AS worker
+
+USER app
+
+ENV PYTHONPATH=/app
+
+# Worker 周期与硬件资源相关，故不强制 HEALTHCHECK 8000。
+# 这里用 celery inspect ping 做健康检查（也可注释掉，走进程存活检查）。
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD celery -A app.tasks.workers.celery_app inspect ping -d "celery@$(hostname)" \
+        --timeout 5 || exit 1
+
+# 默认消费 train 与 annotate 队列；可用 -Q 覆盖
+# - 训练任务 (train): CPU/GPU bound, 建议 1 worker 1 task
+# - 自动标注 (annotate): I/O bound, 可多并发
+CMD ["celery", \
+     "-A", "app.tasks.workers.celery_app", \
+     "worker", \
+     "--loglevel=info", \
+     "--pool=threads", \
+     "--concurrency=2", \
+     "-Q", "train,annotate"]

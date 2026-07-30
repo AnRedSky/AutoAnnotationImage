@@ -1,70 +1,95 @@
 [project]
 name = "image-annotation-backend"
 version = "0.1.0"
-description = "基于深度学习的图像自动标注系统 - 后端服务"
+description = "基于深度学习的图像自动标注系统 - 后端服务 (API + Celery Worker)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Annotation Platform Team" }
 ]
+
+# =====================================================================
+#  依赖列表（单一真实来源）
+#  - 与 Dockerfile 中 `uv sync --frozen --no-install-project` 配套
+#  - uv.lock 已生成，安装/构建走 lock 文件
+#  - 与 requirements.txt 保持同步（requirements.txt 仅做兼容保留）
+# =====================================================================
 dependencies = [
-    # FastAPI async backend
+    # ----- FastAPI 异步后端 -----
     "fastapi==0.110.0",
     "uvicorn[standard]==0.27.1",
     "python-multipart==0.0.9",
-    # Database
+
+    # ----- 数据库 (MySQL + SQLite 测试) -----
     "sqlalchemy[asyncio]==2.0.27",
     "aiomysql==0.2.0",
     "pymysql==1.1.0",
     "alembic==1.13.1",
-    "aiosqlite==0.20.0",  # v2.5.15: 测试用 sqlite+aiosqlite:///:memory:
-    # Auth & Security
+    "aiosqlite==0.20.0",
+
+    # ----- 鉴权与安全 -----
     "python-jose[cryptography]==3.3.0",
-    "passlib[bcrypt]==1.7.4",
     "bcrypt==4.1.2",
-    # Pydantic
+    # v3.0.0 审查修复 P2-8 移除未用的 passlib
+
+    # ----- 数据建模 -----
     "pydantic==2.6.1",
     "pydantic-settings==2.2.1",
     "email-validator==2.1.0",
-    # Deep Learning
+
+    # ----- 深度学习 -----
     "torch==2.2.0",
     "torchvision==0.17.0",
     "timm==0.9.12",
     "Pillow==10.2.0",
     "albumentations==1.3.1",
-    # ML Utilities
+
+    # ----- ML Utilities -----
     "scikit-learn==1.4.1.post1",
     "numpy==1.26.4",
-    # Detection & Segmentation (v2.0.0)
+
+    # ----- 检测与分割 (v2.0.0) -----
     "ultralytics==8.0.196",
     "opencv-python==4.9.0.80",
-    # pycocotools (>=2.0.7): 当前未使用 (COCO-seg 导出用 polygon, 不依赖 RLE)
-    # 避免在 Windows 上从源码编译失败, 留待 v2.2.0 真实 RLE 改造时再加
-    # "pycocotools==2.0.7",
-    # Async Tasks
+
+    # ----- 异步任务 (Celery + Redis broker) -----
     "celery==5.3.6",
     "redis==5.0.3",
-    # Storage
+
+    # ----- 存储 -----
     "minio==7.2.4",
-    # Config
+    "aiofiles==23.2.1",
+
+    # ----- 配置 -----
     "python-dotenv==1.0.1",
-    # Logging
+
+    # ----- 日志 -----
     "loguru==0.7.2",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==8.1.1",
-    "pytest-asyncio==0.23.6",  # v2.5.15 P1-8: 新增, 测试 @pytest.mark.asyncio
-    "pytest-cov==5.0.0",        # v2.5.15 P1-8: 新增, 覆盖率门禁
+    "pytest-asyncio==0.23.6",
+    "pytest-cov==5.0.0",
     "httpx==0.27.0",
     "ruff==0.3.5",
     "mypy==1.9.0",
 ]
 
+# =====================================================================
+#  console scripts: `uv run <script>` 直启动
+#    - api     : 启动 FastAPI 服务
+#    - worker  : 启动 Celery worker (默认合并 train+annotate 队列)
+#    - worker-train / worker-annotate: 拆分队列
+# =====================================================================
 [project.scripts]
-image-annotation-backend = "app.main:run"
+api              = "app.main:run"
+worker           = "app.tasks.workers.celery_app:run_worker"
+worker-train     = "app.tasks.workers.celery_app:run_worker_train"
+worker-annotate  = "app.tasks.workers.celery_app:run_worker_annotate"
+healthcheck      = "app.core.healthcheck:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -84,13 +109,12 @@ ignore = ["E501"]
 [tool.uv]
 dev-dependencies = [
     "pytest==8.1.1",
-    "pytest-asyncio==0.23.6",  # v2.5.15 P1-8
-    "pytest-cov==5.0.0",        # v2.5.15 P1-8
+    "pytest-asyncio==0.23.6",
+    "pytest-cov==5.0.0",
     "httpx==0.27.0",
     "ruff==0.3.5",
 ]
 
-# v2.5.15 P1-8: pytest 集中配置 + 覆盖率门禁
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
@@ -106,9 +130,5 @@ addopts = [
     "--strict-config",
     "--cov=app",
     "--cov-report=term-missing:skip-covered",
-    # v2.5.15 起步阈值 = 当前覆盖率 (39.71%, 留 0.3% buffer 防浮点漂移)。
-    # 提升路径:
-    #   1) v2.5.16: 补充 workers/* 实际执行单测 (预期 +15%) → 55%
-    #   2) v2.6.0: 补充 api/* 各路由 happy path 单测 (预期 +15%) → 70%
     "--cov-fail-under=39",
 ]

@@ -60,3 +60,73 @@ celery_app.conf.update(
         "app.tasks.workers.segmentation.auto_annotate_segmentation_task": {"queue": "annotate"},
     },
 )
+
+
+# =====================================================================
+#  Console-script entries (pyproject.toml 中声明的 worker/worker-train/worker-annotate)
+#  全部使用 cellery_app.worker_main(...)，环境变量优先级：
+#    1) 函数入参 2) os.environ (CELERY_*) 3) celery_app.conf 中的默认值
+# =====================================================================
+
+def _worker_main(
+    *,
+    pool: str | None = None,
+    concurrency: int | None = None,
+    queues: str | None = None,
+    loglevel: str | None = None,
+) -> None:
+    """统一 Worker 启动器；阻塞运行 worker。"""
+    import os
+    import sys
+
+    # 关键：显式 import 子包，触发 @celery_app.task 注册
+    # (celery_app.py 的 include= 已经处理常规情况，这里再加一道保险)
+    import app.tasks.workers  # noqa: F401
+
+    # v3.1.0 Phase T (P0-1): worker 启动前装入 SIGTERM handler
+    # 让 cancel_training_job 发的 SIGTERM 能写 emergency marker 到 Redis
+    # 而不是走 Python 默认处理直接 exit.
+    from app.tasks.workers.signal_handlers import install_sigterm_handler
+    install_sigterm_handler(celery_app)
+
+    # 解析有效参数（CLI > env > default）
+    pool = pool or os.getenv("CELERY_WORKER_POOL") or celery_app.conf.worker_pool or "threads"
+    concurrency = (
+        int(concurrency)
+        if concurrency is not None
+        else int(
+            os.getenv("CELERY_WORKER_CONCURRENCY")
+            or celery_app.conf.worker_concurrency
+            or 2
+        )
+    )
+    if concurrency < 1:
+        raise SystemExit("concurrency 必须 >= 1")
+    queues = queues or os.getenv("CELERY_QUEUES", "train,annotate")
+    loglevel = loglevel or os.getenv("CELERY_LOGLEVEL", "info")
+
+    argv = [
+        "worker",
+        f"--loglevel={loglevel}",
+        f"--pool={pool}",
+        f"--concurrency={concurrency}",
+        "-Q", queues,
+    ]
+    # 设置进程名便于日志检索（compose 中区分 train / annotate）
+    sys.argv = ["celery"] + argv
+    celery_app.worker_main(argv)
+
+
+def run_worker() -> None:
+    """合并消费 train+annotate 两个队列的通用 worker。"""
+    _worker_main()
+
+
+def run_worker_train() -> None:
+    """训练专用 worker：默认单并发，避免 CPU/GPU 互踩。"""
+    _worker_main(queues="train", concurrency=1)
+
+
+def run_worker_annotate() -> None:
+    """自动标注专用 worker：高并发，I/O 密集。"""
+    _worker_main(queues="annotate", concurrency=4)
