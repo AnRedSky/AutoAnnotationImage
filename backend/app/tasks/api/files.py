@@ -185,6 +185,7 @@ async def get_image_thumbnail(
     _require_user(current_user, img)
 
     from app.common.storage.storage_service import storage_service
+    from pathlib import Path as _P
     if not storage_service.exists(img.storage_path):
         raise HTTPException(status_code=404, detail="Image file missing on storage")
 
@@ -195,7 +196,6 @@ async def get_image_thumbnail(
         """cache miss 时调用. 必须读 storage + PIL 编一次."""
         from PIL import Image as PILImage
         from io import BytesIO
-        from pathlib import Path as _P
         from app.utils.async_helpers import run_async_in_worker
 
         # cache 调到 loader 在 worker thread 内, 但 storage_service.load 是 async.
