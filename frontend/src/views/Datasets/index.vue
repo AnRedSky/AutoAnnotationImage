@@ -50,12 +50,39 @@ const onSizeChange = (s: number) => { pageSize.value = s; page.value = 1 }
 const indexMethod = (idx: number) => (page.value - 1) * pageSize.value + idx + 1
 
 const createOpen = ref(false)
-const createForm = ref({
+// 预置类别: 数组形式管理, 支持单条删除/批量增加 (替代 textarea 逗号分隔)
+// 关闭对话框或成功后重置为 [] (与空状态对齐)
+const createForm = ref<{
+  name: string
+  description: string
+  task_type: string
+  category_names: string[]
+}>({
   name: '',
   description: '',
   task_type: 'classification',
-  category_names: ''
+  category_names: []
 })
+// 增加一条空类别输入项 (enqueue)
+const addCategoryRow = () => {
+  createForm.value.category_names.push('')
+}
+// 删除一条类别 (含确认弹窗, 防止误操作; 空内容不弹确认, 直接删)
+const removeCategoryRow = async (idx: number) => {
+  const item = createForm.value.category_names[idx]
+  if (item && item.trim()) {
+    try {
+      await ElMessageBox.confirm(
+        `确认删除类别"${item.trim()}"？此操作仅移除该项输入，不会影响已保存的类别。`,
+        '删除确认',
+        { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
+  }
+  createForm.value.category_names.splice(idx, 1)
+}
 
 const load = async () => {
   loading.value = true
@@ -112,7 +139,14 @@ watch(
 const onCreate = async () => {
   const v = createForm.value
   if (!v.name) { ElMessage.warning('请输入名称'); return }
-  const names = (v.category_names || '').split(/[,，\n]/).map((s: string) => s.trim()).filter(Boolean)
+  // 数组形式: 每项 trim, 过滤空值, 去重保序 (后端期望 string[])
+  const names = Array.from(
+    new Set(
+      (v.category_names || [])
+        .map((s: string) => s.trim())
+        .filter(Boolean)
+    )
+  )
   try {
     await datasetApi.create({ ...v, category_names: names })
     ElMessage.success('创建成功')
@@ -121,7 +155,7 @@ const onCreate = async () => {
       name: '',
       description: '',
       task_type: 'classification',
-      category_names: ''
+      category_names: []
     }
     load()
   } catch (e: any) {
@@ -429,8 +463,41 @@ const closeUpload = async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="预置类别">
-          <el-input v-model="createForm.category_names" type="textarea" :rows="3"
-            placeholder="多个类别用英文逗号或换行分隔，如：cat, dog, bird" />
+          <!-- 动态类别列表: 每项一行, 支持逐项编辑/删除; 底部增加按钮入队 -->
+          <div class="preset-categories">
+            <div
+              v-for="(_cat, idx) in createForm.category_names"
+              :key="idx"
+              class="preset-categories__row"
+            >
+              <span class="preset-categories__index">{{ idx + 1 }}</span>
+              <el-input
+                v-model="createForm.category_names[idx]"
+                :placeholder="idx === 0 ? '如：cat' : `类别 ${idx + 1}`"
+                clearable
+                class="preset-categories__input"
+              />
+              <el-button
+                type="danger"
+                :icon="Delete"
+                link
+                :title="`删除类别 ${idx + 1}`"
+                @click="removeCategoryRow(idx)"
+              />
+            </div>
+            <div v-if="createForm.category_names.length === 0" class="preset-categories__empty">
+              暂无预置类别，点击下方"增加类别"添加
+            </div>
+            <el-button
+              type="primary"
+              :icon="Plus"
+              plain
+              class="preset-categories__add"
+              @click="addCategoryRow"
+            >
+              增加类别
+            </el-button>
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -605,4 +672,37 @@ const closeUpload = async () => {
   font-weight: 600;
 }
 .dim { color: var(--text-placeholder); font-size: 12px; }
+
+/* 预置类别: 动态行布局 (序号 + 输入框 flex:1 + 删除按钮) */
+.preset-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.preset-categories__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.preset-categories__index {
+  flex: 0 0 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-placeholder);
+  font-variant-numeric: tabular-nums;
+}
+.preset-categories__input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.preset-categories__empty {
+  color: var(--text-placeholder);
+  font-size: 12px;
+  padding: 4px 0;
+}
+.preset-categories__add {
+  align-self: flex-start;
+  margin-top: 4px;
+}
 </style>
