@@ -25,6 +25,8 @@ class User(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Relationships (跨应用: 引用 tasks 应用下的模型, 通过类名解析)
     datasets = relationship("Dataset", back_populates="owner", cascade="all, delete-orphan")

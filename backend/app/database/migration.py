@@ -278,6 +278,16 @@ async def ensure_v2_0_0_schema(
         if verbose:
             print(f"  [err]  {err}")
 
+    # v3.3.0: user 表新列 (last_login_at, updated_at) 幂等加列
+    try:
+        result = await _ensure_user_new_columns(conn, verbose=verbose)
+        added.extend(result)
+    except Exception as e:  # noqa: BLE001
+        err = f"user 表新列加列失败: {e!r}"
+        errors.append(err)
+        if verbose:
+            print(f"  [err]  {err}")
+
     return {"added": added, "skipped": skipped, "errors": errors}
 
 
@@ -330,6 +340,40 @@ async def _ensure_column_varchar_length(
         if verbose:
             print(f"  [mod]  {msg}")
     return applied
+
+
+# v3.3.0: 新增列 (用于 ORM 加字段但老表没建时幂等补齐)
+_USER_TABLE_NEW_COLUMNS = [
+    ("last_login_at", "DATETIME NULL"),
+    ("updated_at",    "DATETIME NULL"),
+]
+
+
+async def _ensure_user_new_columns(
+    conn: AsyncConnection, *, verbose: bool = False,
+) -> list[str]:
+    """幂等加列 (MySQL): user 表新字段 (v3.3.0+)."""
+    added: list[str] = []
+    for col, type_def in _USER_TABLE_NEW_COLUMNS:
+        if not await _table_exists(conn, "user"):
+            continue
+        try:
+            rows = await conn.execute(text(
+                "SELECT 1 FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "  AND TABLE_NAME = 'user' AND COLUMN_NAME = :c LIMIT 1"
+            ), {"c": col})
+            if rows.first() is not None:
+                continue  # 已存在
+            sql = f"ALTER TABLE `user` ADD COLUMN `{col}` {type_def}"
+            await conn.execute(text(sql))
+            added.append(f"user.{col} {type_def}")
+            if verbose:
+                print(f"  [add]  user.{col}")
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(f"  [err]  user.{col}: {e!r}")
+    return added
 
 
 # v3.1.0 Phase V #4: 索引补全 helpers

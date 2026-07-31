@@ -79,6 +79,10 @@ class AuthService:
             raise HTTPException(403, "账号已停用, 请联系管理员")
 
         token = AuthService.issue_token(user)
+        # v3.3.0: 记录最后登录时间
+        from datetime import datetime as _dt
+        user.last_login_at = _dt.utcnow()
+        await db.commit()
         # 审计: 登录成功
         emit_audit_event(
             AuthEventType.LOGIN_SUCCESS,

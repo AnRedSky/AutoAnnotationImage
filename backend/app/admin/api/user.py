@@ -60,6 +60,7 @@ async def list_users(
                 "role": u.role,
                 "is_active": u.is_active,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
+                "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
             }
             for u in users
         ],
@@ -81,6 +82,7 @@ async def get_my_profile(
         "role": current_user.role,
         "is_active": current_user.is_active,
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "last_login_at": current_user.last_login_at.isoformat() if current_user.last_login_at else None,
     }
 
 

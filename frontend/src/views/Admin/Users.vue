@@ -11,6 +11,7 @@ const userStore = useUserStore()
 interface UserItem {
   id: number; username: string; email: string | null; role: string
   is_active: boolean; created_at: string | null
+  last_login_at: string | null
 }
 
 const allUsers = ref<UserItem[]>([])
@@ -102,6 +103,16 @@ const onSaveResetPassword = async () => {
 }
 
 const fmtDate = (s: string | null) => s ? new Date(s).toLocaleString('zh-CN') : '-'
+const fmtRelative = (s: string | null) => {
+  if (!s) return '从未登录'
+  const diff = Date.now() - new Date(s).getTime()
+  const sec = Math.floor(diff / 1000)
+  if (sec < 60) return '刚刚'
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`
+  if (sec < 86400 * 30) return `${Math.floor(sec / 86400)} 天前`
+  return new Date(s).toLocaleDateString('zh-CN')
+}
 onMounted(loadUsers)
 </script>
 
@@ -160,6 +171,14 @@ onMounted(loadUsers)
         </el-table-column>
         <el-table-column label="创建时间" width="160">
           <template #default="{ row }">{{ fmtDate(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="最后登录" width="170">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.last_login_at" :content="fmtDate(row.last_login_at)" placement="top">
+              <span>{{ fmtRelative(row.last_login_at) }}</span>
+            </el-tooltip>
+            <span v-else class="never-logged">从未登录</span>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="380" fixed="right">
           <template #default="{ row }">

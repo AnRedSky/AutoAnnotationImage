@@ -171,6 +171,7 @@
 
 /* ============ Tag 内联 ============ */
 .self-tag { margin-left: 6px; }
+.never-logged { color: var(--text-placeholder, #c0c4cc); font-size: 12px; font-style: italic; }
 .slug-badge {
   display: inline-block;
   padding: 1px 8px;
