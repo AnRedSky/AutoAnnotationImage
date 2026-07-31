@@ -16,6 +16,20 @@ from app.admin.service.user_service import UserService
 router = APIRouter()
 
 
+def _iso_utc(dt):
+    """序列化 datetime 为带 Z 后缀的 UTC ISO 字符串 (前端 JS 可正确解析).
+
+    MySQL DATETIME 列不带时区 — ORM 读出是 naive datetime, 但实际存的就是
+    ``datetime.utcnow()`` 写入的 UTC 值. 补 'Z' 让前端 ``new Date(s)`` 当作 UTC 解析,
+    再 ``.toLocaleString('zh-CN')`` 转北京时间显示.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.isoformat()
+    return dt.isoformat() + "Z"
+
+
 # ============== Schemas ==============
 
 class ChangeRoleRequest(BaseModel):
@@ -59,8 +73,8 @@ async def list_users(
                 "email": u.email,
                 "role": u.role,
                 "is_active": u.is_active,
-                "created_at": u.created_at.isoformat() if u.created_at else None,
-                "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
+                "created_at": _iso_utc(u.created_at),
+                "last_login_at": _iso_utc(u.last_login_at),
             }
             for u in users
         ],
@@ -81,8 +95,8 @@ async def get_my_profile(
         "email": current_user.email,
         "role": current_user.role,
         "is_active": current_user.is_active,
-        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
-        "last_login_at": current_user.last_login_at.isoformat() if current_user.last_login_at else None,
+        "created_at": _iso_utc(current_user.created_at),
+        "last_login_at": _iso_utc(current_user.last_login_at),
     }
 
 
