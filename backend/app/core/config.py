@@ -115,6 +115,8 @@ class Settings(BaseSettings):
     JWT_LEEWAY_SECONDS: int = int(os.getenv("JWT_LEEWAY_SECONDS", "60"))
 
     # ===== MinIO / Storage =====
+    # v3.3.0: 存储后端开关 (local | minio)
+    STORAGE_BACKEND: str = os.getenv("STORAGE_BACKEND", "local")
     MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000")
     MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
     MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "minioadmin")

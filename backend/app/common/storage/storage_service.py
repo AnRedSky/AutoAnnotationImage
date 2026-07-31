@@ -91,3 +91,45 @@ class StorageService:
 
 
 storage_service = StorageService()
+
+
+def _real_storage_service():
+    """根据 STORAGE_BACKEND 决定实际 backend.
+
+    v3.3.0: 让所有调用方 (upload.py / files.py 等) 继续从 storage_service 单例
+    获取, 但底层按环境变量切换 local / minio.
+    注意: 调用方必须从 storage_service 调方法, 不能缓存实例 (backend 可热切换).
+    """
+    backend = (settings.STORAGE_BACKEND or "local").lower()
+    if backend == "minio":
+        from app.common.storage.minio_storage_service import MinioStorageService
+        global _minio_singleton
+        if _minio_singleton is None:
+            _minio_singleton = MinioStorageService()
+        return _minio_singleton
+    return _local_singleton
+
+
+# Local 单例 (模块级 cache, 避免每次 _real_storage_service() 都新建)
+_local_singleton: StorageService = storage_service
+_minio_singleton: "MinioStorageService | None" = None
+
+
+class _LazyStorageProxy:
+    """透明代理: 每次访问属性都路由到当前 backend 实例.
+
+    解决 Python 'from x import y' 的对象绑定陷阱 — 调用方拿到的是 proxy,
+    方法调用时才查 backend, 这样 backend 切换对调用方完全透明.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        return getattr(_real_storage_service(), name)
+
+    def __repr__(self) -> str:
+        return f"<LazyStorageProxy -> {type(_real_storage_service()).__name__}>"
+
+
+# 替换 storage_service 为代理
+storage_service = _LazyStorageProxy()
