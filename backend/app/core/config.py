@@ -10,9 +10,25 @@ v3.0.0 迁移: 从 app.core.config 迁入 app.core.config (Phase 1.7)
 import os
 from pathlib import Path
 from typing import List, Optional
+
+# v3.3.0: 在 import pydantic 之前先 load .env, 确保下面 STORAGE_BACKEND 等
+#         os.getenv() 在 class body 阶段能读到正确值.
+# 优先级: backend/.env (本地开发) > 项目根 .env (Docker/生产兜底).
+# 历史问题: 之前 load_dotenv 放在 class body 之后, Settings 类用 os.getenv("STORAGE_BACKEND", "local")
+#           求默认值时, .env 还没载入 os.environ, 导致 STORAGE_BACKEND 永远 = "local",
+#           与 docker-compose env_file 行为不一致.
+from dotenv import load_dotenv  # noqa: E402
+_BACKEND_ROOT_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"  # backend/.env
+_PROJECT_ROOT_ENV_FILE = Path(__file__).resolve().parent.parent.parent.parent / ".env"  # 根 .env
+# 本地开发: backend/.env 优先 (override=True, 因为本地配置应是最终值)
+# 兜底: 根 .env (override=False, 保留环境变量已设的值)
+if _BACKEND_ROOT_ENV_FILE.exists():
+    load_dotenv(_BACKEND_ROOT_ENV_FILE, override=True)
+elif _PROJECT_ROOT_ENV_FILE.exists():
+    load_dotenv(_PROJECT_ROOT_ENV_FILE, override=False)
+
 from pydantic import model_validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 # ---- v2.5.30: 项目根目录绝对锚点 ----
 # 历史问题: UPLOAD_DIR / MODEL_DIR / PRETRAINED_CACHE_DIR 等默认值是 "./uploads" "./models",
@@ -28,7 +44,6 @@ _DEFAULT_UPLOAD_DIR = (_PROJECT_ROOT / "uploads").resolve()
 _DEFAULT_DATA_DIR = (_DEFAULT_MODEL_DIR / "data").resolve()
 _DEFAULT_PRETRAINED_CACHE_DIR = (_DEFAULT_MODEL_DIR / "cache").resolve()
 _DEFAULT_ULTRALYTICS_HOME = (_DEFAULT_PRETRAINED_CACHE_DIR / "ultralytics").resolve()
-
 
 def _resolve_storage_path(env_value: "Optional[str]", default_abs: Path) -> Path:
     """

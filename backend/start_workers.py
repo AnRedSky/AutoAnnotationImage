@@ -33,12 +33,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from app.core.config import settings  # noqa: E402,E501
+
+
 BACKEND_DIR = Path(__file__).resolve().parent
 LOGS_DIR = BACKEND_DIR.parent / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 PID_FILE = LOGS_DIR / "celery.pid"
 LOG_FILE = LOGS_DIR / "celery.log"
-
 # 切到 backend/ 目录（让 .env / pyproject.toml / app/ 都在正确位置）
 os.chdir(BACKEND_DIR)
 sys.path.insert(0, str(BACKEND_DIR))
@@ -75,8 +77,8 @@ def parse_env_value(key: str, default: str) -> str:
     return default
 
 
-REDIS_HOST = parse_env_value("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(parse_env_value("REDIS_PORT", "6379"))
+REDIS_HOST = settings.REDIS_HOST
+REDIS_PORT = int(settings.REDIS_PORT)
 
 
 def test_port(host: str, port: int, timeout: float = 0.5) -> bool:
@@ -143,29 +145,35 @@ def preflight_deps() -> bool:
 
     Returns True if required deps OK, False otherwise. Worker 起来时若 DB 不可用,
     会一直 retry 失败很烦. 现在预检明确告知.
+
+    v3.3.0: STORAGE_BACKEND=local 时跳过 MinIO 探测 (避免误报 + 节省资源).
     """
     section("Preflight - checking required services")
     # MySQL: 必查
     # 从 .env 读 (避免 import settings 顺序问题)
-    mysql_host = parse_env_value("MYSQL_HOST", "127.0.0.1")
-    mysql_port = int(parse_env_value("MYSQL_PORT", "3306"))
+    mysql_host = settings.MYSQL_HOST
+    mysql_port = int(settings.MYSQL_PORT)   
     if test_port(mysql_host, mysql_port):
         ok(f"MySQL   {mysql_host}:{mysql_port}  reachable")
     else:
         err(f"MySQL   {mysql_host}:{mysql_port}  NOT reachable (REQUIRED)")
         return False
 
-    # MinIO: 软警告, 训练/上传任务才需要
-    minio_endpoint = parse_env_value("MINIO_ENDPOINT", "127.0.0.1:9000")
-    try:
-        mhost, mport = minio_endpoint.split(":")[:2]
-        mport = int(mport)
-    except Exception:
-        mhost, mport = "127.0.0.1", 9000
-    if test_port(mhost, mport):
-        ok(f"MinIO   {minio_endpoint}  reachable")
+    # v3.3.0: 仅当 STORAGE_BACKEND=minio 时探测 MinIO (local 后端无 MinIO 进程)
+    storage_backend = (settings.STORAGE_BACKEND or "local").lower()
+    if storage_backend == "minio":
+        minio_endpoint = settings.MINIO_ENDPOINT
+        try:
+            mhost, mport = minio_endpoint.split(":")[:2]
+            mport = int(mport)
+        except Exception:
+            mhost, mport = "127.0.0.1", 9000
+        if test_port(mhost, mport):
+            ok(f"MinIO   {minio_endpoint}  reachable")
+        else:
+            info(f"MinIO   {minio_endpoint}  NOT reachable (training/upload may fail)")
     else:
-        info(f"MinIO   {minio_endpoint}  NOT reachable (training/upload may fail)")
+        info("MinIO   跳过探测 (STORAGE_BACKEND=local)")
 
     return True
 
@@ -322,12 +330,19 @@ def start_foreground():
     ok(f"Consuming queues: {queues}")
     print()
     try:
+        # v3.3.3 修复: 必须用 "-Q train,annotate" (空格分隔) 而不是 "-Q=train,annotate".
+        # 历史 bug: f"-Q={queues}" 会被 Celery argparse 整体解析为单一队列名 "=train,annotate"
+        # (即订阅到名为 "=train,annotate" 的队列, 而非 train + annotate 两个队列).
+        # 表现: worker 进程活着, Redis pubsub 心跳注册成功, 但实际不订阅任何任务队列,
+        #       训练任务永远停留在 PENDING (waiting) 状态.
+        # 修正: 把 "-Q" 与队列名拆成两个独立 argv 项, Celery argparse 会按空格切分,
+        #       多队列用逗号分隔即可 (如 -Q train,annotate).
         celery_app.worker_main([
             "worker",
             f"--loglevel={loglevel}",
             f"--pool={pool}",
             f"--concurrency={concurrency}",
-            f"-Q={queues}",
+            "-Q", queues,
         ])
     except KeyboardInterrupt:
         print("\n[INFO] Celery worker stopped")

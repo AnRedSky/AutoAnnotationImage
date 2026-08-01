@@ -59,20 +59,23 @@ def preflight() -> list[str]:
     Phase V #3: 启服务前先 sanity-check MySQL/Redis/MinIO, 让启动失败更明显.
     之前用户启 start_api -> 启动看着像好 -> /api/health 才发现 Redis 不可用,
     浪费时间排查. 现在 status 行给出明确诊断.
+
+    v3.3.0: STORAGE_BACKEND=local 时跳过 MinIO 探测 (避免误报 + 节省资源).
     """
     warnings: list[str] = []
     deps = [
         ("MySQL", settings.MYSQL_HOST, settings.MYSQL_PORT, True),
         ("Redis", settings.REDIS_HOST, settings.REDIS_PORT, True),
-        ("MinIO", "127.0.0.1", 9000, False),  # MINIO_ENDPOINT 含 :port, parse it
     ]
-    # Parse MinIO endpoint
-    try:
-        mhost = settings.MINIO_ENDPOINT.split(":")[0]
-        mport = int(settings.MINIO_ENDPOINT.split(":")[1])
-        deps[2] = ("MinIO", mhost, mport, False)
-    except Exception:
-        warnings.append(f"  ⚠  MinIO endpoint 解析失败: {settings.MINIO_ENDPOINT!r}")
+    # v3.3.0: 仅当 STORAGE_BACKEND=minio 时探测 MinIO (local 后端无 MinIO 进程)
+    is_minio_backend = (settings.STORAGE_BACKEND or "local").lower() == "minio"
+    if is_minio_backend:
+        try:
+            mhost = settings.MINIO_ENDPOINT.split(":")[0]
+            mport = int(settings.MINIO_ENDPOINT.split(":")[1])
+            deps.append(("MinIO", mhost, mport, False))
+        except Exception:
+            warnings.append(f"  ⚠  MinIO endpoint 解析失败: {settings.MINIO_ENDPOINT!r}")
 
     for name, host, port, required in deps:
         if _check_port(host, port):
