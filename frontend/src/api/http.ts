@@ -26,7 +26,10 @@ http.interceptors.response.use(
   (response) => response.data,
   (error) => {
     const status = error?.response?.status
-    if (status === 401) {
+    // 业务自定义标记: 该请求即便 401 也不触发"清 auth + 跳登录页"副作用
+    // 用于登录流程中探测 /me 等必须等新 token 写入 store 之后才能成功的请求
+    const skip401Redirect = (error?.config as any)?.__skip401Redirect === true
+    if (status === 401 && !skip401Redirect) {
       // 登录已失效：清理鉴权态并跳登录页（保留 SPA 状态，避免全页刷新丢失未保存标注）
       if (!isRedirectingToLogin) {
         isRedirectingToLogin = true
@@ -37,6 +40,11 @@ http.interceptors.response.use(
           r.default.push({ path: '/login', query: { redirect: window.location.pathname + window.location.search } })
         }).finally(() => { isRedirectingToLogin = false })
       }
+    } else if (status === 401 && skip401Redirect) {
+      // 登录流探测请求的 401: 仅记录, 不清 auth 也不跳页 (由调用方 catch 处理)
+      // 当前由 console.warn 暴露, 生产可对接前端监控
+      // eslint-disable-next-line no-console
+      console.warn('[http] 401 on skip401Redirect request', error?.config?.url)
     } else if (status === 403) {
       ElMessage.error('无权限访问')
     } else if (status >= 500) {

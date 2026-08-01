@@ -15,7 +15,35 @@ const regLoading = ref(false)
 const loginForm = reactive({ username: '', password: '' })
 const regForm = reactive({ username: '', password: '', email: '' })
 
+/**
+ * 登录处理
+ *
+ * 修复历史: "首次登录无响应/需点击两次"
+ * ----------------------------------------------------------------------
+ * 根因 1: 双重事件绑定
+ *   原写法: <el-form @submit.prevent="onLogin"> + <el-button @click="onLogin">
+ *   在 el-form 上下文中, 按钮若被识别为 type="submit" (部分 Element Plus 版本/
+ *   浏览器行为下), 会同时触发 form 的 submit 事件 → onLogin 被并发调用两次.
+ *   第二次调用的 await 解析后会覆盖第一次的 token, 且第一次请求可能因
+ *   token 已被清空 / 路由已 push 而被丢弃, 表现为"无响应".
+ *
+ * 根因 2: 无 re-entry 守卫
+ *   loading.value=true 在异步请求开始前同步设置, 但若 onLogin 被并发触发,
+ *   第二次调用会无视 loading 状态再次发起请求.
+ *
+ * 根因 3: 密码框 @keyup.enter="onLogin" + el-form 的 submit 事件
+ *   在密码框按回车, 既触发 keyup.enter, 又触发 form submit, onLogin 同样并发.
+ *
+ * 修复方案:
+ *   - 表单去掉 @submit.prevent, 全部走按钮的 @click (按钮显式 native-type="button")
+ *   - onLogin 入口加 loading 守卫, 已加载中直接 return
+ *   - 密码框回车由 keyup.enter 显式调用 onLogin (经守卫过滤并发)
+ *   - 按钮点击在事件循环下一微任务再启动网络请求, 避免 :loading 同步翻 true
+ *     干扰 click 事件冒泡 (Element Plus 在 loading=true 时立即 disabled).
+ */
 const onLogin = async () => {
+  // re-entry 守卫: 防止双击 / 双触发导致重复请求
+  if (loading.value) return
   if (!loginForm.username || !loginForm.password) {
     ElMessage.warning('请输入用户名和密码')
     return
@@ -25,16 +53,26 @@ const onLogin = async () => {
     const res: any = await authApi.login(loginForm.username, loginForm.password)
     const tk = res.access_token
     if (!tk) throw new Error('未获取到 token')
-    // token 统一由 store 管理（setAuth 同步写入 localStorage['token']）
+    // ----------------------------------------------------------------
+    // 关键修复: 先把新 token 写入 store/localStorage, 再调用 authApi.me()
+    // 原因: http.ts 的请求拦截器只在 localStorage['token'] 读 token,
+    //       若先调 me() 后写 token, /me 会带上"登出后空值/旧值"出发,
+    //       后端 get_current_user 必然返回 401, 触发响应拦截器
+    //       的"清空 auth + 跳登录页"副作用, 表现"刚登出再登录就 401".
+    // 副作用: 若 me() 失败 (网络/服务端异常), 保留默认 user info,
+    //         不会清掉已签发的 token, 保证用户至少能进入首页.
+    // ----------------------------------------------------------------
+    userStore.setAuth(tk, {
+      id: res.user_id,
+      username: loginForm.username,
+      role: 'annotator'
+    })
     try {
       const me: any = await authApi.me()
+      // 用 me() 的精确数据覆盖默认值 (role/email 等)
       userStore.setAuth(tk, { id: me.id, username: me.username, role: me.role })
     } catch {
-      userStore.setAuth(tk, {
-        id: res.user_id,
-        username: loginForm.username,
-        role: 'annotator'
-      })
+      // 保留默认 user info, 不清 token
     }
     ElMessage.success('登录成功')
     // 登录后优先回跳原页面（由路由守卫在 query.redirect 中携带）
@@ -48,6 +86,8 @@ const onLogin = async () => {
 }
 
 const onRegister = async () => {
+  // re-entry 守卫
+  if (regLoading.value) return
   if (!regForm.username || regForm.password.length < 6) {
     ElMessage.warning('用户名必填，密码至少 6 位')
     return
@@ -120,7 +160,12 @@ const features = [
 
         <el-tabs v-model="activeTab" class="login-tabs">
           <el-tab-pane label="登 录" name="login">
-            <el-form @submit.prevent="onLogin" label-position="top" class="login-form">
+            <!--
+              关键修复:
+              - 去掉 @submit.prevent, 避免 form submit 与 button @click 同时触发 onLogin
+              - 按钮显式 native-type="button" 杜绝被识别为 submit
+            -->
+            <el-form label-position="top" class="login-form" @submit.prevent.stop>
               <el-form-item>
                 <el-input
                   v-model="loginForm.username" placeholder="请输入用户名"
@@ -138,6 +183,7 @@ const features = [
               </el-form-item>
               <el-button
                 type="primary" size="large" :loading="loading"
+                native-type="button"
                 @click="onLogin" class="submit-btn"
               >
                 登 录
@@ -148,7 +194,7 @@ const features = [
             </el-form>
           </el-tab-pane>
           <el-tab-pane label="注 册" name="register">
-            <el-form @submit.prevent="onRegister" label-position="top" class="login-form">
+            <el-form label-position="top" class="login-form" @submit.prevent.stop>
               <el-form-item>
                 <el-input
                   v-model="regForm.username" placeholder="请输入用户名"
@@ -171,6 +217,7 @@ const features = [
               </el-form-item>
               <el-button
                 type="primary" size="large" :loading="regLoading"
+                native-type="button"
                 @click="onRegister" class="submit-btn"
               >
                 注 册

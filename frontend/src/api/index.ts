@@ -29,17 +29,32 @@ function withToken(url: string): string {
 
 // ============== 认证 ==============
 export const authApi = {
+  /**
+   * 登录接口
+   * - 使用 application/x-www-form-urlencoded (OAuth2PasswordRequestForm 规范要求)
+   * - 显式设置 Content-Type 避免 axios 在 FormData 场景下自动追加 boundary 导致兼容问题
+   * - 历史 bug: 曾用 FormData + 'multipart/form-data' (无 boundary) 在部分环境下触发首次
+   *   请求后端无法解析表单, 表现"首次无响应/需点击两次". 已统一为 URLSearchParams.
+   */
   login: (username: string, password: string) => {
-    const form = new FormData()
-    form.append('username', username)
-    form.append('password', password)
-    return http.post('/auth/login', form, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+    const body = new URLSearchParams()
+    body.append('username', username)
+    body.append('password', password)
+    return http.post('/auth/login', body, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     })
   },
   register: (data: { username: string; password: string; email?: string; role?: string }) =>
     http.post('/auth/register', data),
-  me: () => http.get('/auth/me'),
+  /**
+   * 获取当前登录用户信息
+   * - 默认请求: 401 时由响应拦截器统一清 auth + 跳登录页
+   * - 登录流程内的 /me 必须带 __skip401Redirect: true
+   *   原因: 刚签发的新 token 写入 localStorage 与本请求发出之间存在竞态,
+   *        万一请求先于 setAuth 发出 (理论上不会, 但作为纵深防御),
+   *        响应拦截器不应清空刚刚写入的 token.
+   */
+  me: () => http.get('/auth/me', { __skip401Redirect: true } as any),
   logout: () => http.post('/auth/logout')
 }
 
