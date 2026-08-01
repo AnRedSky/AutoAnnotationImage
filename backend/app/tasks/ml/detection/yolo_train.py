@@ -89,7 +89,7 @@ def train_yolo(
 
     if project is None:
         from app.core.config import settings
-        project = str(settings.MODEL_DIR / "runs")
+        project = str(settings.DETECTION_MODEL_DIR)
 
     started = datetime.utcnow()
     run_dir = Path(project) / name

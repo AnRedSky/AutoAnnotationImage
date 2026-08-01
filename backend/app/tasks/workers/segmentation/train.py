@@ -195,7 +195,9 @@ def train_segmentation_task(
         return {"status": "FAILURE", "error": str(e)}
 
     # ---- 5) 落盘 ModelVersion + TrainingJob SUCCESS (委托 Service) ----
-    weights_dir = settings.MODEL_DIR / "seg_runs"
+    # v3.3.0: 落点从 settings.MODEL_DIR/seg_runs 改到 settings.SEGMENTATION_MODEL_DIR,
+    #         与 classification/detection 三个 task_type 平级, 都在 MODEL_DIR 下一级子目录.
+    weights_dir = settings.SEGMENTATION_MODEL_DIR
     weights_dir.mkdir(parents=True, exist_ok=True)
     weights_path = weights_dir / f"{model_alias}_{task_id}.pt"
     if result.get("state_dict_bytes"):

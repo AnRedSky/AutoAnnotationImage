@@ -159,7 +159,9 @@ def train_detection_task(
             imgsz=imgsz,
             batch=batch,
             device=device,
-            project=str(settings.MODEL_DIR / "runs"),
+            # v3.3.0: YOLO run 目录从 settings.MODEL_DIR/runs 改到 settings.DETECTION_MODEL_DIR.
+            #         之前的 runs/ 与 cache/ultralytics/runs 分散两个地方, 现在统一收纳到 detection/.
+            project=str(settings.DETECTION_MODEL_DIR),
             name=model_alias,
             progress_cb=_train_cb,
         )

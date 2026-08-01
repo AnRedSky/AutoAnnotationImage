@@ -212,6 +212,9 @@ services:
       MINIO_ENDPOINT: minio:9000
       UPLOAD_DIR: /app/uploads
       MODEL_DIR: /app/models
+      # v3.3.0: 容器内 HF_HOME 显式指向 /app/models/cache/huggingface (持久化卷),
+      #         避免 base 镜像自带 HF_HOME 默认 /root/.cache/huggingface 导致容器重建丢缓存.
+      HF_HOME: /app/models/cache/huggingface
       INFERENCE_DEVICE: ${INFERENCE_DEVICE:-cpu}
       HF_HUB_DISABLE_SYMLINKS: "1"
       HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
@@ -268,6 +271,9 @@ services:
       MINIO_ENDPOINT: minio:9000
       UPLOAD_DIR: /app/uploads
       MODEL_DIR: /app/models
+      # v3.3.0: 容器内 HF_HOME 显式指向 /app/models/cache/huggingface (持久化卷),
+      #         避免 base 镜像自带 HF_HOME 默认 /root/.cache/huggingface 导致容器重建丢缓存.
+      HF_HOME: /app/models/cache/huggingface
       INFERENCE_DEVICE: ${INFERENCE_DEVICE:-cpu}
       HF_HUB_DISABLE_SYMLINKS: "1"
       HF_HUB_DISABLE_SYMLINKS_WARNING: "1"

@@ -369,7 +369,9 @@ def run_training(
             actual_epochs = epoch + 1
 
     # 保存最佳模型
-    model_path = settings.MODEL_DIR / f"{model_name}_best.pth"
+    # v3.3.0: 落到 settings.CLASSIFICATION_MODEL_DIR 子目录, 与 detection/segmentation 分开,
+    #         MODEL_DIR 根目录不再堆 _best.pth 散文件.
+    model_path = settings.CLASSIFICATION_MODEL_DIR / f"{model_name}_best.pth"
     if best_state:
         torch.save(best_state, model_path)
 

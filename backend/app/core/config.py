@@ -163,6 +163,26 @@ class Settings(BaseSettings):
     ULTRALYTICS_DATASETS_DIR: Path = _resolve_storage_path(
         os.getenv("ULTRALYTICS_DATASETS_DIR"), _DEFAULT_ULTRALYTICS_HOME / "datasets"
     )
+
+    # ---- v3.3.0: 训练产物按任务类型分目录存放 ----
+    # 之前: 所有训练模型都直接落到 MODEL_DIR 根 + runs/ + seg_runs/ 三个分散目录,
+    #       大模型目录里堆满各种 _best.pth/runs/seg_runs 文件, 难以区分.
+    # 现在: 每个 task_type 一个一级子目录, 子目录内结构按库特性 (YOLO 仍要 nested).
+    # 迁移: 已训练的旧模型 (在 MODEL_DIR 根) 不会被自动迁移 — DB 记录了 file_path,
+    #       旧路径仍能正常加载; 新训练的模型用新路径.
+    # 路径可在 .env 中覆盖, 留空则用默认值.
+    CLASSIFICATION_MODEL_DIR: Path = _resolve_storage_path(
+        os.getenv("CLASSIFICATION_MODEL_DIR"),
+        (_DEFAULT_MODEL_DIR / "classification").resolve(),
+    )
+    DETECTION_MODEL_DIR: Path = _resolve_storage_path(
+        os.getenv("DETECTION_MODEL_DIR"),
+        (_DEFAULT_MODEL_DIR / "detection").resolve(),
+    )
+    SEGMENTATION_MODEL_DIR: Path = _resolve_storage_path(
+        os.getenv("SEGMENTATION_MODEL_DIR"),
+        (_DEFAULT_MODEL_DIR / "segmentation").resolve(),
+    )
     # YOLO_CONFIG_DIR: ultralytics 把 settings.yaml 写到这里; 默认 ULTRALYTICS_HOME 根目录
     YOLO_CONFIG_DIR: Path = _resolve_storage_path(
         os.getenv("YOLO_CONFIG_DIR"), _DEFAULT_ULTRALYTICS_HOME
@@ -450,3 +470,12 @@ try:
     _hf_const.HF_HUB_DISABLE_SYMLINKS_WARNING = bool(settings.HF_HUB_DISABLE_SYMLINKS_WARNING)
 except Exception:  # huggingface_hub 还没装/版本不兼容时跳过
     pass
+
+# ---- v3.3.0: 按任务类型创建训练产物子目录 ----
+# 避免 worker 首次训练时报 "FileNotFoundError: [Errno 2] No such file or directory"
+for _task_subdir in (
+    settings.CLASSIFICATION_MODEL_DIR,
+    settings.DETECTION_MODEL_DIR,
+    settings.SEGMENTATION_MODEL_DIR,
+):
+    Path(_task_subdir).mkdir(parents=True, exist_ok=True)
