@@ -88,8 +88,8 @@ const onLogin = async () => {
 const onRegister = async () => {
   // re-entry 守卫
   if (regLoading.value) return
-  if (!regForm.username || regForm.password.length < 6) {
-    ElMessage.warning('用户名必填，密码至少 6 位')
+  if (!regForm.username || regForm.password.length < 8) {
+    ElMessage.warning('用户名必填，密码至少 8 位')
     return
   }
   regLoading.value = true
@@ -102,7 +102,10 @@ const onRegister = async () => {
     ElMessage.success('注册成功，请登录')
     activeTab.value = 'login'
   } catch (e: any) {
-    ElMessage.error('注册失败: ' + (e?.response?.data?.detail || e?.message))
+    // FastAPI 422 的 detail 是数组 [{msg, loc, type}], 提取首条 msg 展示
+    const detail = e?.response?.data?.detail
+    const msg = Array.isArray(detail) ? detail[0]?.msg : detail
+    ElMessage.error('注册失败: ' + (msg || e?.message || '请检查输入'))
   } finally {
     regLoading.value = false
   }
@@ -209,7 +212,7 @@ const features = [
               </el-form-item>
               <el-form-item>
                 <el-input
-                  v-model="regForm.password" type="password" placeholder="密码（至少 6 位）"
+                  v-model="regForm.password" type="password" placeholder="密码（至少 8 位）"
                   :prefix-icon="Lock" size="large" show-password
                   class="form-input"
                   @keyup.enter="onRegister"

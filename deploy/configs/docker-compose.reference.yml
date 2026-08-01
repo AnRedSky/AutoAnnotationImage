@@ -162,7 +162,6 @@ services:
       - model_data:/app/models
       - upload_data:/app/uploads
       - api_logs:/app/logs
-      - ./backend/app:/app/app
     networks:
       - annotation_net
     depends_on:

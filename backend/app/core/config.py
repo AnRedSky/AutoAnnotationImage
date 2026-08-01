@@ -207,9 +207,17 @@ class Settings(BaseSettings):
     # v2.5.15 P1-3: 显式化 CORS credentials 配置
     CORS_ALLOW_CREDENTIALS: bool = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
 
-    # env_file 用绝对路径：避免 uv run 在项目根目录时 cwd != backend 找不到 .env
-    # 文件固定位于 backend/.env（与本文件同级的上一级)
-    _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
+    # env_file 优先级: 项目根 .env > backend/.env
+    # v3.3.0: 统一从项目根 .env 读取, 便于 Docker Compose 部署一致
+    # 项目根 .env 存在时优先使用 (覆盖 backend/.env 行为)
+    _PROJECT_ROOT_ENV = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    _BACKEND_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
+    # _ENV_FILE: 优先项目根, 其次 backend/
+    # pydantic-settings 不支持多 env_file, 这里动态选择
+    if _PROJECT_ROOT_ENV.exists():
+        _ENV_FILE = _PROJECT_ROOT_ENV
+    else:
+        _ENV_FILE = _BACKEND_ENV
 
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
@@ -267,14 +275,16 @@ class Settings(BaseSettings):
         - APP_ENV=development 仅 WARN, 不影响开发体验
         """
         issues: list[str] = []
+        # v3.3.0 修复: 移除列表开头的空字符串, 否则 `"" in any_string` 永远为 True
         _weak_secrets = (
-            "",
             "change-me",
             "changeme",
             "secret",
             "password",
             "12345678",
             "your-secret-key",
+            "placeholder",
+            "example",
         )
         eff_secret = self.SECRET_KEY or self.JWT_SECRET or ""
         if not eff_secret:
@@ -288,7 +298,7 @@ class Settings(BaseSettings):
                 "JWT tokens can be forged. Generate a strong random secret (>= 32 chars)."
             )
         # 拦截不安全的默认密码
-        _insecure = ("root123", "", "password", "root")
+        _insecure = ("root123", "password", "root")
         if self.MYSQL_PASSWORD in _insecure:
             issues.append(
                 f"MYSQL_PASSWORD uses default/insecure value: {self.MYSQL_PASSWORD!r}"

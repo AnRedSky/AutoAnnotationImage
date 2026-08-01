@@ -48,6 +48,26 @@ const selectedTeam = ref<TeamItem | null>(null)
 const createDialog = ref(false)
 const createForm = ref({ name: '', slug: '', description: '', max_members: 20 })
 
+// slug 自动生成: 从团队名称转换 (小写 + 空格转连字符 + 去特殊字符)
+const generateSlug = (name: string): string => {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\u4e00-\u9fa5\s-]/g, '')  // 保留字母数字、中文、空格、连字符
+    .replace(/[\s_]+/g, '-')                 // 空格/下划线转连字符
+    .replace(/-+/g, '-')                      // 合并连续连字符
+    .replace(/^-|-$/g, '')                    // 去首尾连字符
+    .slice(0, 50)                             // 截断 50 字符
+}
+
+// 监听团队名称变化, 自动填充 slug (用户未手动修改 slug 时)
+let slugManuallyEdited = false
+watch(() => createForm.value.name, (newName) => {
+  if (!slugManuallyEdited) {
+    createForm.value.slug = generateSlug(newName)
+  }
+})
+
 // 邀请成员
 const inviteDialog = ref(false)
 const inviteUserId = ref<number | undefined>()
@@ -64,12 +84,13 @@ const teamRoles = [
   { label: '仅阅读', value: 'viewer', desc: '只读' }
 ]
 
-const roleLabel = (role: string) => teamRoles.find(r => r.value === role)?.label || role
-const roleTagType = (role: string) => role === 'manager' ? 'warning' : role === 'editor' ? 'success' : 'info'
+const roleLabel = (role: string | null) => teamRoles.find(r => r.value === role)?.label || role || '未加入'
+const roleTagType = (role: string | null) => role === 'manager' ? 'warning' : role === 'editor' ? 'success' : 'info'
 
 const canManage = computed(() => {
+  // 仅 manager 可管理 (数据隔离: 非成员包括管理员无权限)
   if (!selectedTeam.value) return false
-  return selectedTeam.value.my_role === 'manager' || userStore.user?.role?.includes('admin') === true
+  return selectedTeam.value.my_role === 'manager'
 })
 
 const fmtDate = (s: string | null) => s ? new Date(s).toLocaleString('zh-CN') : '-'
@@ -95,16 +116,24 @@ const loadAllUsers = async () => {
   } catch {}
 }
 
+const openCreateDialog = () => {
+  createForm.value = { name: '', slug: '', description: '', max_members: 20 }
+  slugManuallyEdited = false
+  createDialog.value = true
+}
+
 const onCreate = async () => {
-  if (!createForm.value.name || !createForm.value.slug) {
-    ElMessage.warning('名称和短标识不能为空')
+  if (!createForm.value.name) {
+    ElMessage.warning('团队名称不能为空')
     return
   }
   try {
+    // slug 可为空, 后端会从 name 自动生成 + 冲突时追加后缀
     await teamApi.create({ ...createForm.value })
     ElMessage.success('团队创建成功，您自动成为队长')
     createDialog.value = false
     createForm.value = { name: '', slug: '', description: '', max_members: 20 }
+    slugManuallyEdited = false
     await loadTeams()
   } catch (e: any) {
     ElMessage.error('创建失败: ' + (e?.response?.data?.detail || e?.message))
@@ -224,7 +253,7 @@ onMounted(async () => {
 
       <el-card shadow="never" class="main-card">
         <div class="card-toolbar">
-          <el-button type="primary" :icon="Plus" @click="createDialog = true">创建团队</el-button>
+          <el-button type="primary" :icon="Plus" @click="openCreateDialog">创建团队</el-button>
         </div>
 
         <el-table :data="teams" v-loading="loading" stripe class="data-table" style="width: 100%">
@@ -316,7 +345,11 @@ onMounted(async () => {
           <el-input v-model="createForm.name" placeholder="如: 标注组A" />
         </el-form-item>
         <el-form-item label="短标识 (slug)">
-          <el-input v-model="createForm.slug" placeholder="如: annot-group-a" />
+          <el-input
+            v-model="createForm.slug"
+            placeholder="自动从名称生成，可手动修改"
+            @input="slugManuallyEdited = true"
+          />
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="createForm.description" type="textarea" :rows="2" placeholder="团队描述（可选）" />

@@ -1,9 +1,10 @@
 # 图像标注平台 (Image Annotation Platform)
 
-> **版本**: v3.3.0
+> **版本**: v3.3.1
 > **状态**: 稳定运行
 > **类别**: 基于深度学习的协同标注与训练系统
 > **核心范式**: AI 预标注 + 人工修正 + 增量训练
+> **部署方式**: 一键 Docker Compose（统一 `.env` 配置文件）
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4-brightgreen)](https://vuejs.org/)
@@ -255,18 +256,69 @@ thesis-image-annotation/
 
 ## 五、快速开始
 
-### 5.1 方式一：Docker Compose 一键启动（推荐）
+### 5.0 ⭐ 方式零：一键 Docker Compose 部署（最推荐）
+
+> **零配置、零门槛** — 任何人都能在 30 秒内完成部署。所有环境变量从**项目根 `.env`** 统一读取。
+
+**Windows（PowerShell）**:
+
+```powershell
+# 在项目根目录执行
+.\scripts\start_docker.ps1
+```
+
+**Linux / macOS**:
+
+```bash
+chmod +x scripts/start_docker.sh
+./scripts/start_docker.sh
+```
+
+脚本会自动完成 6 步：检查 `.env` → 生成强随机密钥 → 校验 Docker → 构建镜像 → 启动 7 个服务 → 端到端验证。
+
+启动后访问：
+
+| 服务 | URL |
+| --- | --- |
+| 前端 | http://localhost:8080 |
+| API 文档 | http://localhost:8000/docs |
+| 健康检查 | http://localhost:8000/api/health |
+| MinIO 控制台 | http://localhost:9001 |
+
+**常用命令**：
+
+```bash
+# Windows:
+.\scripts\start_docker.ps1 -Status       # 查看状态
+.\scripts\start_docker.ps1 -Logs         # 查看日志
+.\scripts\start_docker.ps1 -Stop         # 停止服务
+.\scripts\start_docker.ps1 -Rebuild      # 重新构建
+.\scripts\start_docker.ps1 -Reset        # 重置数据
+
+# Linux/macOS:
+./scripts/start_docker.sh --status
+./scripts/start_docker.sh --logs
+./scripts/start_docker.sh --stop
+./scripts/start_docker.sh --rebuild
+./scripts/start_docker.sh --reset
+```
+
+### 5.1 方式一：Docker Compose 手动启动
+
+> 适合需要更多控制的高级用户
 
 ```bash
 # 1) 克隆代码
 git clone <repository-url>
 cd thesis-image-annotation
 
-# 2) （可选）调整 backend/.env.docker 配置
-cp backend/.env.example backend/.env.docker
+# 2) 准备统一 .env（项目根）
+cp .env.example .env
+# 自动生成强随机密钥:
+python scripts/gen_secrets.py --write --env-file .env
 
 # 3) 启动全部服务
-docker compose up -d
+docker compose --env-file .env up -d
 
 # 4) 查看启动状态
 docker compose ps
@@ -277,11 +329,11 @@ docker compose logs -f api
 
 | 服务         | URL                              | 默认凭据                |
 | ------------ | -------------------------------- | ----------------------- |
-| 前端         | http://localhost:5173            | —                      |
+| 前端         | http://localhost:8080            | —                      |
 | API 文档     | http://localhost:8000/docs       | —                      |
 | 健康检查     | http://localhost:8000/api/health | —                      |
-| MinIO 控制台 | http://localhost:9001            | minioadmin / minioadmin |
-| MySQL        | localhost:3306                   | root / root123          |
+| MinIO 控制台 | http://localhost:9001            | 见 `.env`（自动生成）   |
+| MySQL        | localhost:3306                   | 见 `.env`（自动生成）   |
 
 **默认管理员账户**：
 
@@ -290,13 +342,14 @@ docker compose logs -f api
 | `admin` | `admin123` | super_admin |
 
 > ⚠️ **生产环境请第一时间修改默认密码！**
+> 推荐用 `python backend/scripts/bootstrap_admin.py --username admin --password "新密码"` 创建/重置。
 
 ### 5.2 方式二：本地开发模式
 
 #### 步骤 1：启动基础设施（MySQL + Redis + MinIO）
 
 ```bash
-docker compose up -d mysql redis minio
+docker compose --env-file .env up -d mysql redis minio
 ```
 
 #### 步骤 2：启动后端
@@ -308,7 +361,9 @@ cd backend
 uv sync                          # 推荐 (含 dev 依赖)
 # 或: pip install -r requirements.txt
 
-# 配置环境变量
+# 配置环境变量（后端会优先读取项目根 .env，回退到 backend/.env）
+# 项目根 .env 存在时无需操作
+# 否则:
 cp .env.example .env
 # 编辑 .env: 至少改 SECRET_KEY / MYSQL_PASSWORD
 
@@ -343,21 +398,37 @@ npm run dev                      # http://localhost:5173
 
 ## 六、配置说明
 
-### 6.1 后端配置（`backend/.env`）
+### 6.0 统一 .env 配置（v3.3.1 新设计）
 
-后端使用 `pydantic-settings` 从环境变量或 `.env` 文件加载。完整字段说明见 [使用手册 § 3.1](docs/使用手册.md#三系统配置)。
+> ⚠️ **核心变更**: 系统现已统一从**项目根 `.env`** 读取所有环境变量。
+> 不再使用 `backend/.env.docker` / `backend/.env.prod` 等多个分散文件。
 
-**必填项（生产环境强制）**：
+```
+<项目根>/.env          ← 唯一的配置入口 (Single Source of Truth)
+        ↓
+   ┌────┴────┬────────────┐
+   ↓         ↓            ↓
+Docker    Backend      Frontend
+Compose  (pydantic)   (Vite ARG)
+```
 
-```bash
+- **Docker Compose**：`env_file: - .env`
+- **后端**：pydantic-settings 自动从项目根 `.env` 加载（兼容 `backend/.env` 回退）
+- **前端**：构建时通过 `ARG VITE_API_BASE_URL` 注入
+
+完整字段说明见 [使用手册 § 3.1](docs/使用手册.md#三系统配置)。
+
+### 6.1 必填项（生产环境强制）
+
+```ini
 APP_ENV=production
 SECRET_KEY=<随机字符串, 至少 32 字符>     # JWT 签名密钥
 MYSQL_PASSWORD=<强密码>                    # 不能用 root123/root/空
 ```
 
-**数据库**：
+### 6.2 数据库
 
-```bash
+```ini
 DATABASE_URL=mysql+aiomysql://user:password@host:3306/dbname
 # 或分散配置
 MYSQL_HOST=localhost
@@ -367,34 +438,34 @@ MYSQL_PASSWORD=root123
 MYSQL_DATABASE=image_annotation
 ```
 
-**Redis & Celery**：
+### 6.3 Redis & Celery
 
-```bash
+```ini
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 CELERY_WORKER_POOL=threads                 # Windows 推荐 threads
 CELERY_WORKER_CONCURRENCY=2
 ```
 
-**存储**：
+### 6.4 存储
 
-```bash
-STORAGE_BACKEND=local                       # local | minio
+```ini
+STORAGE_BACKEND=minio                       # local | minio
 UPLOAD_DIR=./uploads
 MODEL_DIR=./models
 ```
 
-**ML 推理**：
+### 6.5 ML 推理
 
-```bash
+```ini
 INFERENCE_DEVICE=cpu                        # cpu | cuda
 DEFAULT_MODEL=efficientnet_b0
 DEFAULT_CONFIDENCE_THRESHOLD=0.6
 ```
 
-**HuggingFace 镜像（国内网络必配）**：
+### 6.6 HuggingFace 镜像（国内网络必配）
 
-```bash
+```ini
 HF_ENDPOINT=https://hf-mirror.com
 HF_HUB_DISABLE_SYMLINKS=1
 HF_HUB_DISABLE_SYMLINKS_WARNING=1
@@ -402,21 +473,18 @@ HF_HUB_DISABLE_SYMLINKS_WARNING=1
 
 > 详细全字段说明、生产环境 checklist 见 [使用手册](docs/使用手册.md)。
 
-### 6.2 前端配置
+### 6.7 前端配置
 
-`frontend/.env.development`：
+> 生产模式（一键部署）：`VITE_API_BASE_URL=` 空 → 走 nginx 反代 `/api`，无需配置
+> 开发模式（`npm run dev`）：在 `frontend/.env.development` 配置 `VITE_API_BASE_URL=http://localhost:8000`
 
-```bash
-VITE_API_BASE_URL=http://localhost:8000
-```
-
-### 6.3 生产环境 Checklist
+### 6.8 生产环境 Checklist
 
 部署到生产前请确认：
 
 - [ ] `APP_ENV=production`
 - [ ] `SECRET_KEY` 随机 32+ 字符
-- [ ] `MYSQL_PASSWORD` 强密码
+- [ ] `MYSQL_PASSWORD` 强密码（用 `python scripts/gen_secrets.py --write` 自动生成）
 - [ ] `CORS_ORIGINS` 配置为实际前端域名
 - [ ] `STORAGE_BACKEND=minio`（生产推荐）
 - [ ] `INFERENCE_DEVICE=cuda`（如有 GPU）
@@ -547,16 +615,41 @@ Celery 异步推理 → SSE 实时进度
 
 ### 9.1 启动 / 停止服务
 
-#### Docker Compose 模式
+#### 一键脚本模式（推荐）
+
+```powershell
+# Windows:
+.\scripts\start_docker.ps1                  # 启动
+.\scripts\start_docker.ps1 -Status          # 状态
+.\scripts\start_docker.ps1 -Logs            # 日志
+.\scripts\start_docker.ps1 -Stop            # 停止
+.\scripts\start_docker.ps1 -Rebuild         # 重建
+.\scripts\start_docker.ps1 -Reset           # 重置数据
+.\scripts\start_docker.ps1 -Verify          # 验证
+```
 
 ```bash
-docker compose up -d                       # 启动全部
-docker compose up -d api worker-train      # 启动指定
-docker compose ps                          # 查看状态
-docker compose logs -f api                 # 查看日志
-docker compose restart api                 # 重启单个
-docker compose down                        # 停止
-docker compose down -v                     # 停止并清数据
+# Linux/macOS:
+./scripts/start_docker.sh                    # 启动
+./scripts/start_docker.sh --status
+./scripts/start_docker.sh --logs
+./scripts/start_docker.sh --stop
+./scripts/start_docker.sh --rebuild
+./scripts/start_docker.sh --reset
+./scripts/start_docker.sh --verify
+```
+
+#### 手动 Docker Compose 模式
+
+```bash
+# 启动全部（统一从项目根 .env 读取）
+docker compose --env-file .env up -d
+docker compose --env-file .env up -d api worker-train
+docker compose --env-file .env ps
+docker compose --env-file .env logs -f api
+docker compose --env-file .env restart api
+docker compose --env-file .env down
+docker compose --env-file .env down -v        # 停止并清数据
 ```
 
 #### 本地开发模式
@@ -588,11 +681,14 @@ alembic downgrade -1                              # 回滚一步
 ### 9.3 数据备份
 
 ```bash
+# 备份前先查看数据库密码（在项目根 .env 中）
+grep MYSQL_ROOT_PASSWORD .env
+
 # MySQL 备份
-docker exec annotation_mysql mysqldump -uroot -proot123 image_annotation > backup_$(date +%Y%m%d).sql
+docker exec annotation_mysql mysqldump -uroot -p"$(grep MYSQL_ROOT_PASSWORD .env | cut -d= -f2)" image_annotation > backup_$(date +%Y%m%d).sql
 
 # MySQL 恢复
-cat backup_20260801.sql | docker exec -i annotation_mysql mysql -uroot -proot123 image_annotation
+cat backup_20260801.sql | docker exec -i annotation_mysql mysql -uroot -p"$(grep MYSQL_ROOT_PASSWORD .env | cut -d= -f2)" image_annotation
 
 # 文件备份
 tar -czf uploads_$(date +%Y%m%d).tar.gz uploads/
@@ -630,19 +726,18 @@ CACHE_DEFAULT_TTL=300
 ### 9.6 升级
 
 ```bash
-# 后端
-cd backend
+# 一键脚本升级
 git pull
+.\scripts\start_docker.ps1 -Rebuild     # Windows
+./scripts/start_docker.sh --rebuild      # Linux/macOS
+
+# 或手动升级
+git pull
+cd backend
 uv sync
 alembic upgrade head
-docker compose restart api worker-train worker-annotate
-
-# 前端
-cd frontend
-git pull
-npm install
-npm run build
-docker compose restart frontend
+docker compose --env-file .env build
+docker compose --env-file .env up -d
 ```
 
 ### 9.7 监控与日志
@@ -661,20 +756,27 @@ docker compose restart frontend
 
 ### 10.1 安装与启动
 
+**Q: 完全没用过 Docker，能部署吗？**
+A: 能。本系统提供了一键启动脚本（`scripts/start_docker.ps1` / `scripts/start_docker.sh`），只需安装 Docker Desktop 4.x+，然后在项目根目录运行一行命令即可。脚本会自动完成配置、密钥生成、镜像构建、服务启动、端到端验证全部 6 步。详见 [§ 5.0 一键部署](#50-方式零一键-docker-compose-部署最推荐)。
+
 **Q: Docker 启动后 API 一直重启？**
-A: 查看 `docker compose logs api`，通常为数据库未就绪或 .env 配错。
+A: 查看 `docker compose logs api`，通常为数据库未就绪或 .env 配错。运行 `.\scripts\start_docker.ps1 -Logs` 可查看实时日志。
 
 **Q: Windows 上 Celery 报 `ValueError: not enough values to unpack`？**
-A: Windows 不支持 prefork，确保 `CELERY_WORKER_POOL=threads`。
-
-**Q: 前端 `npm run dev` 报端口被占用？**
-A: 修改 `frontend/vite.config.ts` 的 `server.port`，或停掉占用 5173 的进程。
+A: Windows 不支持 prefork，确保 `CELERY_WORKER_POOL=threads`（项目根 `.env` 中已默认设置）。
 
 **Q: SECRET_KEY 怎么生成？**
 
 ```bash
+# 自动: 由 start_docker 脚本调用 scripts/gen_secrets.py
+python scripts/gen_secrets.py --write --env-file .env
+
+# 手动:
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+**Q: 找不到 .env 文件？**
+A: 系统已统一从**项目根 `.env`** 读取（不是 `backend/.env`）。如果不存在，复制 `.env.example` 为 `.env` 即可。
 
 ### 10.2 数据与标注
 
@@ -739,6 +841,7 @@ A: 调用 `POST /api/auth/logout` 写黑名单，或修改 `SECRET_KEY` 强制�
 | v3.1 | 后端 worker 4 阶段优化 + 前端训练性能 4 阶段优化（池化/节流/细粒度/联动） |
 | v3.2 | 多租户、用户/角色/审计 admin 页面、显式 CORS                              |
 | v3.3 | 团队管理、MinIO 存储后端、路径锚定项目根、ultralytics 缓存收敛            |
+| v3.3.1 | **统一 .env 配置（项目根 Single Source of Truth）** + 一键启动脚本 (`start_docker.ps1` / `start_docker.sh`) |
 
 详细变更记录：[docs/代码优化迭代记录.md](docs/代码优化迭代记录.md) / [docs/cleanup-sprint-2026-07-29.md](docs/cleanup-sprint-2026-07-29.md)
 

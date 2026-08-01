@@ -2,22 +2,29 @@
 Team Management API (v3.3.0)
 ==============================
 
-团队管理端点:
-  - GET    /api/teams              列出我的团队
-  - POST   /api/teams              创建团队 (任何用户)
-  - GET    /api/teams/{id}         团队详情
-  - DELETE /api/teams/{id}         删除团队 (仅 manager/owner)
-  - GET    /api/teams/{id}/members  团队成员列表
-  - POST   /api/teams/{id}/members  邀请成员 (仅 manager/admin)
-  - DELETE /api/teams/{id}/members/{uid}  移除成员 (仅 manager/admin)
-  - POST   /api/datasets/{id}/share  把数据集共享给团队 (仅 owner/manager)
-  - DELETE /api/datasets/{id}/share  取消共享 (仅 owner/manager)
+团队管理端点 (功能入口公开 + 数据严格隔离):
+  - GET    /api/teams              列出我创建和加入的团队 (数据隔离)
+  - POST   /api/teams              创建团队 (任何已登录用户)
+  - GET    /api/teams/{id}         团队详情 (仅成员可见)
+  - DELETE /api/teams/{id}         删除团队 (仅创建者)
+  - GET    /api/teams/{id}/members  团队成员列表 (仅成员可见)
+  - POST   /api/teams/{id}/members  邀请成员 (仅 manager/owner)
+  - PUT    /api/teams/{id}/members/{uid}  修改成员角色 (仅 manager/owner)
+  - DELETE /api/teams/{id}/members/{uid}  移除成员 (仅 manager/owner)
+  - POST   /api/datasets/{id}/share  把数据集共享给团队 (仅数据集 owner)
+  - DELETE /api/datasets/{id}/share  取消共享 (仅数据集 owner)
+
+数据隔离规则:
+  - 用户仅可见自己创建或已加入的团队
+  - 非团队成员 (包括系统管理员) 不可访问团队信息
+  - 团队间数据完全独立
 
 角色:
   - manager (可管理): 管理成员 + 配置数据集权限 + 编辑标注
   - editor (可编辑): 可对共享数据集进行标注
   - viewer (仅阅读): 只读
 """
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -39,7 +46,7 @@ router = APIRouter()
 
 class TeamCreate(BaseModel):
     name: str
-    slug: str
+    slug: Optional[str] = None  # 可选, 为空时从 name 自动生成
     description: Optional[str] = None
     max_members: int = 20
 
@@ -53,8 +60,33 @@ class MemberRoleUpdate(BaseModel):
 
 # ============== Helper: 权限检查 ==============
 
+def _generate_slug_from_name(name: str) -> str:
+    """从团队名称自动生成 URL 友好的 slug.
+
+    规则: 小写 → 保留字母数字/中文 → 空格转连字符 → 合并连续连字符 → 去首尾连字符 → 截断 50 字符.
+    """
+    slug = name.lower().strip()
+    slug = re.sub(r"[^\w\u4e00-\u9fa5\s-]", "", slug)  # 去特殊字符, 保留中文
+    slug = re.sub(r"[\s_]+", "-", slug)                  # 空格/下划线转连字符
+    slug = re.sub(r"-+", "-", slug)                       # 合并连续连字符
+    slug = slug.strip("-")                                # 去首尾连字符
+    return slug[:50] or "team"                            # 截断 50 字符, 空则回退 "team"
+
+
+async def _ensure_unique_slug(db: AsyncSession, slug: str) -> str:
+    """确保 slug 唯一: 冲突时自动追加数字后缀 (my-team → my-team-2 → my-team-3)."""
+    base_slug = slug
+    suffix = 1
+    while True:
+        result = await db.execute(select(Team).where(Team.slug == slug))
+        if not result.scalar_one_or_none():
+            return slug
+        suffix += 1
+        slug = f"{base_slug}-{suffix}"
+
+
 async def _get_member_or_403(db: AsyncSession, team_id: int, user_id: int) -> TeamMember:
-    """查 TeamMember, 不存在则 403."""
+    """查 TeamMember, 不存在则 403 (数据隔离: 非成员不可访问)."""
     result = await db.execute(
         select(TeamMember).where(
             TeamMember.team_id == team_id,
@@ -68,9 +100,12 @@ async def _get_member_or_403(db: AsyncSession, team_id: int, user_id: int) -> Te
 
 
 async def _assert_can_manage(db: AsyncSession, team: Team, user: User) -> TeamMember:
-    """要求可管理权限 (manager) 或 admin 或 owner."""
-    if user.is_admin() or team.owner_id == user.id:
-        # admin/owner 自动有 manager 权限
+    """要求可管理权限 (manager) 或 owner.
+
+    注意: 不再对 admin 绕过 — 非团队成员(包括管理员)不可操作.
+    """
+    if team.owner_id == user.id:
+        # owner 自动有 manager 权限
         # 但仍需返回 member 对象 (owner 可能不在 team_member 表里)
         result = await db.execute(
             select(TeamMember).where(
@@ -94,7 +129,7 @@ async def list_my_teams(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """列出我加入的团队."""
+    """列出我创建和加入的团队 (数据隔离: 仅可见自己所属的团队)."""
     result = await db.execute(
         select(Team, TeamMember.role)
         .join(TeamMember, TeamMember.team_id == Team.id)
@@ -125,14 +160,22 @@ async def create_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """创建团队 (任何已登录用户)."""
-    existing = await db.execute(select(Team).where(Team.slug == body.slug))
-    if existing.scalar_one_or_none():
-        raise HTTPException(409, f"Team slug '{body.slug}' already exists")
+    """创建团队 (任何已登录用户可创建, 创建者自动成为 manager).
+
+    slug 处理:
+      1. 请求未提供 slug → 从 name 自动生成
+      2. slug 冲突 → 自动追加数字后缀 (my-team → my-team-2 → my-team-3)
+    避免用户首次创建团队时遇到"短标识重复"错误.
+    """
+    # slug 生成 + 唯一性处理
+    slug = body.slug.strip() if body.slug else ""
+    if not slug:
+        slug = _generate_slug_from_name(body.name)
+    slug = await _ensure_unique_slug(db, slug)
 
     team = Team(
         name=body.name,
-        slug=body.slug,
+        slug=slug,
         description=body.description,
         owner_id=current_user.id,
         max_members=body.max_members,
@@ -158,12 +201,12 @@ async def get_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """团队详情 (仅成员可见)."""
+    """团队详情 (仅成员可见, 数据隔离)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-    if not current_user.is_admin():
-        await _get_member_or_403(db, team_id, current_user.id)
+    # 数据隔离: 非成员不可访问 (包括管理员)
+    await _get_member_or_403(db, team_id, current_user.id)
 
     return {
         "id": team.id,
@@ -182,11 +225,11 @@ async def delete_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """删除团队 (仅 owner 或 admin)."""
+    """删除团队 (仅创建者)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-    if not current_user.is_admin() and team.owner_id != current_user.id:
+    if team.owner_id != current_user.id:
         raise HTTPException(403, "仅创建者可删除团队")
 
     await db.delete(team)
@@ -202,12 +245,12 @@ async def list_members(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """团队成员列表 (仅成员可见)."""
+    """团队成员列表 (仅成员可见, 数据隔离)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-    if not current_user.is_admin():
-        await _get_member_or_403(db, team_id, current_user.id)
+    # 数据隔离: 非成员不可访问
+    await _get_member_or_403(db, team_id, current_user.id)
 
     result = await db.execute(
         select(TeamMember, User)
@@ -237,7 +280,7 @@ async def invite_member(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """邀请成员 (仅 manager/admin/owner)."""
+    """邀请成员 (仅 manager/owner)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -285,7 +328,7 @@ async def update_member_role(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """修改成员角色 (仅 manager/admin/owner)."""
+    """修改成员角色 (仅 manager/owner)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -320,7 +363,7 @@ async def remove_member(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """移除成员 (仅 manager/admin/owner; owner 不能被移除)."""
+    """移除成员 (仅 manager/owner; owner 不能被移除)."""
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -353,11 +396,11 @@ async def share_dataset_to_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """把数据集共享给团队 (仅 owner 或 admin)."""
+    """把数据集共享给团队 (仅数据集 owner)."""
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+    if dataset.owner_id != current_user.id:
         raise HTTPException(403, "无权限共享此数据集")
 
     team = await db.get(Team, team_id)
@@ -375,11 +418,11 @@ async def unshare_dataset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """取消数据集共享 (仅 owner 或 admin)."""
+    """取消数据集共享 (仅数据集 owner)."""
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+    if dataset.owner_id != current_user.id:
         raise HTTPException(403, "无权限取消共享")
 
     dataset.team_id = None

@@ -1,0 +1,86 @@
+# ============================================================
+#  Frontend .dockerignore - 控制 docker build 上下文
+#  原则: 最小上下文 + 排除临时/大文件 + 排除敏感
+# ============================================================
+
+# ----- Node 依赖与构建产物 -----
+node_modules/
+dist/
+.vite/
+.cache/
+.parcel-cache/
+.turbo/
+.next/
+.nuxt/
+.output/
+storybook-static/
+
+# ----- 测试与覆盖率 -----
+coverage/
+*.lcov
+.nyc_output/
+
+# ----- 文档/计划 (构建期不需要) -----
+docs/
+*.md
+README.md
+LICENSE
+CHANGELOG.md
+CONTRIBUTING.md
+
+# ----- 日志/临时/进程文件 -----
+*.log
+*.log.*
+*.pid
+*.sock
+*.tmp
+*.swp
+*.swo
+*.bak
+logs/
+
+# ----- IDE / 编辑器 -----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+.husky/
+
+# ----- 容器与编排自身 (避免递归) -----
+.git/
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+docker-compose*.yml
+compose*.yml
+.docker/
+
+# ----- 敏感信息 (绝对不能进镜像) -----
+.env
+.env.*
+!.env.example
+.env.production
+.env.local
+secrets/
+*.pem
+*.key
+*.crt
+
+# ----- 大体积/压缩包 -----
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.7z
+*.rar
+*.tgz
+*.dmg
+*.iso
+
+# ----- 静态资源上传目录 (避免误打包) -----
+uploads/
+public/uploads/

@@ -3,7 +3,7 @@ Auth API: Register / Login / Me / Logout / ChangePassword (app/auth/api/)
 ======================================================================
 
 **v3.0.0 审查修复**:
-- 注册端点: 默认仅 admin 可创建账号; 首个 admin 走 bootstrap
+- 注册端点: 公开接口, 任何人可自主注册 (角色固定 annotator, 防止任意提权)
 - 业务逻辑全部委托 AuthService, 避免 controller 层重复实现
 - 密码强度: 由 Pydantic schema 强制 (min 8 chars)
 - 重复用户名: 409 Conflict (而非 400)
@@ -23,7 +23,6 @@ from app.admin.model.user import User
 from app.middleware.http.auth import (
     get_current_user,
     get_current_user_with_payload,
-    require_admin,
 )
 from app.database import get_db
 from app.schemas.auth import (
@@ -42,23 +41,21 @@ router = APIRouter()
 async def register(
     req: RegisterRequest,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),  # 修复: 仅 admin 可注册 (无 auth → 401, 非 admin → 403)
 ):
-    """用户注册 (v3.0.0 修复: 仅管理员可创建账号, 防止任意提权)
+    """用户注册 (公开接口, 任何人可自主注册)
 
-    - 无 Authorization 头 → 401 (get_current_user 抛)
-    - 已登录但非 admin → 403 (require_admin 抛)
-    - 角色由后端按业务规则分配, 前端无法自选
+    - 无需认证, 任何人可直接注册
+    - 角色固定为 annotator (后端强制, 防止任意提权)
+    - 密码强度: Schema 层强制至少 8 位
+    - 重复用户名: 409 Conflict
     - 业务实现委托 AuthService.register (含密码长度/角色白名单/409 冲突/审计事件)
     """
-    # 修复 1: 业务全部下沉到 AuthService
     user = await AuthService.register(
         db,
         username=req.username,
         password=req.password,
         email=req.email,
-        # admin 创建账号时允许指定角色, 普通用户注册入口已禁用
-        role=req.role or "annotator",
+        role="annotator",  # 公开注册固定 annotator, 忽略请求中的 role 字段
     )
 
     token = AuthService.issue_token(user)

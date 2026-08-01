@@ -61,9 +61,9 @@ class ResetPasswordRequest(BaseModel):
 @router.get("/")
 async def list_users(
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """用户列表 (管理员视角)"""
+    """用户列表 (任何已登录用户可查看, 用于团队邀请成员等场景)"""
     users = await UserService.list_active(db, skip=0, limit=1000)
     return {
         "items": [

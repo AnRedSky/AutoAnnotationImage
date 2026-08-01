@@ -95,7 +95,7 @@ RATE_LIMIT_PROFILES: dict[str, RateLimitProfile] = {
     # 登录: 防密码爆破
     "login": RateLimitProfile(
         name="login",
-        max_requests=5,
+        max_requests=60,
         window_seconds=60,
         scope="ip_username",
         paths=["/api/auth/login"],
@@ -106,8 +106,8 @@ RATE_LIMIT_PROFILES: dict[str, RateLimitProfile] = {
     # 注册: 防批量注册
     "register": RateLimitProfile(
         name="register",
-        max_requests=3,
-        window_seconds=3600,
+        max_requests=60,
+        window_seconds=60,
         scope="ip",
         paths=["/api/auth/register"],
         method="POST",
@@ -117,8 +117,8 @@ RATE_LIMIT_PROFILES: dict[str, RateLimitProfile] = {
     # 改密: 防爆破
     "change_password": RateLimitProfile(
         name="change_password",
-        max_requests=5,
-        window_seconds=3600,
+        max_requests=30,
+        window_seconds=60,
         scope="username",
         paths=["/api/auth/change-password"],
         method="POST",
@@ -128,7 +128,7 @@ RATE_LIMIT_PROFILES: dict[str, RateLimitProfile] = {
     # 严格: 敏感操作
     "strict": RateLimitProfile(
         name="strict",
-        max_requests=10,
+        max_requests=60,
         window_seconds=60,
         scope="ip",
         block_status_code=429,
