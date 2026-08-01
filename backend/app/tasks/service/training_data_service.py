@@ -132,19 +132,55 @@ class TrainingDataService:
                 unqualified_imgs = list((await db.execute(uq_stmt)).scalars().all())
 
         # 4) 构建样本 (过滤孤儿 + 磁盘文件存在)
+        # v3.3.0 修复: STORAGE_BACKEND=minio 时, 文件在 MinIO 而非本地磁盘.
+        # 统一通过 storage_service 探测文件存在性, 保证 local/minio 后端都正确工作.
+        # 注意: storage_service 是 _LazyStorageProxy, isinstance 检测无效, 直接用 settings.STORAGE_BACKEND 判断.
+        from app.common.storage.storage_service import storage_service
+        import aiofiles
+        from app.utils.file_utils import safe_filename
+
+        is_minio_backend = (settings.STORAGE_BACKEND or "local").lower() == "minio"
+
         label_name_to_idx = {name: i for i, name in enumerate(sorted(set(categories.values())))}
         samples: List[Tuple[str, int]] = []
         skipped_orphan = 0
         skipped_missing = 0
+        # minio backend: 训练样本预下载到 worker 本地缓存目录
+        local_cache_dir = settings.UPLOAD_DIR / "_training_cache" / str(dataset_id)
+        if is_minio_backend:
+            local_cache_dir.mkdir(parents=True, exist_ok=True)
+
         for img, cat in results:
             if cat is None:
                 skipped_orphan += 1
                 continue
-            full_path = settings.UPLOAD_DIR / img.storage_path
-            if not full_path.exists():
+            # 通过 storage_service 检查文件存在 (local 走 os.path.exists, minio 走 SDK stat)
+            try:
+                if not storage_service.exists(img.storage_path):
+                    skipped_missing += 1
+                    continue
+            except Exception:
+                # MinIO 连接失败等异常 → 视为文件缺失, 计入 skipped_missing
                 skipped_missing += 1
                 continue
-            samples.append((str(full_path), label_name_to_idx[cat.name]))
+
+            if is_minio_backend:
+                # 预下载到本地缓存 (key 转成安全文件名, 避免特殊字符)
+                safe_name = safe_filename(img.storage_path.replace("/", "_"))
+                local_path = local_cache_dir / safe_name
+                if not local_path.exists():
+                    try:
+                        content = await storage_service.load(img.storage_path)
+                        async with aiofiles.open(local_path, "wb") as f:
+                            await f.write(content)
+                    except Exception:
+                        skipped_missing += 1
+                        continue
+                samples.append((str(local_path), label_name_to_idx[cat.name]))
+            else:
+                # local backend: 直接用 UPLOAD_DIR + storage_path
+                full_path = settings.UPLOAD_DIR / img.storage_path
+                samples.append((str(full_path), label_name_to_idx[cat.name]))
 
         # 5) v3.0.0: 决策是否纳入不合格虚拟类别
         unqualified_count = 0
@@ -154,11 +190,30 @@ class TrainingDataService:
             uq_idx = len(label_name_to_idx)
             label_name_to_idx[TrainingDataService.UNQUALIFIED_LABEL] = uq_idx
             for img in unqualified_imgs:
-                full_path = settings.UPLOAD_DIR / img.storage_path
-                if not full_path.exists():
+                # v3.3.0 修复: 通过 storage_service 检测存在性 (兼容 minio backend)
+                try:
+                    if not storage_service.exists(img.storage_path):
+                        skipped_missing += 1
+                        continue
+                except Exception:
                     skipped_missing += 1
                     continue
-                samples.append((str(full_path), uq_idx))
+                if is_minio_backend:
+                    # 预下载到本地缓存
+                    safe_name = safe_filename(img.storage_path.replace("/", "_"))
+                    local_path = local_cache_dir / safe_name
+                    if not local_path.exists():
+                        try:
+                            content = await storage_service.load(img.storage_path)
+                            async with aiofiles.open(local_path, "wb") as f:
+                                await f.write(content)
+                        except Exception:
+                            skipped_missing += 1
+                            continue
+                    samples.append((str(local_path), uq_idx))
+                else:
+                    full_path = settings.UPLOAD_DIR / img.storage_path
+                    samples.append((str(full_path), uq_idx))
                 unqualified_count += 1
         elif include_unqualified and len(unqualified_imgs) < TrainingDataService.MIN_UNQUALIFIED_SAMPLES:
             # 降级: 样本不足, 跳过不合格类别
