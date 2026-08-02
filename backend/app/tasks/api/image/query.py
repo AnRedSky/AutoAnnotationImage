@@ -168,10 +168,21 @@ async def get_image_detail(
     """
     单图详情 (供 DatasetDetail/标注查看器使用)
     返回图片元数据 + AI 预测 + 最终类别 + 标注日志
+
+    v3.3.0 P0 修复: 必须校验访问权限
+    - 之前: 任何登录用户可按 ID 拿到任何图片的元数据 + 标注历史
+    - 现在: 必须对该 image 所属 dataset 有读权限
     """
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(404, "Image not found")
+
+    # 权限校验
+    dataset = await db.get(Dataset, img.dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 类别
     final_label = None

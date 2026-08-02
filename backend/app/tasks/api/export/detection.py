@@ -14,6 +14,8 @@ export.detection 模块 — 目标检测数据集导出
 - YOLO-det: 复用 S3.1 export_yolo_dataset 写 workdir, 然后整目录打包 zip
 - COCO-det: 内存拼 JSON, 一次性返回; bbox 用像素坐标 (COCO 标准)
   - 缺 width/height 时, 用归一化坐标 × 1.0 作为兜底, area 同步计算
+
+**v3.3.0 P0 修复**: 2 个导出端点都必须校验用户对 dataset 的访问权限
 """
 import io
 import json
@@ -37,6 +39,7 @@ from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.ml.detection.yolo_dataset import export_yolo_dataset
 from app.common.enums import TaskType
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -54,6 +57,8 @@ async def export_yolo_detection(
       labels/train/  labels/val/   (YOLO txt: class cx cy w h 归一化)
       data.yaml
     复用 S3.1 export_yolo_dataset 写 workdir, 然后打包 zip.
+
+    v3.3.0 P0 修复: 必须校验访问权限
     """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
@@ -63,6 +68,9 @@ async def export_yolo_detection(
             400,
             f"Dataset task_type={dataset.task_type!r}, expected 'detection'",
         )
+
+    # v3.3.0 P0: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 1) export_yolo_dataset 写到临时目录 (含 images + labels + data.yaml)
     tmp_root = Path(tempfile.mkdtemp(prefix="yolo_det_export_"))
@@ -117,6 +125,8 @@ async def export_coco_detection(
                        area, iscrowd}]
       }
     bbox 像素坐标 = 归一化 × image.width/height, 缺尺寸时退化为归一化值 (area 同步).
+
+    v3.3.0 P0 修复: 必须校验访问权限
     """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
@@ -126,6 +136,9 @@ async def export_coco_detection(
             400,
             f"Dataset task_type={dataset.task_type!r}, expected 'detection'",
         )
+
+    # v3.3.0 P0: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 1) 拉 detection images (v3.0.0: 排除不合格图片)
     imgs = (await db.execute(

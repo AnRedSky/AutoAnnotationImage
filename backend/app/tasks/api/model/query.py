@@ -120,20 +120,50 @@ async def list_active_models(
 
     v3.0.0 Phase V #2: dataset_id 缺省时改用 get_active_for_all_datasets
        (单 query + ROW_NUMBER OVER PARTITION BY). N+1 → 1 query.
+
+    v3.3.0 P0 修复: 严格按用户隔离
+    - admin: 看全系统
+    - 普通用户: 仅看自己可见数据集的激活模型
     """
     items: list[dict] = []
 
+    if current_user.is_admin():
+        if dataset_id is not None:
+            active = await ModelService.get_active_for_dataset(db, dataset_id, task_type=task_type)
+            if active:
+                items.append(_model_to_dict(active))
+        else:
+            active_map = await ModelService.get_active_for_all_datasets(db, task_type=task_type)
+            for ds_id, active in sorted(active_map.items()):
+                items.append(_model_to_dict(active))
+        return {"items": items, "count": len(items)}
+
+    # 非 admin: 限定到可见 dataset
+    from app.tasks.model.team_member import TeamMember
+    from sqlalchemy import union_all
+    own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
+    team_ds_subq = (
+        select(Dataset.id)
+        .join(TeamMember, TeamMember.team_id == Dataset.team_id)
+        .where(TeamMember.user_id == current_user.id)
+    )
+    visible_ds_subq = own_ds_subq.union_all(team_ds_subq)
+
     if dataset_id is not None:
-        # 单 dataset 路径: 沿用旧实现 (1 query)
+        # 校验该 dataset 可见
+        ds = await db.get(Dataset, dataset_id)
+        if not ds or ds.id not in [r[0] for r in (await db.execute(visible_ds_subq)).all()]:
+            return {"items": [], "count": 0}
         active = await ModelService.get_active_for_dataset(db, dataset_id, task_type=task_type)
         if active:
             items.append(_model_to_dict(active))
     else:
-        # 全局数据集路径 (Phase V #2: 1 query 替代 N+1)
-        active_map = await ModelService.get_active_for_all_datasets(db, task_type=task_type)
-        for ds_id, active in sorted(active_map.items()):
-            items.append(_model_to_dict(active))
-
+        # 全局路径: 仅遍历可见 dataset
+        visible_ids = [r[0] for r in (await db.execute(visible_ds_subq)).all()]
+        for ds_id in visible_ids:
+            active = await ModelService.get_active_for_dataset(db, ds_id, task_type=task_type)
+            if active:
+                items.append(_model_to_dict(active))
     return {"items": items, "count": len(items)}
 
 
@@ -166,10 +196,23 @@ async def get_model_detail(
 
     返回字段与列表接口 (/api/models) 保持一致, 避免前端弹窗显示与列表
     不一致 (例如激活状态: 列表显示「已激活」但弹窗显示「未激活」).
+
+    v3.3.0 P0 修复: 必须校验访问权限
     """
     m = await db.get(ModelVersion, model_id)
     if not m:
         raise HTTPException(404, "Model not found")
+
+    # 权限校验: 必须能访问该 model 所属 dataset
+    if m.dataset_id:
+        ds = await db.get(Dataset, m.dataset_id)
+        if not ds:
+            raise HTTPException(404, "Dataset not found")
+        from app.tasks.service.permission_service import assert_can_access_dataset
+        await assert_can_access_dataset(db, current_user, ds)
+    elif not current_user.is_admin():
+        # 无 dataset_id 的孤儿 model 仅 admin 可访问
+        raise HTTPException(403, "无权限访问此模型")
 
     # 同步返回 dataset_name (前端弹窗可能用)
     ds_name = None

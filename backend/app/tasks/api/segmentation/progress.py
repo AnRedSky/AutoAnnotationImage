@@ -20,6 +20,8 @@ segmentation.progress 模块 — 训练/自动标注进度查询
 - 终态 (SUCCESS/FAILURE/REVOKED) 立即发 event: end 后断开
 - request.is_disconnected() 监听客户端断开, 避免 zombie 连接
 - 失败兜底: 异常时 yield {state: FAILURE, message: error} 后退出
+
+**v3.3.0 P0 修复**: 必须鉴权 + 校验所有权, 防止跨用户 segmentation 进度泄露
 """
 import asyncio
 import json
@@ -30,12 +32,26 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.tasks.model.training_job import TrainingJob
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user, get_user_optional_for_query
 
 router = APIRouter()
+
+
+async def _assert_can_access_segmentation_task(task_id: str, current_user: User) -> None:
+    """v3.3.0 P0: 校验用户对 segmentation 任务的访问权 (admin / owner)"""
+    if current_user.is_admin():
+        return
+    async with AsyncSessionLocal() as db:
+        job = (await db.execute(
+            select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+        )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(403, "无权限访问此任务进度")
+    if job.user_id != current_user.id:
+        raise HTTPException(403, "无权限访问此任务进度")
 
 
 # ============== 工具函数 ==============
@@ -128,10 +144,15 @@ async def get_segmentation_job_progress(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """拉取分割 TrainingJob 进度 (轮询)"""
+    """拉取分割 TrainingJob 进度 (轮询)
+
+    v3.3.0 P0 修复: 必须校验所有权
+    """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限查看此训练任务进度")
     return {
         "id": job.id,
         "celery_task_id": job.celery_task_id,
@@ -159,7 +180,10 @@ async def get_segmentation_progress(
     拉取 segmentation 任务进度 (REST 轮询)
 
     v2.5.35 新增: 与前端 segmentationApi.progress 路径对齐
+
+    v3.3.0 P0 修复: 必须校验所有权
     """
+    await _assert_can_access_segmentation_task(task_id, current_user)
     return await _resolve_segmentation_task_progress(task_id)
 
 
@@ -173,9 +197,12 @@ async def stream_segmentation_progress(
 ):
     """
     SSE 实时推送 segmentation 任务进度 (v2.5.35 新增)
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止跨用户 SSE 进度泄露
     """
     if current_user is None:
         raise HTTPException(401, "未授权: 需要有效的 access_token (query ?token= 或 Authorization header)")
+    await _assert_can_access_segmentation_task(task_id, current_user)
 
     SSE_SEG_POLL_INTERVAL = 1.0
 

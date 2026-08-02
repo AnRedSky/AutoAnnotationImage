@@ -32,6 +32,7 @@ from app.tasks.model.image import Image
 from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 from app.tasks.api.preview.classification import preview_classification
 from app.tasks.api.preview.detection import preview_detection
@@ -94,6 +95,12 @@ async def preview_confidence(
     use_finetune = req.use_finetune
 
     if not image_ids:
+        # v3.3.0 P0 修复: 即便 image_ids 为空, 也要先校验 dataset 访问权
+        # 防止恶意用户 B 通过"空请求"探测 A 的 dataset 是否存在
+        dataset = await db.get(Dataset, dataset_id)
+        if not dataset:
+            raise HTTPException(404, "Dataset not found")
+        await assert_can_access_dataset(db, current_user, dataset)
         return {
             "items": [],
             "would_label": 0,
@@ -113,6 +120,11 @@ async def preview_confidence(
     )
     images = result.scalars().all()
     if not images:
+        # v3.3.0 P0 修复: 同样需要校验 dataset 访问权
+        dataset = await db.get(Dataset, dataset_id)
+        if not dataset:
+            raise HTTPException(404, "Dataset not found")
+        await assert_can_access_dataset(db, current_user, dataset)
         return {
             "items": [],
             "would_label": 0,
@@ -132,6 +144,10 @@ async def preview_confidence(
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # v3.3.0 P0 修复: 必须校验访问权限, 防止跨用户预览泄露
+    await assert_can_access_dataset(db, current_user, dataset)
+
     task_type = (dataset.task_type or "classification").lower()
 
     if task_type == "detection":

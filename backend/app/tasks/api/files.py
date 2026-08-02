@@ -25,6 +25,7 @@ from app.tasks.model.image import Image
 from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
 from app.middleware.http.auth import get_user_optional_for_query
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,15 +42,20 @@ _MIME_MAP = {
 }
 
 
-def _require_user(
+async def _require_user(
     user: User | None,
+    db: AsyncSession,
     image: Image,
 ) -> None:
-    """v3.0.0 全面审查修复 P0-2: 文件端点强制鉴权 + 数据集权限校验
+    """v3.3.0 P0 修复: 文件端点强制鉴权 + 数据集权限校验 (含 team_member)
 
     流程:
       1) 未登录 → 401
       2) 已登录但无权限访问该数据集 → 403
+    修复点:
+      - 原版使用 user.can_access_dataset() 仅检查 admin/owner, **不查 team_member**
+        → 团队成员会被错误拒绝
+      - 现改为 assert_can_access_dataset (async, 含 team_member)
     """
     if user is None:
         raise HTTPException(
@@ -58,17 +64,17 @@ def _require_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 权限检查: 管理员可访问全部, 否则只允许 owner
-    if not user.can_access_dataset(image.dataset):
+    # 权限检查: 完整规则 (admin / owner / team_member)
+    # v3.3.0 P0: 改用 async 版本, 让 team_member 也能访问共享团队数据集的图片
+    try:
+        await assert_can_access_dataset(db, user, image.dataset)
+    except HTTPException:
         logger.warning(
             "Permission denied: user_id=%s attempted to access image_id=%s "
             "(dataset_id=%s, owner_id=%s)",
             user.id, image.id, image.dataset_id, image.dataset.owner_id,
         )
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have permission to access this image",
-        )
+        raise
 
 
 @router.get("/{image_id}")
@@ -97,7 +103,7 @@ async def get_image_file(
     img, dataset = row
 
     # 2) 强制鉴权 + 权限校验
-    _require_user(current_user, img)
+    await _require_user(current_user, db, img)
 
     # 3) 取文件内容
     from app.common.storage.storage_service import storage_service
@@ -143,7 +149,7 @@ async def head_image_file(
         raise HTTPException(status_code=404, detail="Image not found")
     img, _ = row
 
-    _require_user(current_user, img)
+    await _require_user(current_user, db, img)
 
     from app.common.storage.storage_service import storage_service
     if not storage_service.exists(img.storage_path):
@@ -182,7 +188,7 @@ async def get_image_thumbnail(
         raise HTTPException(status_code=404, detail="Image not found")
     img, _ = row
 
-    _require_user(current_user, img)
+    await _require_user(current_user, db, img)
 
     from app.common.storage.storage_service import storage_service
     from pathlib import Path as _P

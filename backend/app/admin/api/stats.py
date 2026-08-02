@@ -7,6 +7,12 @@ Stats API: 标注 / 训练 / 系统综合统计
   - 置信度分布（直方图）
   - 每日标注量（折线图）
   - 训练曲线数据
+
+v3.3.0 P0 修复: 仪表盘数据严格按 user 隔离
+- 之前: 全局聚合, 任何登录用户能看到全系统的统计
+- 现在: 非 admin 用户只能看到自己有权限访问的数据集相关数据
+- 单 dataset 端点: 校验访问权限后再查
+- 端点级说明: overview/annotator-efficiency 仅展示当前用户视角的数据
 """
 from datetime import datetime, timedelta
 from typing import Optional
@@ -24,6 +30,7 @@ from app.tasks.model.training_job import TrainingJob
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.admin.service.stats_service import StatsService
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -40,23 +47,81 @@ async def stats_overview(
     """
     系统总览（Dashboard 顶部 4 个统计卡）
 
-    v3.0.0 Phase D 修复: 委托 StatsService.global_overview
-    - 旧: 4 个独立 count() 查询 + 训练任务数误用 ModelVersion.is_active
-    - 新: 1 个 service 调用, 复用全局概览逻辑
+    v3.3.0 P0 修复: 严格按用户隔离数据
+    - admin: 看全系统数据 (保留原行为, 用于运营监控)
+    - 普通用户: 只统计自己有权限访问的数据集 (owner + team_member)
+    - 标注数 / 模型版本 / 训练任务: 均按 user 维度过滤
     """
-    overview = await StatsService.global_overview(db)
-    # 转换格式与旧版兼容 (前端 Dashboard 已依赖这些 key)
+    if current_user.is_admin():
+        # 管理员: 保留全局视角
+        overview = await StatsService.global_overview(db)
+        return {
+            "datasets": overview["datasets"]["total"],
+            "images": overview["images"]["total"],
+            "labeled_images": sum(
+                v for k, v in overview["images"]["by_status"].items()
+                if k in ("human_confirmed", "human_corrected", "trained")
+            ),
+            "model_versions": (
+                await db.execute(select(func.count(ModelVersion.id)))
+            ).scalar() or 0,
+            "training_jobs": overview["training_jobs"]["total"],
+        }
+
+    # ---- 非 admin: 仅自己有权限的数据集 ----
+    # 1) 收集可见的 dataset_id 列表 (owner 或 team_member)
+    from app.tasks.model.team_member import TeamMember
+    own_ds_ids_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
+    team_ds_ids_subq = select(Dataset.id).join(
+        TeamMember, TeamMember.team_id == Dataset.team_id
+    ).where(TeamMember.user_id == current_user.id)
+    # UNION
+    visible_ds_ids_stmt = own_ds_ids_subq.union_all(team_ds_ids_subq)
+    visible_ds_ids = [r[0] for r in (await db.execute(visible_ds_ids_stmt)).all()]
+
+    if not visible_ds_ids:
+        # 无可见数据集, 全部返 0
+        return {
+            "datasets": 0,
+            "images": 0,
+            "labeled_images": 0,
+            "model_versions": 0,
+            "training_jobs": 0,
+        }
+
+    # 2) 数据集数
+    ds_count = len(visible_ds_ids)
+
+    # 3) 图片总数 + 已标数 (限定到可见数据集)
+    img_total = (await db.execute(
+        select(func.count(Image.id)).where(Image.dataset_id.in_(visible_ds_ids))
+    )).scalar() or 0
+
+    labeled_count = (await db.execute(
+        select(func.count(Image.id)).where(
+            Image.dataset_id.in_(visible_ds_ids),
+            Image.status.in_(("human_confirmed", "human_corrected", "trained")),
+        )
+    )).scalar() or 0
+
+    # 4) 模型版本数 (限定到可见数据集)
+    mv_count = (await db.execute(
+        select(func.count(ModelVersion.id)).where(
+            ModelVersion.dataset_id.in_(visible_ds_ids)
+        )
+    )).scalar() or 0
+
+    # 5) 训练任务数 (限定到当前 user)
+    job_count = (await db.execute(
+        select(func.count(TrainingJob.id)).where(TrainingJob.user_id == current_user.id)
+    )).scalar() or 0
+
     return {
-        "datasets": overview["datasets"]["total"],
-        "images": overview["images"]["total"],
-        "labeled_images": sum(
-            v for k, v in overview["images"]["by_status"].items()
-            if k in ("human_confirmed", "human_corrected", "trained")
-        ),
-        "model_versions": (
-            await db.execute(select(func.count(ModelVersion.id)))
-        ).scalar() or 0,
-        "training_jobs": overview["training_jobs"]["total"],
+        "datasets": ds_count,
+        "images": img_total,
+        "labeled_images": labeled_count,
+        "model_versions": mv_count,
+        "training_jobs": job_count,
     }
 
 
@@ -68,10 +133,15 @@ async def dataset_stats(
 ):
     """
     单数据集统计（产品运营核心图表数据）
+
+    v3.3.0 P0 修复: 访问前必须先校验用户对该数据集有读权限
     """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # 权限校验 (owner / team_member / admin)
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 1. 各状态图片数（饼图数据, v3.0.0: 排除不合格图片, 不合格单独统计）
     stmt = (
@@ -158,7 +228,14 @@ async def confidence_distribution(
     """
     AI 预测置信度分布（直方图数据）
     区间: [0, 0.1), [0.1, 0.2), ..., [0.9, 1.0]
+
+    v3.3.0 P0 修复: 必须校验数据集访问权限
     """
+    dataset = await db.get(Dataset, dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, dataset)
+
     stmt = select(Image.ai_prediction).where(
         Image.dataset_id == dataset_id,
         Image.ai_prediction.isnot(None),
@@ -191,7 +268,14 @@ async def annotation_timeline(
     """
     每日标注量（折线图数据）
     默认 7 天，可指定 1-90 天
+
+    v3.3.0 P0 修复: 必须校验数据集访问权限
     """
+    dataset = await db.get(Dataset, dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, dataset)
+
     end = datetime.utcnow().date()
     start = end - timedelta(days=days - 1)
 
@@ -231,39 +315,69 @@ async def annotator_efficiency(
 ):
     """
     标注员效率排行（Top 10）
-    - task_type: 可选, 传入时仅统计对应任务类型数据集下的标注记录
-                (走 Image -> Dataset 关联, 避免历史脏数据影响)
+
+    v3.3.0 P0 修复: 严格按用户隔离
+    - admin: 仍可看全系统排行 (运营视角)
+    - 普通用户: 仅返回自己参与的标注统计, 单条 (self only)
+      (原本会泄露全公司所有用户的标注量 + 用户名, 严重隐私问题)
     """
+    if current_user.is_admin():
+        # 管理员: 保留全局视角
+        stmt = (
+            select(
+                AnnotationLog.user_id,
+                User.username,
+                func.count(AnnotationLog.id).label("annos"),
+                func.coalesce(func.sum(AnnotationLog.time_spent_ms), 0).label("total_ms"),
+            )
+            .join(User, User.id == AnnotationLog.user_id)
+        )
+        if task_type:
+            # v2.5.x: 仪表盘按任务类型筛选, 通过 Image -> Dataset.task_type 过滤
+            stmt = stmt.join(Image, Image.id == AnnotationLog.image_id).join(
+                Dataset, Dataset.id == Image.dataset_id
+            ).where(Dataset.task_type == task_type)
+        stmt = (
+            stmt.group_by(AnnotationLog.user_id, User.username)
+            .order_by(func.count(AnnotationLog.id).desc())
+            .limit(10)
+        )
+        rows = (await db.execute(stmt)).all()
+        items = []
+        for r in rows:
+            total_ms = float(r[3] or 0)
+            annos = int(r[2] or 0)
+            items.append({
+                "user_id": int(r[0]),
+                "username": r[1],
+                "annotation_count": annos,
+                "total_seconds": round(total_ms / 1000.0, 2),
+                "avg_seconds": round((total_ms / 1000.0) / max(annos, 1), 2),
+            })
+        return {"items": items}
+
+    # ---- 非 admin: 只返回当前用户自己的统计 ----
     stmt = (
         select(
-            AnnotationLog.user_id,
-            User.username,
             func.count(AnnotationLog.id).label("annos"),
             func.coalesce(func.sum(AnnotationLog.time_spent_ms), 0).label("total_ms"),
-        )
-        .join(User, User.id == AnnotationLog.user_id)
+        ).where(AnnotationLog.user_id == current_user.id)
     )
     if task_type:
-        # v2.5.x: 仪表盘按任务类型筛选, 通过 Image -> Dataset.task_type 过滤
         stmt = stmt.join(Image, Image.id == AnnotationLog.image_id).join(
             Dataset, Dataset.id == Image.dataset_id
         ).where(Dataset.task_type == task_type)
-    stmt = (
-        stmt.group_by(AnnotationLog.user_id, User.username)
-        .order_by(func.count(AnnotationLog.id).desc())
-        .limit(10)
-    )
-    rows = (await db.execute(stmt)).all()
-    items = []
-    for r in rows:
-        total_ms = float(r[3] or 0)
-        annos = int(r[2] or 0)
-        items.append({
-            "user_id": int(r[0]),
-            "username": r[1],
-            "annotation_count": annos,
-            "total_seconds": round(total_ms / 1000.0, 2),
-            "avg_seconds": round((total_ms / 1000.0) / max(annos, 1), 2),
-        })
-    return {"items": items}
-
+    row = (await db.execute(stmt)).one()
+    annos = int(row[0] or 0)
+    total_ms = float(row[1] or 0)
+    return {
+        "items": [
+            {
+                "user_id": current_user.id,
+                "username": current_user.username,
+                "annotation_count": annos,
+                "total_seconds": round(total_ms / 1000.0, 2),
+                "avg_seconds": round((total_ms / 1000.0) / max(annos, 1), 2),
+            }
+        ]
+    }

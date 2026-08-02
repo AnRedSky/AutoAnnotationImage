@@ -30,9 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.tasks.model.model_version import ModelVersion
+from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.service.model_service import ModelService
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -62,6 +64,8 @@ async def activate_model(
     - 同一 dataset 下其他激活模型自动取消 (单激活语义)
     - 委托 ModelService.activate() 保证业务一致性
     - 幂等: 目标已是激活状态时也返回 success=True
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
@@ -69,6 +73,12 @@ async def activate_model(
 
     if target.dataset_id is None:
         raise HTTPException(400, "Model has no associated dataset, cannot activate")
+
+    # 权限校验
+    ds = await db.get(Dataset, target.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     try:
         await ModelService.activate(db, target, commit=True)
@@ -96,10 +106,21 @@ async def deactivate_model(
     - 幂等: 已经是未激活的也返回 success=True
 
     v3.0.0 审查修复: 委托 ModelService.deactivate() 保证业务一致性
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
         raise HTTPException(404, "Model not found")
+
+    # 权限校验
+    if target.dataset_id:
+        ds = await db.get(Dataset, target.dataset_id)
+        if not ds:
+            raise HTTPException(404, "Dataset not found")
+        await assert_can_access_dataset(db, current_user, ds, require_write=True)
+    elif not current_user.is_admin():
+        raise HTTPException(403, "无权限操作此模型")
 
     try:
         await ModelService.deactivate(db, target, commit=True)
@@ -128,6 +149,8 @@ async def batch_set_active(
     - 同一事务, 全部成功或全部回滚
     - 不区分 dataset: 用户可一次性"全部激活"或"全部取消激活"
     - 返回: { success, ids, active }
+
+    v3.3.0 P0 修复: 必须校验所有 model 所属 dataset 的写权限
     """
     # 去重保持顺序
     seen: set[int] = set()
@@ -145,6 +168,14 @@ async def batch_set_active(
     missing = [i for i in uniq_ids if i not in found_map]
     if missing:
         raise HTTPException(404, f"模型版本不存在: {missing}")
+
+    # 权限校验: 任一 model 所属 dataset 不可写则整体拒绝
+    ds_ids = {m.dataset_id for m in rows if m.dataset_id}
+    for ds_id in ds_ids:
+        ds = await db.get(Dataset, ds_id)
+        if not ds:
+            continue
+        await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     try:
         # 锁全部目标行

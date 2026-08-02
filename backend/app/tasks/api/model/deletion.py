@@ -36,10 +36,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.tasks.model.model_version import ModelVersion
+from app.tasks.model.dataset import Dataset
 from app.tasks.model.training_job import TrainingJob
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.core.config import settings
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,10 +102,21 @@ async def delete_model(
     - v2 改造: 允许删除当前已激活的版本 (删除即取消激活)
     - 解绑 training_jobs.model_version_id 引用（保留训练历史，不级联删除）。
     - 尝试删除磁盘上的权重文件（仅在路径指向 models/ 目录时执行，避免误删）。
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
     m = await db.get(ModelVersion, model_id)
     if not m:
         raise HTTPException(404, "Model not found")
+
+    # 权限校验
+    if m.dataset_id:
+        ds = await db.get(Dataset, m.dataset_id)
+        if not ds:
+            raise HTTPException(404, "Dataset not found")
+        await assert_can_access_dataset(db, current_user, ds, require_write=True)
+    elif not current_user.is_admin():
+        raise HTTPException(403, "无权限操作此模型")
 
     was_active = m.is_active
 
@@ -169,6 +182,17 @@ async def batch_delete_models(
         select(ModelVersion).where(ModelVersion.id.in_(uniq_ids))
     )).scalars().all()
     found_map = {m.id: m for m in rows}
+
+    # 1.5) 权限校验: 任一 model 所属 dataset 不可写则整体拒绝 (v3.3.0 P0 修复)
+    ds_ids_to_check = {m.dataset_id for m in rows if m.dataset_id}
+    for ds_id in ds_ids_to_check:
+        ds = await db.get(Dataset, ds_id)
+        if not ds:
+            continue
+        await assert_can_access_dataset(db, current_user, ds, require_write=True)
+    # 无 dataset_id 的 model 仅 admin 可删
+    if any(m.dataset_id is None for m in rows) and not current_user.is_admin():
+        raise HTTPException(403, "包含无主模型, 仅管理员可操作")
 
     # 2) 校验: 缺失 (激活的不再拒绝, v2 改造: 删除即取消激活)
     missing = [i for i in uniq_ids if i not in found_map]

@@ -13,6 +13,10 @@ training.log 模块 — 训练日志持久化接口
 - 后端仅追加/读取, 不解析
 - 最多保留 TrainingJob.LOG_MAX_LINES (200) 行, 超出截断头部
 - 空行/超长行 (> 2KB) 直接拒绝 (避免脏数据)
+
+**v3.3.0 P0 修复**: 鉴权 + 所有权校验
+- 之前: 任何登录用户可读写任意 job 的日志
+- 现在: 必须校验 job.user_id == current_user.id 或 admin
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +32,16 @@ router = APIRouter()
 LOG_LINE_MAX_LEN = 2048  # 单行最大 2KB
 
 
+def _assert_can_access_job(job: TrainingJob, current_user: User) -> None:
+    """v3.3.0 P0: 校验用户对训练任务的访问权 (admin / owner)
+    非 admin 仅能查看自己创建的 job
+    """
+    if current_user.is_admin():
+        return
+    if job.user_id != current_user.id:
+        raise HTTPException(403, "无权限访问此训练任务日志")
+
+
 @router.get("/jobs/{job_id}/log", response_model=TrainingJobLogOut)
 async def get_training_log(
     job_id: int,
@@ -37,10 +51,13 @@ async def get_training_log(
     """
     读取训练任务已持久化的日志 (SSE 推送过的每行, 详情页打开时拉取)
     持久化由前端 /api/training/jobs/{id}/log POST 触发, 后端只存不解析
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止跨用户日志泄露
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    _assert_can_access_job(job, current_user)
     log = job.log if isinstance(job.log, list) else []
     return TrainingJobLogOut(log=log)
 
@@ -57,6 +74,8 @@ async def append_training_log(
     - 后端仅追加到 TrainingJob.log 字段 (JSON list)
     - 最多保留 LOG_MAX_LINES (200) 行, 超出时截断头部
     - 空行/超长行 (超过 2KB) 直接拒绝, 避免脏数据
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止跨用户日志篡改
     """
     line = (payload.line or "").rstrip()
     if not line:
@@ -67,6 +86,7 @@ async def append_training_log(
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    _assert_can_access_job(job, current_user)
     log = list(job.log) if isinstance(job.log, list) else []
     log.append(line)
     # 截断头部, 保留尾部 LOG_MAX_LINES 行

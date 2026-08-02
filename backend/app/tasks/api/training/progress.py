@@ -10,21 +10,47 @@ training.progress 模块 — 训练进度查询 (REST + SSE 实时推送)
 **v3.0.0 Phase 3 状态合并**: 业务下沉到 JobStateService.get_snapshot / get_snapshot_with_fresh_db
 - 4 处真相源 (Celery state / DB / Redis info / start-finish 时间) 统一在 service 层
 - 本文件只做 HTTP 包装 + SSE 流式封装
+
+**v3.3.0 P0 修复**: 必须鉴权 + 校验所有权, 防止跨用户训练进度泄露
+- 之前: 即使鉴权可选, 任何 token 都能查任何 task_id 进度
+- 现在: 必须校验 task 对应 job 的 user_id == current_user.id 或 admin
 """
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.admin.model.user import User
-from app.middleware.http.auth import get_user_optional_for_query
+from app.middleware.http.auth import get_current_user, get_user_optional_for_query
 from app.schemas.training import TrainStatusResponse
+from app.tasks.model.training_job import TrainingJob
 from app.tasks.service.job_state_service import JobStateService
 
 router = APIRouter()
+
+
+async def _assert_can_access_task_id(task_id: str, current_user: User, db: AsyncSession) -> None:
+    """v3.3.0 P0: 校验用户对训练任务的访问权 (admin / owner)
+
+    - task_id 是 Celery UUID, 通过 TrainingJob.celery_task_id 反查 TrainingJob
+    - 非 admin 仅能看自己 user_id 的 job 进度
+    - 找不到对应 job (例如 auto_annotate 任务, 不写 TrainingJob) → 仅 admin 通过
+    """
+    if current_user.is_admin():
+        return
+    job = (await db.execute(
+        select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+    )).scalar_one_or_none()
+    if job is None:
+        # 找不到对应 job (可能是 auto_annotate 等不写 TrainingJob 的 Celery 任务)
+        # 非 admin 用户看不到
+        raise HTTPException(403, "无权限访问此任务进度")
+    if job.user_id != current_user.id:
+        raise HTTPException(403, "无权限访问此任务进度")
 
 
 # ============== REST 轮询接口 ==============
@@ -37,11 +63,18 @@ async def get_progress(
     current_user: User | None = Depends(get_user_optional_for_query),
     db: AsyncSession = Depends(get_db),
 ):
-    """查询训练进度 (前端轮询, 每 2 秒一次) - 鉴权可选
+    """查询训练进度 (前端轮询, 每 2 秒一次)
 
     **v3.0.0 Phase 3 重构**: 状态合并逻辑下沉到 JobStateService.get_snapshot
     (Celery + DB 合并 / 终态回退 / 4 处真相源统一) 都在 service 层
+
+    **v3.3.0 P0 修复**: 必须鉴权 + 校验所有权
+    - 之前: 鉴权可选, 任何 token 都能查任何 task_id 进度
+    - 现在: 必须登录, 且 task 对应 job 必须是 current_user 创建的
     """
+    if current_user is None:
+        raise HTTPException(401, "未授权: 需要有效的 access_token")
+    await _assert_can_access_task_id(task_id, current_user, db)
     snap = await JobStateService.get_snapshot(task_id, db)
     return TrainStatusResponse(
         task_id=task_id,
@@ -70,6 +103,7 @@ async def stream_training_progress(
     request: Request,
     token: str | None = Query(default=None),
     current_user: User | None = Depends(get_user_optional_for_query),
+    db: AsyncSession = Depends(get_db),
 ):
     """SSE 端点: 实时推送训练进度 (v3.0.0 Phase 4: 委托 JobStateService.get_snapshot_with_fresh_db)
 
@@ -78,7 +112,13 @@ async def stream_training_progress(
     - 仅在 (state, progress, message, current_epoch) 签名变化时推送, 避免静默期洪水
     - 长空闲期 (state=PENDING 且 worker 未接走) 周期性发 keepalive 注释帧
     - 客户端断开 (页面刷新 / 切页) 通过 request.is_disconnected() 立即退出
+
+    **v3.3.0 P0 修复**: 必须鉴权 + 校验所有权, 防止跨用户 SSE 进度泄露
     """
+    if current_user is None:
+        raise HTTPException(401, "未授权: 需要有效的 access_token")
+    await _assert_can_access_task_id(task_id, current_user, db)
+
     from celery.result import AsyncResult
 
     async def event_generator():

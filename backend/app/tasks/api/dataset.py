@@ -110,10 +110,19 @@ async def get_dataset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """获取数据集详情（含类别）"""
+    """获取数据集详情（含类别）
+
+    v3.3.0 P0 修复: 必须校验访问权限 (owner / team_member / admin)
+    - 之前: 任何登录用户可通过 ID 拿到任何 dataset 的完整信息
+    - 现在: 非授权访问直接 403
+    """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # 权限校验
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 列出类别
     result = await db.execute(
@@ -192,9 +201,14 @@ async def add_category(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """新增类别 (v3.3.0 P0 修复: 必须校验写权限)"""
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # 权限校验 (写权限: viewer 角色被拒)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset, require_write=True)
 
     cat = Category(
         dataset_id=dataset_id,
@@ -249,6 +263,10 @@ async def list_categories(
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, f"Dataset id={dataset_id} not found")
+
+    # v3.3.0 P0 修复: 必须校验访问权限
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset)
     task_type: str = dataset.task_type or "classification"
 
     # 1) 取本数据集全部 category

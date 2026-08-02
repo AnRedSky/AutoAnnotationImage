@@ -18,6 +18,8 @@ segmentation.masks 模块 — Mask 标注 CRUD
 - 仅 segmentation 数据集允许操作
 - 一张图唯一一条 mask (UNIQUE image_id)
 - v2.5.0-s12.8: 兼容前端 canvas.toBlob 的 RGBA PNG (取 R 通道当 L-mode)
+
+**v3.3.0 P0 修复**: 所有端点必须校验当前用户对 image 所属 dataset 有写权限
 """
 import io
 from pathlib import Path
@@ -29,12 +31,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.tasks.model.image import Image
+from app.tasks.model.dataset import Dataset
 from app.annotation.model.segmentation_mask import SegmentationMask
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.common.enums import TaskType, AnnotationSource
 from app.common.storage.storage_service import storage_service
 from app.tasks.service.segmentation_service import SegmentationService
+# v3.3.0 P0: 权限校验
+from app.tasks.service.permission_service import assert_can_access_dataset
 from PIL import Image as PILImage
 
 router = APIRouter()
@@ -53,6 +58,18 @@ async def _ensure_segmentation_image(image_id: int, db: AsyncSession) -> Image:
             f"Image id={image_id} task_type is {img.task_type!r}, "
             f"expected 'segmentation'",
         )
+    return img
+
+
+async def _ensure_can_access_image(
+    image_id: int, db: AsyncSession, current_user: User, require_write: bool = False
+) -> Image:
+    """v3.3.0 P0 新增: 校验 image 存在 + 任务类型 + 访问权限"""
+    img = await _ensure_segmentation_image(image_id, db)
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=require_write)
     return img
 
 
@@ -111,8 +128,10 @@ async def upload_mask(
     - 同一 image_id 多次上传, 后者覆盖前者
     - 自动读 PNG, 校验 mode, 写 storage_service, mask_path 存到 ORM
     - 写完统计 category_pixel_counts (内存返回, 不入库)
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
-    img = await _ensure_segmentation_image(image_id, db)
+    img = await _ensure_can_access_image(image_id, db, current_user, require_write=True)
 
     # source 校验
     if source not in {s.value for s in AnnotationSource}:
@@ -135,8 +154,10 @@ async def get_mask(
     拉取单图 mask
     - download=False: 返回 JSON 元数据 (含 base64 摘要, 不含完整二进制)
     - download=True:  返回 PNG 二进制 (Content-Type: image/png)
+
+    v3.3.0 P0 修复: 必须校验读权限
     """
-    img = await _ensure_segmentation_image(image_id, db)
+    img = await _ensure_can_access_image(image_id, db, current_user, require_write=False)
     m = (await db.execute(
         select(SegmentationMask).where(SegmentationMask.image_id == image_id)
     )).scalar_one_or_none()
@@ -202,7 +223,19 @@ async def delete_mask(
     删除 mask (v3.0.0 Phase 4: thin wrapper, 业务下沉到 SegmentationService.delete_mask)
     - ORM 软记录直接删, 磁盘文件同时清理
     - 找不到时由 Service 抛 NotFoundError, 全局 handler 统一返回 404
+
+    v3.3.0 P0 修复: 必须校验写权限 (反查 mask -> image -> dataset)
     """
+    m = await db.get(SegmentationMask, mask_id)
+    if not m:
+        raise HTTPException(404, f"Mask id={mask_id} not found")
+    img = await db.get(Image, m.image_id)
+    if not img:
+        raise HTTPException(404, "Image not found")
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
     await SegmentationService.delete_mask(db, mask_id)
     return {
         "success": True,

@@ -18,13 +18,20 @@ v3.0.0 Phase 4 重构:
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.core.config import settings
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
+from app.tasks.model.dataset import Dataset
+from app.tasks.model.image import Image
+from app.tasks.model.annotation_log import AnnotationLog
 # v3.0.0 Phase 4: 业务编排下沉到 Service
 from app.tasks.service.auto_annotate_service import AutoAnnotateService
+# v3.3.0 P0: 权限校验工具
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -195,6 +202,9 @@ async def run_segmentation_pretrained(
             400,
             f"该接口仅服务于分割任务数据集, 当前 dataset.task_type='{dataset.task_type}'",
         )
+
+    # v3.3.0 P0 修复: 必须校验写权限
+    await assert_can_access_dataset(db, current_user, dataset, require_write=True)
 
     # 2. 加载 torchvision 预训练模型
     from app.tasks.ml.segmentation import seg_predict

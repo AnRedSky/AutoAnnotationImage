@@ -114,10 +114,13 @@ async def get_training_job(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """获取单个训练任务详情"""
+    """获取单个训练任务详情 (v3.3.0 P0 修复: 必须校验所有权)"""
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    # 权限校验: admin 看全部, 否则只能看自己的
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限查看此训练任务")
     return job
 
 
@@ -134,10 +137,15 @@ async def cancel_training_job(
     - 仅当任务处于 PENDING/PROGRESS 时生效
     - 同步发送 Celery revoke 信号
     - 更新 TrainingJob 状态为 REVOKED
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止越权取消他人任务
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    # 权限校验
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限操作此训练任务")
     if job.state not in ("PENDING", "PROGRESS"):
         return {
             "success": False,
@@ -174,10 +182,15 @@ async def get_training_error(
     """
     读取训练任务的错误详情
     错误信息既存在 TrainingJob.error 字段, 也存在 Redis train:error:{task_id} 兜底
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止通过 error 信息泄露他人任务信息
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    # 权限校验
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限查看此训练任务")
     err = job.error
     redis_err = None
     if job.celery_task_id:
@@ -210,10 +223,15 @@ async def pause_training_job(
     - 写 Redis train:pause:{task_id} 标志位, worker 在每个 epoch 起点检测
     - 同步 revoke Celery task (terminate=False, 不强杀 SIGTERM; 让 worker 走优雅退出)
     - DB 状态先标 PAUSED (UI 立即可见); worker 实际停下后会写完整消息
+
+    v3.3.0 P0 修复: 必须校验所有权
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    # 权限校验
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限操作此训练任务")
     if job.state not in ("PENDING", "PROGRESS"):
         return TrainingJobActionResult(
             success=False,
@@ -263,10 +281,15 @@ async def update_training_job(
     - 禁止状态: PROGRESS (运行中, 参数已生效, 改了下次才生效但易引起混淆)
     - 仅更新提供的字段 (PUT 语义的部分更新)
     - 同步重置 message (清掉旧的 "等待 worker" 文案, 让用户知道参数刚改过)
+
+    v3.3.0 P0 修复: 必须校验所有权
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    # 权限校验
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限操作此训练任务")
     if job.state == "PROGRESS":
         raise HTTPException(409, f"任务 #${job_id} 正在训练中, 暂不允许编辑参数")
 
@@ -309,10 +332,15 @@ async def delete_training_job(
     - 物理删除 DB 记录, 不可恢复
     - 同步清 Redis 中的 history/error/pause 缓存 (避免历史数据残留)
     - 不影响已生成的 ModelVersion 记录 (用户可单独管理)
+
+    v3.3.0 P0 修复: 必须校验所有权
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
+    # 权限校验
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限操作此训练任务")
     if job.state in ("PENDING", "PROGRESS"):
         return TrainingJobActionResult(
             success=False,

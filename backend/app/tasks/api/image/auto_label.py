@@ -57,10 +57,19 @@ async def auto_label(
     - use_finetune=True + model_id: 显式指定 ModelVersion.id (支持标注工作台切换多个 fine-tune 模型)
     - use_finetune=False: 显式走 timm ImageNet, 输出 (class_532 等) 过滤到项目类目, 无匹配保持 pending
 
-    v3.0.0: 若 fine-tune 模型训练时纳入了 __unqualified__ 虚拟类别 (mv.class_names 末位含
+    v3.0.0: 若 fine- v3.0.0: 若 fine-tune 模型训练时纳入了 __unqualified__ 虚拟类别 (mv.class_names 末位含
     __unqualified__), 推理命中该类别且置信度 >= threshold 的图片会被自动标记为不合格
     (quality_flag="unqualified", reject_reason="ai_detected"), 不写 final_label_id.
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
+    # v3.3.0 P0: 权限校验
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
+
     # 1. 加载模型
     used_finetune = False
     mv: Optional[ModelVersion] = None

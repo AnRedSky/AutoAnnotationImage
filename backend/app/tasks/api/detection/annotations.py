@@ -18,6 +18,9 @@ detection.annotations 模块 — BBox 标注 CRUD API
 - 仅 detection 数据集允许操作 (Image.task_type == "detection")
 - category_id 必须属于同一 dataset
 - v3.0.0 Phase 4: 业务编排下沉到 DetectionService (replace/clear)
+
+**v3.3.0 P0 修复**: 所有端点必须校验当前用户对 image 所属 dataset 有写权限
+- 防止越权读 (list_image_bboxes / get) 或越权改 (save / replace / clear / delete)
 """
 from typing import List, Optional
 
@@ -29,6 +32,7 @@ from app.database import get_db
 from app.middleware.http.auth import get_current_user
 from app.admin.model.user import User
 from app.tasks.model.image import Image
+from app.tasks.model.dataset import Dataset
 from app.tasks.model.category import Category
 from app.annotation.model.bbox_annotation import BBoxAnnotation
 from app.schemas.detection import (
@@ -39,6 +43,8 @@ from app.common.enums import TaskType, AnnotationSource
 from app.common.geometry.bbox_service import validate_normalized_bbox
 # v3.0.0 Phase 4: 业务编排下沉到 Service
 from app.tasks.service.detection_service import DetectionService
+# v3.3.0 P0: 权限校验
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -60,6 +66,25 @@ async def _ensure_detection_image(image_id: int, db: AsyncSession) -> Image:
             f"Image id={image_id} task_type is {img.task_type!r}, "
             f"expected 'detection'",
         )
+    return img
+
+
+async def _ensure_can_access_image(
+    image_id: int, db: AsyncSession, current_user: User, require_write: bool = False
+) -> Image:
+    """v3.3.0 P0 新增: 校验 image 存在 + 任务类型 + 访问权限
+
+    Args:
+        image_id: 图片 ID
+        db: 数据库会话
+        current_user: 当前用户
+        require_write: 是否需要写权限 (mutation 操作为 True, 读为 False)
+    """
+    img = await _ensure_detection_image(image_id, db)
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=require_write)
     return img
 
 
@@ -98,8 +123,10 @@ async def save_bbox(
     单条 BBox 保存 (新增 / 覆盖)
     - 同一 image_id + (x_min,y_min,x_max,y_max) 视为同一目标, 走 UPDATE
     - 简化: 这里用 POST 单条写入, 真正的"批量替换"走 /annotations/replace
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
-    img = await _ensure_detection_image(image_id, db)
+    img = await _ensure_can_access_image(image_id, db, current_user, require_write=True)
     await _validate_category(payload.category_id, img.dataset_id, db)
 
     try:
@@ -154,8 +181,10 @@ async def replace_image_bboxes(
     - 一次 commit, 事务内完成
 
     适用场景: AI 预标注结果批量入库, 或人工重画全部框
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
-    img = await _ensure_detection_image(image_id, db)
+    img = await _ensure_can_access_image(image_id, db, current_user, require_write=True)
 
     # 校验坐标 (Service 校验 category 归属)
     for it in items:
@@ -188,8 +217,10 @@ async def list_image_bboxes(
 ):
     """
     拉取单图全部 BBox (按 id 升序, 先画的在前)
+
+    v3.3.0 P0 修复: 必须校验读权限
     """
-    img = await _ensure_detection_image(image_id, db)
+    img = await _ensure_can_access_image(image_id, db, current_user, require_write=False)
     rows = (await db.execute(
         select(BBoxAnnotation)
         .where(BBoxAnnotation.image_id == image_id)
@@ -208,8 +239,10 @@ async def clear_image_bboxes(
     清空单图全部 BBox 标注 (v3.0.0 Phase 4: thin wrapper, 业务下沉到 DetectionService.clear_bboxes)
     - 配合前端 DetectionAnnotator 的「重画」流程: 先 clear 旧的, 再 save 新的
     - 必须声明在 /annotations/{bbox_id} 之前, 避免 FastAPI 把 'clear' 解析成 bbox_id
+
+    v3.3.0 P0 修复: 必须校验写权限
     """
-    img = await _ensure_detection_image(image_id, db)
+    img = await _ensure_can_access_image(image_id, db, current_user, require_write=True)
     cleared = await DetectionService.clear_bboxes(db, img)
     return {"image_id": image_id, "cleared": cleared, "success": True}
 
@@ -221,11 +254,20 @@ async def delete_bbox(
     current_user: User = Depends(get_current_user),
 ):
     """
-    删除单条 BBox
+    删除单条 BBox (v3.3.0 P0 修复: 必须校验写权限)
+    - 通过 BBox -> Image -> Dataset 反查权限
     """
     bb = await db.get(BBoxAnnotation, bbox_id)
     if not bb:
         raise HTTPException(404, f"BBox id={bbox_id} not found")
+    # 反查 image -> dataset 权限
+    img = await db.get(Image, bb.image_id)
+    if not img:
+        raise HTTPException(404, "Image not found")
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
     await db.delete(bb)
     await db.commit()
     return {"success": True, "deleted_id": bbox_id}

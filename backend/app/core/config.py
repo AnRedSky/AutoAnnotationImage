@@ -204,6 +204,9 @@ class Settings(BaseSettings):
     SQL_SLOW_THRESHOLD_MS: int = int(os.getenv("SQL_SLOW_THRESHOLD_MS", "200"))
 
     # ===== ML =====
+    # 分类训练任务--早停耐心 (评分不变化次数), 默认 10
+    EARLY_STOP_PATIENCE: int = int(os.getenv("EARLY_STOP_PATIENCE", "10"))
+    # 其他模型训练参数...
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "efficientnet_b0")
     DEFAULT_BASE_MODEL: Optional[str] = None  # 兼容旧名
     DEFAULT_CONFIDENCE_THRESHOLD: float = float(os.getenv("DEFAULT_CONFIDENCE_THRESHOLD", "0.6"))

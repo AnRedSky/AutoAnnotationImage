@@ -17,6 +17,8 @@ detection.progress 模块 — 训练/自动标注进度查询 (REST + SSE)
   导致前端轮询永远 404. 新增与前端路径对齐的端点.
 - auto_annotate_detection_task 不写 TrainingJob, 因此 progress 端点
   必须支持"DB 没记录就回退到 Celery result.info"路径.
+
+**v3.3.0 P0 修复**: 必须鉴权 + 校验所有权, 防止跨用户 detection 进度泄露
 """
 import asyncio
 import json
@@ -33,6 +35,25 @@ from app.admin.model.user import User
 from app.tasks.model.training_job import TrainingJob
 
 router = APIRouter()
+
+
+async def _assert_can_access_detection_task(task_id: str, current_user: User) -> None:
+    """v3.3.0 P0: 校验用户对 detection 任务的访问权 (admin / owner)
+
+    - task_id 是 Celery UUID, 通过 TrainingJob.celery_task_id 反查 TrainingJob
+    - 非 admin 仅能看自己 user_id 的 job 进度
+    - 找不到对应 job (例如 auto_annotate 不写 TrainingJob) → 仅 admin 通过
+    """
+    if current_user.is_admin():
+        return
+    async with AsyncSessionLocal() as db:
+        job = (await db.execute(
+            select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+        )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(403, "无权限访问此任务进度")
+    if job.user_id != current_user.id:
+        raise HTTPException(403, "无权限访问此任务进度")
 
 
 # ============== 统一进度解析 ==============
@@ -138,10 +159,14 @@ async def get_job_progress(
 ):
     """
     拉取 TrainingJob 进度 (兼容老接口, JSON 轮询)
+
+    v3.3.0 P0 修复: 必须校验所有权
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限查看此训练任务进度")
     return {
         "id": job.id,
         "celery_task_id": job.celery_task_id,
@@ -170,10 +195,14 @@ async def stream_job_progress(
 ):
     """
     SSE 进度推送: 每秒轮询 TrainingJob, 终态自动断开
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止跨用户 SSE 进度泄露
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
+    if not current_user.is_admin() and job.user_id != current_user.id:
+        raise HTTPException(403, "无权限查看此训练任务进度")
 
     async def event_gen():
         last_state = None
@@ -226,7 +255,10 @@ async def get_detection_progress(
     - task_id 是 Celery UUID (不是 int TrainingJob id)
     - 同时覆盖 train_detection_task (DB 有 TrainingJob) 和
       auto_annotate_detection_task / auto_annotate_pretrained_task (仅 Celery state)
+
+    v3.3.0 P0 修复: 必须校验所有权
     """
+    await _assert_can_access_detection_task(task_id, current_user)
     return await _resolve_detection_task_progress(task_id)
 
 
@@ -246,9 +278,12 @@ async def stream_detection_progress(
     - 终态推完最后一帧后服务端主动结束流
     - 客户端断开通过 request.is_disconnected() 立即退出
     - 鉴权: query ?token=xxx 优先 (EventSource 无法设 header), header 兜底
+
+    v3.3.0 P0 修复: 必须校验所有权, 防止跨用户 SSE 进度泄露
     """
     if current_user is None:
         raise HTTPException(401, "未授权: 需要有效的 access_token (query ?token= 或 Authorization header)")
+    await _assert_can_access_detection_task(task_id, current_user)
 
     SSE_DET_POLL_INTERVAL = 1.0
 

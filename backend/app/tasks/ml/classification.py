@@ -66,7 +66,7 @@ def run_training(
     lr: float = 1e-4,
     progress_callback: Optional[Callable] = None,
     epoch_callback: Optional[Callable] = None,
-    early_stop_patience: int = 5,
+    early_stop_patience: int = 10,
     warmup_epochs: int = 1,
     pause_check: Optional[Callable[[], bool]] = None,
     pretrained_model_path: Optional[str] = None,

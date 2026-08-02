@@ -63,18 +63,26 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """用户列表 (任何已登录用户可查看, 用于团队邀请成员等场景)"""
+    """用户列表
+
+    v3.3.0 P0 修复: 严格按角色过滤敏感信息
+    - admin: 看完整信息 (含 email, role, is_active 等)
+    - 普通用户: 仅看 id + username (供团队邀请成员时下拉选择用户名)
+      不暴露 email / role / is_active, 避免隐私泄露
+    """
     users = await UserService.list_active(db, skip=0, limit=1000)
+    is_admin = current_user.is_admin()
     return {
         "items": [
             {
                 "id": u.id,
                 "username": u.username,
-                "email": u.email,
-                "role": u.role,
-                "is_active": u.is_active,
-                "created_at": _iso_utc(u.created_at),
-                "last_login_at": _iso_utc(u.last_login_at),
+                # 敏感字段: 仅 admin 可见
+                "email": u.email if is_admin else None,
+                "role": u.role if is_admin else None,
+                "is_active": u.is_active if is_admin else None,
+                "created_at": _iso_utc(u.created_at) if is_admin else None,
+                "last_login_at": _iso_utc(u.last_login_at) if is_admin else None,
             }
             for u in users
         ],

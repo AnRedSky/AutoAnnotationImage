@@ -18,6 +18,8 @@ export.segmentation 模块 — 图像分割数据集导出
 **S2 工具函数**:
 - `_resolve_mask_path`: SegmentationMask.mask_path -> 绝对路径
 - `_resolve_image_path_for_export`: Image.storage_path -> 绝对路径 (与 yolo_dataset 同源)
+
+**v3.3.0 P0 修复**: 2 个导出端点都必须校验用户对 dataset 的访问权限
 """
 import io
 import json
@@ -37,6 +39,7 @@ from app.annotation.model.segmentation_mask import SegmentationMask
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.common.enums import TaskType
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -80,6 +83,8 @@ async def export_voc_segmentation(
       SegmentationObject/<image>.png  (实例分割: 简化 = 与 Class 同值)
       ImageSets/Segmentation/{train,val,trainval}.txt
       label_colors.txt                (R G B 类别名, 调色板)
+
+    v3.3.0 P0 修复: 必须校验访问权限
     """
     from PIL import Image as PILImage
 
@@ -90,6 +95,9 @@ async def export_voc_segmentation(
         raise HTTPException(
             400, f"Dataset task_type={dataset.task_type!r}, expected 'segmentation'",
         )
+
+    # v3.3.0 P0: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 1) 拉 segmentation 图 + mask
     imgs = (await db.execute(
@@ -227,6 +235,8 @@ async def export_coco_segmentation(
     说明:
     - COCO segmentation 接受 RLE 或 polygon, 此处用 polygon (4 顶点的 bbox polygon)
     - 完整连通域 RLE 需要 pycocotools, 当前用 polygon 等价表达
+
+    v3.3.0 P0 修复: 必须校验访问权限
     """
     import numpy as np
     from PIL import Image as PILImage
@@ -238,6 +248,9 @@ async def export_coco_segmentation(
         raise HTTPException(
             400, f"Dataset task_type={dataset.task_type!r}, expected 'segmentation'",
         )
+
+    # v3.3.0 P0: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 1) 拉图 + mask
     imgs = (await db.execute(

@@ -168,6 +168,8 @@ async def mark_unqualified(
     - 不修改 Image.status / final_label_id (保留原标注状态, 撤销可恢复)
     - 写 AnnotationLog(action=mark_unqualified, payload={reason, custom_text}) 留痕
     - 不扣减 Category.sample_count (标注信息保留, 仅作质量标记)
+
+    v3.3.0 P0 修复: 必须校验当前用户对该 image 所属 dataset 有写权限
     """
     from app.common.enums import REJECT_REASON_VALUES
     if req.reason not in REJECT_REASON_VALUES:
@@ -176,6 +178,14 @@ async def mark_unqualified(
     img = await db.get(Image, req.image_id)
     if not img:
         raise HTTPException(404, "Image not found")
+
+    # v3.3.0 P0: 权限校验 (需对 dataset 有写权限)
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     if img.is_unqualified():
         raise HTTPException(409, f"图片 {req.image_id} 已被标记为不合格")
@@ -214,10 +224,20 @@ async def unmark_unqualified(
     - 清空 Image.quality_flag / reject_reason / rejected_by / rejected_at
     - 不恢复 (也不修改) Image.status (原标注状态一直保留, 无需恢复)
     - 写 AnnotationLog(action=unmark_unqualified) 留痕
+
+    v3.3.0 P0 修复: 必须校验当前用户对该 image 所属 dataset 有写权限
     """
     img = await db.get(Image, req.image_id)
     if not img:
         raise HTTPException(404, "Image not found")
+
+    # v3.3.0 P0: 权限校验
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     if not img.is_unqualified():
         raise HTTPException(409, f"图片 {req.image_id} 未被标记为不合格")
@@ -247,6 +267,10 @@ async def batch_mark_unqualified(
     - 一次事务处理多张图, 任一不存在则跳过 (不回滚)
     - 已标记为不合格的图跳过 (幂等)
     - 每张图写一条 AnnotationLog(action=mark_unqualified)
+
+    v3.3.0 P0 修复: 严格校验每张图所属 dataset 的写权限
+    - 一次性预查所有涉及的 dataset_id, 任一不可写则整体拒绝
+    - 避免攻击者通过猜 id 跨用户写
     """
     from app.common.enums import REJECT_REASON_VALUES
     if req.reason not in REJECT_REASON_VALUES:
@@ -260,6 +284,21 @@ async def batch_mark_unqualified(
 
     stmt = select(Image).where(Image.id.in_(ids))
     images = (await db.execute(stmt)).scalars().all()
+    if not images:
+        return {
+            "success": True, "marked": 0, "skipped": 0,
+            "missing": len(ids), "items": [],
+        }
+
+    # v3.3.0 P0: 收集涉及的 dataset, 统一做权限校验
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds_ids = {img.dataset_id for img in images}
+    for ds_id in ds_ids:
+        ds = await db.get(Dataset, ds_id)
+        if not ds:
+            raise HTTPException(404, f"Dataset {ds_id} not found")
+        await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     payload: dict = {"reason": req.reason}
     if req.custom_text:
@@ -314,6 +353,9 @@ async def clear_annotations(
     - 写一条 annotation_log action="reject" 留痕 (分类场景)
     - 对应 Category.sample_count - 1 (分类场景)
     - 不会真的删除图片
+
+    v3.3.0 P0 修复: 严格校验每张图所属 dataset 的写权限
+    - 一次性预查所有涉及的 dataset_id, 任一不可写则整体拒绝
     """
     ids = [int(x) for x in (req.image_ids or []) if x is not None]
     if not ids:
@@ -326,6 +368,16 @@ async def clear_annotations(
     images = (await db.execute(stmt)).scalars().all()
     if not images:
         return {"success": True, "cleared": 0, "skipped": len(ids), "items": []}
+
+    # v3.3.0 P0: 收集涉及的 dataset, 统一做权限校验
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds_ids = {img.dataset_id for img in images}
+    for ds_id in ds_ids:
+        ds = await db.get(Dataset, ds_id)
+        if not ds:
+            raise HTTPException(404, f"Dataset {ds_id} not found")
+        await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     # v2.5.16: 预查询检测/分割数据, 用于"实际有数据"的判断
     # - 检测: 统计每张图的 bbox 行数 {image_id: count}
@@ -501,7 +553,16 @@ async def annotation_stats(
     - AI 节省时间估算
     - 标注员人均速度
     - v3.0.0: 不合格图片单独统计 (正交于 status 状态机), status_counts 排除不合格图
+
+    v3.3.0 P0 修复: 必须校验访问权限
     """
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds)
+
     from sqlalchemy import func
     # 各状态图片数 (v3.0.0: 排除不合格图片, 不合格单独统计)
     stmt = (
@@ -633,15 +694,43 @@ async def recent_annotations(
 ):
     """
     全系统最近 N 条标注 (Dashboard 活动流)
+
+    v3.3.0 P0 修复: 严格按用户隔离
+    - admin: 看全系统 (保留原行为, 运营视角)
+    - 普通用户: 仅返回自己有权限访问的数据集下产生的标注
+      (防止通过此端点看到别人的标注活动, 严重隐私泄露)
     """
     from app.admin.model.user import User as UserModel
-    stmt = (
-        select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
-        .join(Image, Image.id == AnnotationLog.image_id)
-        .join(UserModel, UserModel.id == AnnotationLog.user_id)
-        .order_by(AnnotationLog.id.desc())
-        .limit(limit)
-    )
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.model.team_member import TeamMember
+
+    if current_user.is_admin():
+        # 管理员: 保留全局视角
+        stmt = (
+            select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
+            .join(Image, Image.id == AnnotationLog.image_id)
+            .join(UserModel, UserModel.id == AnnotationLog.user_id)
+            .order_by(AnnotationLog.id.desc())
+            .limit(limit)
+        )
+    else:
+        # 普通用户: 限定到有权限访问的 dataset
+        own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
+        team_ds_subq = (
+            select(Dataset.id)
+            .join(TeamMember, TeamMember.team_id == Dataset.team_id)
+            .where(TeamMember.user_id == current_user.id)
+        )
+        visible_ds_subq = own_ds_subq.union_all(team_ds_subq)
+        stmt = (
+            select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
+            .join(Image, Image.id == AnnotationLog.image_id)
+            .join(UserModel, UserModel.id == AnnotationLog.user_id)
+            .where(Image.dataset_id.in_(visible_ds_subq))
+            .order_by(AnnotationLog.id.desc())
+            .limit(limit)
+        )
+
     rows = (await db.execute(stmt)).all()
     items = []
     for log, filename, ds_id, username in rows:

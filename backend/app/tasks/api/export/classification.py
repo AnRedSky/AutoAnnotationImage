@@ -15,6 +15,10 @@ export.classification 模块 — 分类数据集导出
 - 默认只导出已确认/已修正的图片 (status ∈ {human_confirmed, human_corrected, trained})
 - `include_pending=True` 时包含待确认图片, 用于调试
 - 类别按 Category.id 升序映射到 YOLO class index
+
+**v3.3.0 P0 修复**: 3 个导出端点都必须校验用户对 dataset 的访问权限
+- 之前: 任何登录用户可导出任意 dataset 的数据, 严重数据泄露
+- 现在: 必须校验 owner / team_member / admin
 """
 import csv
 import io
@@ -32,6 +36,7 @@ from app.tasks.model.category import Category
 from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -72,6 +77,9 @@ async def export_coco(
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # v3.3.0 P0 修复: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
 
     # 取图片
     stmt = _filter_images_by_status(
@@ -139,6 +147,9 @@ async def export_yolo(
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
+    # v3.3.0 P0 修复: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
+
     cats = (await db.execute(
         select(Category).where(Category.dataset_id == dataset_id)
     )).scalars().all()
@@ -187,6 +198,9 @@ async def export_csv(
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+
+    # v3.3.0 P0 修复: 校验访问权限
+    await assert_can_access_dataset(db, current_user, dataset)
 
     stmt = _filter_images_by_status(
         select(Image).where(Image.dataset_id == dataset_id),
