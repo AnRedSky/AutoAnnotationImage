@@ -64,6 +64,9 @@ async def auto_label(
     v3.3.0 P0 修复: 必须校验写权限
     """
     # v3.3.0 P0: 权限校验
+    # - 与 delete.py 等 v3.3.0 修复保持一致: Dataset / 权限服务放在函数内
+    #   导入, 避免顶层导入引发循环依赖
+    from app.tasks.model.dataset import Dataset
     from app.tasks.service.permission_service import assert_can_access_dataset
     ds = await db.get(Dataset, dataset_id)
     if not ds:

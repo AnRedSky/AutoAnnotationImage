@@ -10,6 +10,7 @@ v2.5.15 性能优化:
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -30,6 +31,9 @@ from PIL import Image
 
 # ImageNet 1k 类别 (离线精简版, 展示用常见类目)
 IMAGENET_COMMON_LABELS_PATH = Path(__file__).parent.parent / "ml" / "imagenet_common_labels.json"
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModelPool:
@@ -329,16 +333,22 @@ class AIService:
         image_paths: List[str],
         top_k: int = 5,
         batch_size: int = 8,
+        errors_out: Optional[List[Optional[str]]] = None,
     ) -> List[Optional[Dict]]:
         """v2.5.15 P1-6 / C-3: 真批处理 (拼 batch tensor, 一次 forward 跑 batch_size 张)
 
         性能: 32 张图从 22s (asyncio.gather 串行 await) 降到 ~6s (CPU)
         失败/读图异常: 对应位置返回 None, 与 filter_predictions_to_categories 输入对齐
 
+        v3.4.1 P0: 新增 errors_out 参数, 用于把每张图失败原因透出到上层.
+        - errors_out 与 image_paths 等长, 失败位置写 str 错误简述, 成功位置为 None.
+        - 旧调用方不传时行为不变, 完全向后兼容.
+
         Args:
             image_paths: 图片绝对路径列表
             top_k: 每张图取 top-k 个预测
             batch_size: 一次 forward 处理的图片数 (默认 8, CPU 内存 sweet spot)
+            errors_out: 可选, 调用方传入 list 容器, 调用后会被原地填充错误信息
 
         Returns:
             List[Optional[Dict]]: 与 image_paths 等长, 每项是预测 dict 或 None (失败)
@@ -352,6 +362,7 @@ class AIService:
             list(image_paths),
             top_k,
             batch_size,
+            errors_out,
         )
 
     def _batch_predict_sync(
@@ -359,6 +370,7 @@ class AIService:
         image_paths: List[str],
         top_k: int,
         batch_size: int,
+        errors_out: Optional[List[Optional[str]]] = None,
     ) -> List[Optional[Dict]]:
         """v2.5.15 P1-6: 同步真批处理实现
 
@@ -366,6 +378,9 @@ class AIService:
         2) 分批 forward (每次 batch_size 张, torch.stack 拼 batch)
         3) unbind 回单图结果
         4) 对齐到原 image_paths (含失败图)
+
+        v3.4.1 P0: errors_out 非 None 时, 原地填充每张图的失败简述 (str)
+        供上层 preview_* 区分 "推理失败" 与 "top-1 不在项目类目" (后者走 need_human).
         """
         import torch
         if self.current_model is None:
@@ -377,34 +392,57 @@ class AIService:
         transform = self._build_transform(self.current_model)
         tensors: list = []
         paths_ok: list = []   # 成功 read 的路径, 顺序对齐
-        failed_idx: set = set()
+        # failed_errors: idx -> 错误简述, 仅记录读图失败
+        failed_errors: dict = {}
         for i, p in enumerate(image_paths):
             try:
                 img = Image.open(p).convert("RGB")
                 t = transform(img)
                 tensors.append(t)
                 paths_ok.append(p)
-            except Exception:
-                failed_idx.add(i)
+            except Exception as e:  # noqa: BLE001
+                failed_errors[i] = f"{type(e).__name__}: {e}"[:200]
+                # 关键: 失败时也记 WARNING 日志, 便于线上排查
+                # (之前 try/except 静默吞掉, 批量测评全 no_match 时无法定位)
+                logger.warning(
+                    "batch_predict: read image failed idx=%d path=%s err=%s",
+                    i, p, failed_errors[i],
+                )
 
         # 全部失败, 直接返回 None 列表
         if not tensors:
+            if errors_out is not None:
+                for i, p in enumerate(image_paths):
+                    errors_out[i] = failed_errors.get(i) or "all images failed (empty batch)"
             return [None] * len(image_paths)  # type: ignore[return-value]
 
         # 2) 分批 forward
         results_by_path: dict = {}
-        for start in range(0, len(tensors), batch_size):
-            batch = torch.stack(tensors[start:start + batch_size]).to(self.device)
-            with torch.no_grad():
-                logits = self.current_model(batch)
-                probs = torch.softmax(logits, dim=1)
-                num_classes = probs.shape[-1]
-                actual_k = max(1, min(top_k, num_classes))
-                top_probs, top_indices = probs.topk(actual_k, dim=1)
+        batch_fail_errors: dict = {}  # idx -> 错误简述 (forward 阶段)
+        try:
+            for start in range(0, len(tensors), batch_size):
+                batch = torch.stack(tensors[start:start + batch_size]).to(self.device)
+                with torch.no_grad():
+                    logits = self.current_model(batch)
+                    probs = torch.softmax(logits, dim=1)
+                    num_classes = probs.shape[-1]
+                    actual_k = max(1, min(top_k, num_classes))
+                    top_probs, top_indices = probs.topk(actual_k, dim=1)
 
-            for j, (probs_row, idxs_row) in enumerate(zip(top_probs, top_indices)):
-                path = paths_ok[start + j]
-                results_by_path[path] = (probs_row.cpu(), idxs_row.cpu())
+                for j, (probs_row, idxs_row) in enumerate(zip(top_probs, top_indices)):
+                    path = paths_ok[start + j]
+                    results_by_path[path] = (probs_row.cpu(), idxs_row.cpu())
+        except Exception as e:  # noqa: BLE001
+            # forward 整批失败: 把这批全部图都标为失败
+            err = f"forward_failed: {type(e).__name__}: {e}"[:200]
+            logger.error("batch_predict: forward failed err=%s", err)
+            for i, p in enumerate(image_paths):
+                if p in paths_ok:
+                    batch_fail_errors[i] = err
+            if errors_out is not None:
+                for i, p in enumerate(image_paths):
+                    errors_out[i] = failed_errors.get(i) or batch_fail_errors.get(i)
+            return [None] * len(image_paths)  # type: ignore[return-value]
 
         # 3) 构建 ImageNet label 查找表 (lazy, 一次)
         imagenet_classes = self.current_model.default_cfg.get("classes") or []
@@ -414,7 +452,10 @@ class AIService:
         # 4) 对齐到原 image_paths 顺序, 失败的填 None
         out: list = []
         for i, p in enumerate(image_paths):
-            if i in failed_idx or p not in results_by_path:
+            err = failed_errors.get(i) or batch_fail_errors.get(i)
+            if err or p not in results_by_path:
+                if errors_out is not None:
+                    errors_out[i] = err or "missing in batch result"
                 out.append(None)  # type: ignore[arg-type]
                 continue
             probs_row, idxs_row = results_by_path[p]

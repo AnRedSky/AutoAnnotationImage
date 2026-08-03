@@ -19,6 +19,7 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
+import asyncio
 
 from app.database import get_db
 from app.tasks.model.image import Image
@@ -198,17 +199,24 @@ async def get_image_thumbnail(
     # 缩略图 cache 加载器: PIL 编码一次. LRU 在 app/common/cache/thumbnail_cache.py.
     from app.common.cache.thumbnail_cache import thumbnail_for
 
-    def loader(image_id_: int, size_: int) -> bytes:
-        """cache miss 时调用. 必须读 storage + PIL 编一次."""
-        from PIL import Image as PILImage
-        from io import BytesIO
-        from app.utils.async_helpers import run_async_in_worker
+    # v3.4.1 P0 修复: 之前 loader 内部用 run_async_in_worker 同步驱动
+    # storage_service.load(...), 但本 handler 是 async (运行在 FastAPI 主 loop),
+    # _get_worker_loop() 在主线程拿到的是**当前正在运行**的 loop,
+    # loop.run_until_complete(coro) 抛 "Cannot run the event loop while
+    # another loop is running" → 批量测评时所有缩略图请求都报这个错.
+    #
+    # 正确做法: async handler 内直接 await storage 读 content (IO, 必须 async),
+    # 把 PIL 编码 (纯 CPU) 通过 asyncio.to_thread 丢到 thread pool,
+    # 既不阻塞主 loop, 又避免在已有 loop 上再 run_until_complete.
+    content = await storage_service.load(img.storage_path)
+    if not content:
+        raise HTTPException(status_code=404, detail="Image content empty")
 
-        # cache 调到 loader 在 worker thread 内, 但 storage_service.load 是 async.
-        # 用 run_async_in_worker 同步驱动 async 协程.
-        content = run_async_in_worker(storage_service.load(img.storage_path))
-        if not content:
-            raise RuntimeError(f"image {image_id_} empty")
+    from PIL import Image as PILImage
+    from io import BytesIO
+
+    def loader(image_id_: int, size_: int) -> bytes:
+        """cache miss 时调用. 只做 PIL 编码 (纯 CPU), 不再做 IO."""
         pil_img = PILImage.open(BytesIO(content))
         pil_img.thumbnail((size_, size_), PILImage.LANCZOS)
         if pil_img.mode not in ("RGB", "L"):
@@ -222,11 +230,11 @@ async def get_image_thumbnail(
     # 第一次: loader 调 -> PIL encode -> store
     # 第二次: cache hit -> 直接返, loader 完全不调
     try:
-        thumb_bytes = thumbnail_for(image_id, size, loader=loader)
+        # asyncio.to_thread 把 sync loader 丢到 thread pool, 避免阻塞主 loop
+        thumb_bytes = await asyncio.to_thread(thumbnail_for, image_id, size, loader)
     except Exception as e:
         # 缩略图生成失败时回退到原图
         logger.warning("thumbnail generation failed for image %s: %s", image_id, e)
-        content = await storage_service.load(img.storage_path)
         ext = _P(img.storage_path).suffix.lower()
         return Response(
             content=content,
