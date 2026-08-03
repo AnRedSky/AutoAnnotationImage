@@ -27,6 +27,8 @@ interface PreviewItem {
   bbox_count?: number
   max_softmax?: number
   category_summary?: { id: number; name: string; count: number }[]
+  /** v3.4.1 P1: 推理失败时的错误描述 (reason=infer_failed 时存在) */
+  error?: string
 }
 
 interface PreviewResult {
@@ -34,6 +36,8 @@ interface PreviewResult {
   would_label: number
   need_human: number
   no_match: number
+  /** v3.4.1 P1: 推理失败数, 与 no_match 区分 */
+  infer_failed?: number
   threshold: number
   used_finetune: boolean
   finetune_name?: string
@@ -59,11 +63,17 @@ const activeTab = ref('would')
 
 const groups = computed(() => {
   const r = props.result
-  if (!r) return { would: [] as PreviewItem[], human: [] as PreviewItem[], none: [] as PreviewItem[] }
+  if (!r) return {
+    would: [] as PreviewItem[],
+    human: [] as PreviewItem[],
+    none: [] as PreviewItem[],     // 真·无匹配 (timm filter 后无交集)
+    failed: [] as PreviewItem[],   // 推理失败 (batch_predict 异常)
+  }
   return {
     would: r.items.filter((x) => x.would_label),
-    human: r.items.filter((x) => !x.would_label && x.reason !== 'no_match'),
+    human: r.items.filter((x) => !x.would_label && x.reason !== 'no_match' && x.reason !== 'infer_failed'),
     none:  r.items.filter((x) => x.reason === 'no_match'),
+    failed: r.items.filter((x) => x.reason === 'infer_failed'),
   }
 })
 
@@ -101,7 +111,14 @@ const onApply = () => emit('apply')
         <div class="preview-card preview-card--danger">
           <div class="preview-card__num">{{ result.no_match }}</div>
           <div class="preview-card__label">无匹配</div>
-          <div class="preview-card__hint">模型输出与项目类目无交集</div>
+          <!-- v3.4.1 P1-2: 改文案, 消除"图片不行"歧义 -->
+          <div class="preview-card__hint">模型 top-1 不在项目类目</div>
+        </div>
+        <!-- v3.4.1 P1-2: 新增"推理失败"卡, 独立于 no_match -->
+        <div v-if="(result.infer_failed || 0) > 0" class="preview-card preview-card--failed">
+          <div class="preview-card__num">{{ result.infer_failed }}</div>
+          <div class="preview-card__label">推理失败</div>
+          <div class="preview-card__hint">图片读图 / 模型前向异常, 见 Tab 错误明细</div>
         </div>
       </div>
       <div class="preview-summary__model">
@@ -143,6 +160,15 @@ const onApply = () => emit('apply')
         </template>
         <PreviewList :items="groups.none" :task-type="taskType" />
       </el-tab-pane>
+      <!-- v3.4.1 P1-2: 推理失败 Tab, 仅在有失败时显示 -->
+      <el-tab-pane v-if="groups.failed.length > 0" :name="'failed'">
+        <template #label>
+          <span style="color: #f56c6c;">
+            <el-icon><Warning /></el-icon> 推理失败 ({{ groups.failed.length }})
+          </span>
+        </template>
+        <PreviewList :items="groups.failed" :task-type="taskType" />
+      </el-tab-pane>
     </el-tabs>
 
     <template #footer>
@@ -160,7 +186,7 @@ const onApply = () => emit('apply')
 .preview-summary { margin-bottom: 18px; }
 .preview-summary__cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 14px;
 }
@@ -173,7 +199,8 @@ const onApply = () => emit('apply')
 }
 .preview-card--success { border-color: #67c23a; background: #f0f9eb; }
 .preview-card--warning { border-color: #e6a23c; background: #fdf6ec; }
-.preview-card--danger { border-color: #f56c6c; background: #fef0f0; }
+.preview-card--danger  { border-color: #f56c6c; background: #fef0f0; }
+.preview-card--failed  { border-color: #c0c4cc; background: #f4f4f5; }
 .preview-card__num { font-size: 28px; font-weight: 700; line-height: 1.1; }
 .preview-card__label { font-size: 13px; color: #303133; margin-top: 4px; }
 .preview-card__hint { font-size: 12px; color: #909399; margin-top: 2px; }

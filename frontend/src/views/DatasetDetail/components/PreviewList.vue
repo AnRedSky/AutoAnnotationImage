@@ -101,6 +101,17 @@ function taskTypeLabel(): string {
               size="small" type="info" effect="plain" style="margin-left: 4px;"
             >不在项目类目</el-tag>
           </template>
+          <template v-else-if="item.reason === 'infer_failed'">
+            <!-- v3.4.1 P1-3: 推理失败展示后端 error 字段 -->
+            <span class="preview-list__no-pred">— 推理失败 —</span>
+            <el-tooltip
+              v-if="item.error"
+              :content="item.error"
+              placement="top"
+            >
+              <el-icon class="preview-list__error-icon"><Warning /></el-icon>
+            </el-tooltip>
+          </template>
           <template v-else>
             <span class="preview-list__no-pred">— 无预测 —</span>
           </template>
@@ -235,6 +246,13 @@ function taskTypeLabel(): string {
 .preview-list__conf-num--info    { color: #909399; }
 .preview-list__conf-num--danger  { color: #f56c6c; }
 .preview-list__no-pred { color: var(--text-placeholder); font-style: italic; }
+.preview-list__error-icon {
+  color: #f56c6c;
+  cursor: help;
+  margin-left: 4px;
+  font-size: 14px;
+  vertical-align: middle;
+}
 
 .preview-list__cands {
   margin-top: 4px;

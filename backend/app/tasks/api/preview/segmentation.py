@@ -155,5 +155,6 @@ async def preview_segmentation(
     payload = _attach_model_meta(
         payload, used_finetune=used_finetune, mv=mv,
         fallback_pretrained_name=model_name,
+        use_finetune=use_finetune,
     )
     return payload

@@ -90,7 +90,12 @@ async def preview_classification(
 
     storage_root = settings.UPLOAD_DIR
     image_paths = [str(storage_root / img.storage_path) for img in images]
-    predictions = await ai_service.batch_predict(image_paths, top_k=5)
+    # v3.4.1 P0: 用 errors_out 收集 batch_predict 单图失败原因
+    # 之前失败被静默吞掉, 批量测评全 no_match 时无法定位
+    errors_out: list = [None] * len(image_paths)
+    predictions = await ai_service.batch_predict(
+        image_paths, top_k=5, errors_out=errors_out,
+    )
 
     cat_rows = (await db.execute(
         select(Category).where(Category.dataset_id == dataset_id)
@@ -105,16 +110,35 @@ async def preview_classification(
     would_label = 0
     need_human = 0
     no_match = 0
-    for img, pred in zip(images, final_predictions):
+    infer_failed = 0
+    for i, (img, pred) in enumerate(zip(images, final_predictions)):
         if pred is None:
-            items.append({
-                "image_id": img.id, "filename": img.filename,
-                "thumb_url": f"/api/files/{img.id}/preview",
-                "top1": None, "top1_conf": None, "candidates": [],
-                "in_project_categories": False, "would_label": False,
-                "reason": "no_match",
-            })
-            no_match += 1
+            # v3.4.1 P1: 区分 no_match (filter 把不在类目的过滤掉) 和 infer_failed (推理失败)
+            # - used_finetune=True 路径下 filter 不调用, pred=None 必为推理失败
+            # - used_finetune=False 路径下 pred=None 可能是 filter 过滤, 也可能 batch_predict 失败
+            #   用 errors_out[i] 区分: 非空字符串 = 推理失败
+            err = errors_out[i] if i < len(errors_out) else None
+            if used_finetune or err:
+                # 推理失败
+                infer_failed += 1
+                items.append({
+                    "image_id": img.id, "filename": img.filename,
+                    "thumb_url": f"/api/files/{img.id}/preview",
+                    "top1": None, "top1_conf": None, "candidates": [],
+                    "in_project_categories": False, "would_label": False,
+                    "reason": "infer_failed",
+                    "error": err or "batch_predict returned None",
+                })
+            else:
+                # timm 预训练 + filter 后无交集 = 真·无匹配
+                no_match += 1
+                items.append({
+                    "image_id": img.id, "filename": img.filename,
+                    "thumb_url": f"/api/files/{img.id}/preview",
+                    "top1": None, "top1_conf": None, "candidates": [],
+                    "in_project_categories": False, "would_label": False,
+                    "reason": "no_match",
+                })
             continue
         top1 = pred.get("top1")
         top1_conf = float(pred.get("top1_conf") or 0.0)
@@ -141,6 +165,7 @@ async def preview_classification(
     payload = {
         "items": items,
         "would_label": would_label, "need_human": need_human, "no_match": no_match,
+        "infer_failed": infer_failed,
         "total": len(items), "threshold": confidence_threshold,
         "model_name": ai_service.current_model_name,
         "task_type": "classification",
@@ -148,5 +173,24 @@ async def preview_classification(
     payload = _attach_model_meta(
         payload, used_finetune=used_finetune, mv=mv,
         fallback_pretrained_name=ai_service.current_model_name or model_name,
+        use_finetune=use_finetune,
     )
+    # v3.4.1 P2: 在 _attach_model_meta 之后追加 (否则会被清掉).
+    # 当 use fine-tune 但 top1 全部退化为 class_xxx 兜底 (即 _custom_label_map
+    # 没匹配上), 几乎可断定为"模型与数据集不匹配" (训练时的 idx→name 与当前数据集类目错位).
+    # 在 response.warning 追加一条提示, 前端展示在 result.warning 顶栏.
+    if used_finetune and not infer_failed:
+        ok_items = [it for it in items if it.get("top1")]
+        if ok_items and all(
+            (it.get("top1") or "").startswith("class_") for it in ok_items
+        ):
+            current_warning = payload.get("warning")
+            extra = (
+                "fine-tune 模型的所有 top-1 均为 class_X 兜底标签, "
+                "极可能是该模型与当前数据集不匹配 (训练时 num_classes / 类目顺序与当前不同). "
+                "请重新训练或选择本数据集训练的 fine-tune 模型."
+            )
+            payload["warning"] = (
+                f"{current_warning} | {extra}" if current_warning else extra
+            )
     return payload
