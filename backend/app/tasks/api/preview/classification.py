@@ -27,7 +27,7 @@ from app.tasks.model.category import Category
 from app.tasks.model.dataset import Dataset
 from app.tasks.model.model_version import ModelVersion
 from app.common.ml.ai_service import ai_service, filter_predictions_to_categories
-from app.core.config import settings
+from app.common.storage import resolve_inference_paths  # v3.4.1 P1: 适配 minio 后端
 
 # 复用 preview 包内的工具函数
 from app.tasks.api.preview._utils import _resolve_finetune_model, _attach_model_meta
@@ -88,14 +88,15 @@ async def preview_classification(
                 raise HTTPException(500, f"Failed to load model: {e}")
         used_finetune = False
 
-    storage_root = settings.UPLOAD_DIR
-    image_paths = [str(storage_root / img.storage_path) for img in images]
-    # v3.4.1 P0: 用 errors_out 收集 batch_predict 单图失败原因
-    # 之前失败被静默吞掉, 批量测评全 no_match 时无法定位
-    errors_out: list = [None] * len(image_paths)
-    predictions = await ai_service.batch_predict(
-        image_paths, top_k=5, errors_out=errors_out,
-    )
+    # v3.4.1 P1: 推理路径解析 (local 直返 / minio 临时文件)
+    # 替代旧写法 [str(storage_root / img.storage_path) for img in images]
+    async with resolve_inference_paths(images) as image_paths:
+        # v3.4.1 P0: 用 errors_out 收集 batch_predict 单图失败原因
+        # 之前失败被静默吞掉, 批量测评全 no_match 时无法定位
+        errors_out: list = [None] * len(image_paths)
+        predictions = await ai_service.batch_predict(
+            image_paths, top_k=5, errors_out=errors_out,
+        )
 
     cat_rows = (await db.execute(
         select(Category).where(Category.dataset_id == dataset_id)

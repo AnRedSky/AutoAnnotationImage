@@ -22,7 +22,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.core.config import settings
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.model.dataset import Dataset
@@ -32,6 +31,8 @@ from app.tasks.model.annotation_log import AnnotationLog
 from app.tasks.service.auto_annotate_service import AutoAnnotateService
 # v3.3.0 P0: 权限校验工具
 from app.tasks.service.permission_service import assert_can_access_dataset
+# v3.4.1 P1: 推理路径解析 (适配 minio 后端)
+from app.common.storage import resolve_inference_paths
 
 router = APIRouter()
 
@@ -252,61 +253,60 @@ async def run_segmentation_pretrained(
         )
 
     # 4. 同步批量推理
-    storage_root = settings.UPLOAD_DIR
-    image_paths = [str(storage_root / img.storage_path) for img in images]
-    try:
-        masks_with_conf = seg_predict.predict_to_mask_image_with_conf(
-            model, image_paths, crop_size=req.crop_size, device=req.device,
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Inference failed: {str(e)[:200]}")
+    # v3.4.1 P1: 推理路径解析 (local 直返 / minio 临时文件)
+    async with resolve_inference_paths(images) as image_paths:
+        try:
+            masks_with_conf = seg_predict.predict_to_mask_image_with_conf(
+                model, image_paths, crop_size=req.crop_size, device=req.device,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Inference failed: {str(e)[:200]}")
 
-    # 5. upsert SegmentationMask + 写 status + 审计
-    from app.annotation.model.segmentation_mask import SegmentationMask
-    auto_labeled = 0
-    for img in images:
-        abs_path = str(storage_root / img.storage_path)
-        if abs_path not in masks_with_conf:
-            # 单图推理失败 (e.g. 损坏的图像) → 跳过, 不影响整体
-            continue
-        pil_mask, max_softmax = masks_with_conf[abs_path]
+        # 5. upsert SegmentationMask + 写 status + 审计
+        from app.annotation.model.segmentation_mask import SegmentationMask
+        auto_labeled = 0
+        for img, abs_path in zip(images, image_paths):
+            if abs_path not in masks_with_conf:
+                # 单图推理失败 (e.g. 损坏的图像) → 跳过, 不影响整体
+                continue
+            pil_mask, max_softmax = masks_with_conf[abs_path]
 
-        # overwrite_existing=False 时: 已存在 mask 直接跳过
-        existing = (await db.execute(
-            select(SegmentationMask).where(SegmentationMask.image_id == img.id)
-        )).scalars().first()
-        if existing and not req.overwrite_existing:
-            continue
+            # overwrite_existing=False 时: 已存在 mask 直接跳过
+            existing = (await db.execute(
+                select(SegmentationMask).where(SegmentationMask.image_id == img.id)
+            )).scalars().first()
+            if existing and not req.overwrite_existing:
+                continue
 
-        # 持久化 mask 到 storage_service
-        mask_path = seg_predict.save_mask_pil(pil_mask, req.dataset_id, img.id)
+            # 持久化 mask 到 storage_service
+            mask_path = seg_predict.save_mask_pil(pil_mask, req.dataset_id, img.id)
 
-        if existing:
-            # 覆盖: 删旧 + 写新
-            await db.delete(existing)
-            await db.flush()
-        new_mask = SegmentationMask(
-            image_id=img.id,
-            mask_path=mask_path,
-            source="ai",
-            annotated_by=current_user.id,
-        )
-        db.add(new_mask)
-
-        # 判定是否落标 (max_softmax 是 softmax 输出最大值, ∈ [0, 1])
-        would_label = max_softmax >= req.confidence_threshold
-        if would_label:
-            img.status = "ai_labeled"
-            db.add(AnnotationLog(
+            if existing:
+                # 覆盖: 删旧 + 写新
+                await db.delete(existing)
+                await db.flush()
+            new_mask = SegmentationMask(
                 image_id=img.id,
-                user_id=current_user.id,
-                action="ai_predict",
-                from_label_id=img.final_label_id,
-                to_label_id=None,  # 分割任务无单 label_id
-                time_spent_ms=0,
-            ))
-            auto_labeled += 1
-        # 否则保持 pending (mask 已写入, 人工可继续精修)
+                mask_path=mask_path,
+                source="ai",
+                annotated_by=current_user.id,
+            )
+            db.add(new_mask)
+
+            # 判定是否落标 (max_softmax 是 softmax 输出最大值, ∈ [0, 1])
+            would_label = max_softmax >= req.confidence_threshold
+            if would_label:
+                img.status = "ai_labeled"
+                db.add(AnnotationLog(
+                    image_id=img.id,
+                    user_id=current_user.id,
+                    action="ai_predict",
+                    from_label_id=img.final_label_id,
+                    to_label_id=None,  # 分割任务无单 label_id
+                    time_spent_ms=0,
+                ))
+                auto_labeled += 1
+            # 否则保持 pending (mask 已写入, 人工可继续精修)
 
     await db.commit()
 

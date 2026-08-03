@@ -40,6 +40,13 @@ def get_storage_service() -> StorageService:
     return storage_service
 
 
+# v3.4.1 P1: 推理路径解析 (local/minio 适配)
+# - local 后端: 直接返回 base_dir/key 路径
+# - minio 后端: 下载到临时目录, 退出时自动清理
+# 让 batch_predict / predict_image_grouped / seg_predict 都能用
+from app.common.storage.inference_resolver import resolve_inference_paths  # noqa: E402
+
+
 __all__ = [
     "storage_service",
     "StorageService",

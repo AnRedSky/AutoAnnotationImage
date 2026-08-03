@@ -32,7 +32,8 @@ from app.middleware.http.auth import get_current_user
 from app.common.ml.ai_service import ai_service
 from app.common.ml.ai_service import filter_predictions_to_categories
 from app.common.enums import UNQUALIFIED_LABEL, RejectReason
-from app.core.config import settings
+# v3.4.1 P1: 推理路径解析 (适配 minio 后端)
+from app.common.storage import resolve_inference_paths
 
 # auto_label 独立 router
 router = APIRouter()
@@ -173,9 +174,10 @@ async def auto_label(
         }
 
     # 3. 批量推理
-    storage_root = settings.UPLOAD_DIR
-    image_paths = [str(storage_root / img.storage_path) for img in images]
-    predictions = await ai_service.batch_predict(image_paths, top_k=5)
+    # v3.4.1 P1: 推理路径解析 (local 直返 / minio 临时文件)
+    # 替代旧写法 [str(storage_root / img.storage_path) for img in images]
+    async with resolve_inference_paths(images) as image_paths:
+        predictions = await ai_service.batch_predict(image_paths, top_k=5)
 
     # 4. 写回数据库
     cat_rows = (await db.execute(

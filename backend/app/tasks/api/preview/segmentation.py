@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.tasks.model.image import Image
 from app.tasks.model.dataset import Dataset
 from app.tasks.model.model_version import ModelVersion
-from app.core.config import settings
+from app.common.storage import resolve_inference_paths  # v3.4.1 P1: 适配 minio 后端
 
 # 复用 preview 包内的工具函数
 from app.tasks.api.preview._utils import _resolve_finetune_model, _attach_model_meta
@@ -109,41 +109,41 @@ async def preview_segmentation(
         used_finetune = False
 
     # 推理
-    storage_root = settings.UPLOAD_DIR
-    image_paths = [str(storage_root / img.storage_path) for img in images]
-    try:
-        masks_with_conf = seg_predict.predict_to_mask_image_with_conf(
-            model, image_paths, crop_size=256, device="cpu",
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Segmentation inference failed: {str(e)[:200]}")
+    # v3.4.1 P1: 推理路径解析 (local 直返 / minio 临时文件)
+    # 替代旧写法 [str(storage_root / img.storage_path) for img in images]
+    async with resolve_inference_paths(images) as image_paths:
+        try:
+            masks_with_conf = seg_predict.predict_to_mask_image_with_conf(
+                model, image_paths, crop_size=256, device="cpu",
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Segmentation inference failed: {str(e)[:200]}")
 
-    items: list = []
-    would_label = 0
-    need_human = 0
-    for img in images:
-        abs_path = str(storage_root / img.storage_path)
-        if abs_path not in masks_with_conf:
+        items: list = []
+        would_label = 0
+        need_human = 0
+        for img, abs_path in zip(images, image_paths):
+            if abs_path not in masks_with_conf:
+                items.append({
+                    "image_id": img.id, "filename": img.filename,
+                    "thumb_url": f"/api/files/{img.id}/preview",
+                    "max_conf": 0.0, "would_label": False, "reason": "infer_failed",
+                })
+                need_human += 1
+                continue
+            _, max_softmax = masks_with_conf[abs_path]
+            would = max_softmax >= confidence_threshold
             items.append({
                 "image_id": img.id, "filename": img.filename,
                 "thumb_url": f"/api/files/{img.id}/preview",
-                "max_conf": 0.0, "would_label": False, "reason": "infer_failed",
+                "max_conf": round(max_softmax, 4),
+                "would_label": would,
+                "reason": "would_label" if would else "below_threshold",
             })
-            need_human += 1
-            continue
-        _, max_softmax = masks_with_conf[abs_path]
-        would = max_softmax >= confidence_threshold
-        items.append({
-            "image_id": img.id, "filename": img.filename,
-            "thumb_url": f"/api/files/{img.id}/preview",
-            "max_conf": round(max_softmax, 4),
-            "would_label": would,
-            "reason": "would_label" if would else "below_threshold",
-        })
-        if would:
-            would_label += 1
-        else:
-            need_human += 1
+            if would:
+                would_label += 1
+            else:
+                need_human += 1
 
     payload = {
         "items": items,

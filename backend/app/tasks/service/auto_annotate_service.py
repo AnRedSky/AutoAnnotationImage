@@ -28,11 +28,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.tasks.model.annotation_log import AnnotationLog
 from app.tasks.model.category import Category
 from app.tasks.model.dataset import Dataset
 from app.tasks.model.image import Image
+# v3.4.1 P1: 推理路径解析 (适配 minio 后端)
+from app.common.storage import resolve_inference_paths
 from app.common.ml.ai_service import ai_service, filter_predictions_to_categories
 from app.tasks.service.image_service import ImageService
 

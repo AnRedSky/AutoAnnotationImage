@@ -26,7 +26,7 @@ from app.tasks.model.image import Image
 from app.tasks.model.category import Category
 from app.tasks.model.dataset import Dataset
 from app.tasks.model.model_version import ModelVersion
-from app.core.config import settings
+from app.common.storage import resolve_inference_paths  # v3.4.1 P1: 适配 minio 后端
 
 # 复用 preview 包内的工具函数
 from app.tasks.api.preview._utils import _resolve_finetune_model, _attach_model_meta
@@ -89,82 +89,82 @@ async def preview_detection(
 
     # 推理
     from app.tasks.ml.detection.yolo_predict import predict_image_grouped
-    storage_root = settings.UPLOAD_DIR
-    image_paths = [str(storage_root / img.storage_path) for img in images]
-    try:
-        grouped = predict_image_grouped(
-            weights_path=weights_path,
-            image_paths=image_paths,
-            conf_threshold=confidence_threshold,
-            iou_threshold=0.45, imgsz=640, device="cpu",
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Detection inference failed: {str(e)[:200]}")
+    # v3.4.1 P1: 推理路径解析 (local 直返 / minio 临时文件)
+    # 替代旧写法 [str(storage_root / img.storage_path) for img in images]
+    async with resolve_inference_paths(images) as image_paths:
+        try:
+            grouped = predict_image_grouped(
+                weights_path=weights_path,
+                image_paths=image_paths,
+                conf_threshold=confidence_threshold,
+                iou_threshold=0.45, imgsz=640, device="cpu",
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Detection inference failed: {str(e)[:200]}")
 
-    items: list = []
-    would_label = 0
-    need_human = 0
-    no_match = 0
-    for img in images:
-        abs_path = str(storage_root / img.storage_path)
-        boxes = grouped.get(abs_path, [])
-        if not boxes:
+        items: list = []
+        would_label = 0
+        need_human = 0
+        no_match = 0
+        for img, abs_path in zip(images, image_paths):
+            boxes = grouped.get(abs_path, [])
+            if not boxes:
+                items.append({
+                    "image_id": img.id, "filename": img.filename,
+                    "thumb_url": f"/api/files/{img.id}/preview",
+                    "bbox_count": 0, "max_conf": 0.0, "bboxes": [],
+                    "would_label": False, "reason": "no_bbox",
+                })
+                need_human += 1
+                continue
+            # 还原类别名 (fine-tune: sorted_cat_names[class_index]; pretrained: COCO names)
+            bbox_dicts = []
+            max_conf = 0.0
+            in_categories_count = 0
+            for b in boxes:
+                if used_finetune:
+                    if 0 <= b.class_index < len(sorted_cat_names):
+                        cls_name = sorted_cat_names[b.class_index]
+                    else:
+                        cls_name = f"class_{b.class_index}"
+                else:
+                    # YOLO.names 是 dict[int, str], class_index 是 COCO 索引
+                    from ultralytics import YOLO
+                    try:
+                        names = YOLO(weights_path).names
+                        cls_name = names.get(b.class_index, f"class_{b.class_index}")
+                    except Exception:
+                        cls_name = f"class_{b.class_index}"
+                in_proj = cls_name.lower() in cat_name_set
+                if in_proj:
+                    in_categories_count += 1
+                max_conf = max(max_conf, b.confidence)
+                bbox_dicts.append({
+                    "class_index": b.class_index,
+                    "class_name": cls_name,
+                    "x_min": round(b.x_min, 4), "y_min": round(b.y_min, 4),
+                    "x_max": round(b.x_max, 4), "y_max": round(b.y_max, 4),
+                    "confidence": round(b.confidence, 4),
+                    "in_project_categories": in_proj,
+                })
+            # would_label: 含 ≥ 阈值 bbox 且至少一个 bbox 类目在项目内
+            would = in_categories_count > 0 and max_conf >= confidence_threshold
+            reason = "would_label" if would else (
+                "below_threshold" if max_conf < confidence_threshold else "not_in_categories"
+            )
             items.append({
                 "image_id": img.id, "filename": img.filename,
                 "thumb_url": f"/api/files/{img.id}/preview",
-                "bbox_count": 0, "max_conf": 0.0, "bboxes": [],
-                "would_label": False, "reason": "no_bbox",
+                "bbox_count": len(bbox_dicts),
+                "max_conf": round(max_conf, 4),
+                "in_categories_count": in_categories_count,
+                "bboxes": bbox_dicts,
+                "would_label": would, "reason": reason,
             })
-            need_human += 1
-            continue
-        # 还原类别名 (fine-tune: sorted_cat_names[class_index]; pretrained: COCO names)
-        bbox_dicts = []
-        max_conf = 0.0
-        in_categories_count = 0
-        for b in boxes:
-            if used_finetune:
-                if 0 <= b.class_index < len(sorted_cat_names):
-                    cls_name = sorted_cat_names[b.class_index]
-                else:
-                    cls_name = f"class_{b.class_index}"
+            if would:
+                would_label += 1
             else:
-                # YOLO.names 是 dict[int, str], class_index 是 COCO 索引
-                from ultralytics import YOLO
-                try:
-                    names = YOLO(weights_path).names
-                    cls_name = names.get(b.class_index, f"class_{b.class_index}")
-                except Exception:
-                    cls_name = f"class_{b.class_index}"
-            in_proj = cls_name.lower() in cat_name_set
-            if in_proj:
-                in_categories_count += 1
-            max_conf = max(max_conf, b.confidence)
-            bbox_dicts.append({
-                "class_index": b.class_index,
-                "class_name": cls_name,
-                "x_min": round(b.x_min, 4), "y_min": round(b.y_min, 4),
-                "x_max": round(b.x_max, 4), "y_max": round(b.y_max, 4),
-                "confidence": round(b.confidence, 4),
-                "in_project_categories": in_proj,
-            })
-        # would_label: 含 ≥ 阈值 bbox 且至少一个 bbox 类目在项目内
-        would = in_categories_count > 0 and max_conf >= confidence_threshold
-        reason = "would_label" if would else (
-            "below_threshold" if max_conf < confidence_threshold else "not_in_categories"
-        )
-        items.append({
-            "image_id": img.id, "filename": img.filename,
-            "thumb_url": f"/api/files/{img.id}/preview",
-            "bbox_count": len(bbox_dicts),
-            "max_conf": round(max_conf, 4),
-            "in_categories_count": in_categories_count,
-            "bboxes": bbox_dicts,
-            "would_label": would, "reason": reason,
-        })
-        if would:
-            would_label += 1
-        else:
-            need_human += 1
+                need_human += 1
 
     payload = {
         "items": items,
