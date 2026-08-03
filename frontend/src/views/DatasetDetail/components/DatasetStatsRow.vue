@@ -128,7 +128,7 @@ const emit = defineEmits<{
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  margin-bottom: 12px;
+  flex-shrink: 0;
 }
 .ds-stats :deep(.el-card) {
   flex: 1 1 0;

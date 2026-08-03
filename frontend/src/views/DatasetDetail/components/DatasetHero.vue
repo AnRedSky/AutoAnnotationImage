@@ -76,7 +76,7 @@ const emit = defineEmits<{
   position: relative;
   border-radius: var(--radius-md);
   overflow: hidden;
-  margin-bottom: 16px;
+  flex-shrink: 0;
   background: linear-gradient(135deg, var(--bg-soft) 0%, #fff 100%);
   border: 1px solid var(--border-soft);
 }

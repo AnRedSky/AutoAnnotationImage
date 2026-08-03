@@ -16,7 +16,7 @@ import { useRouter } from 'vue-router'
 import {
   Search, Lightning, DataAnalysis, EditPen, RefreshLeft, Delete,
   Check, Minus, Grid, List, InfoFilled, WarningFilled, Promotion,
-  Warning,  // v3.0.0 新增
+  Warning, ZoomIn, ZoomOut,  // v3.x: 网格尺寸调节
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -40,6 +40,7 @@ const props = defineProps<{
   allOnPageSelected: boolean
   // 视图
   viewMode: 'grid' | 'list'
+  gridSize: 'small' | 'medium' | 'large'
   // 任务类型 (用于 AI 配置提示判断无模型引导)
   taskType: 'classification' | 'detection' | 'segmentation'
 }>()
@@ -50,6 +51,7 @@ const emit = defineEmits<{
   (e: 'update:selectedFinetuneId', v: number | null): void
   (e: 'update:threshold', v: number): void
   (e: 'update:viewMode', v: 'grid' | 'list'): void
+  (e: 'update:gridSize', v: 'small' | 'medium' | 'large'): void
   (e: 'preview'): void
   (e: 'goAnnotate'): void
   (e: 'batchClear'): void
@@ -80,6 +82,10 @@ const localThreshold = computed({
 const localViewMode = computed({
   get: () => props.viewMode,
   set: (v: 'grid' | 'list') => emit('update:viewMode', v),
+})
+const localGridSize = computed({
+  get: () => props.gridSize,
+  set: (v: 'small' | 'medium' | 'large') => emit('update:gridSize', v),
 })
 
 const goTraining = () => router.push('/training')
@@ -205,6 +211,31 @@ const goTraining = () => router.push('/training')
             <el-icon><List /></el-icon>
           </button>
         </div>
+
+        <!-- v3.x: 网格视图图片尺寸调节 (大/中/小)
+             - 仅在网格视图下可用
+             - 三个分段按钮, 直观切换
+             - 大: 每行 4-5 张, 卡片大, 适合精细查看
+             - 中: 每行 5-6 张, 默认尺寸
+             - 小: 每行 7-8 张, 卡片小, 适合快速浏览 -->
+        <div
+          v-if="viewMode === 'grid'"
+          class="grid-size-switch"
+          title="网格尺寸"
+        >
+          <button
+            class="size-btn" :class="{ active: localGridSize === 'small' }"
+            title="小尺寸 (每行 7-8 张)" @click="localGridSize = 'small'"
+          >小</button>
+          <button
+            class="size-btn" :class="{ active: localGridSize === 'medium' }"
+            title="中尺寸 (每行 5-6 张, 默认)" @click="localGridSize = 'medium'"
+          >中</button>
+          <button
+            class="size-btn" :class="{ active: localGridSize === 'large' }"
+            title="大尺寸 (每行 4-5 张)" @click="localGridSize = 'large'"
+          >大</button>
+        </div>
       </div>
     </div>
 
@@ -311,6 +342,40 @@ const goTraining = () => router.push('/training')
 }
 .mode-btn.active { background: var(--brand-primary); color: #fff; }
 .mode-btn:hover:not(.active) { background: var(--bg-soft); }
+
+/* v3.x: 网格尺寸切换 (大/中/小)
+ * - 与 .view-mode-switch 视觉一致, 紧邻摆放
+ * - 三个文字按钮, 选中态主色填充 */
+.grid-size-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.size-btn {
+  background: transparent;
+  border: 0;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s var(--ease-out);
+}
+.size-btn:not(:last-child) {
+  border-right: 1px solid var(--border-soft);
+}
+.size-btn.active {
+  background: var(--brand-primary);
+  color: #fff;
+}
+.size-btn:hover:not(.active) {
+  background: var(--bg-soft);
+}
 
 /* AI 配置实时提示 */
 .ai-config-hint {

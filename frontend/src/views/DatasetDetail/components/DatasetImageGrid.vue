@@ -1,14 +1,18 @@
 <script setup lang="ts">
 /**
- * DatasetImageGrid - 图像网格视图
+ * DatasetImageGrid - 图像网格视图 (多列卡片布局)
  *
  * v3.0.0 Phase L 拆分: 从 DatasetDetail/index.vue 抽离
+ * v3.x 适配嵌套容器: 本组件直接渲染到父级 .ds-image-area 滚动容器内
+ *   - 不再需要自身限定高度, 由父容器统一管理 overflow
+ *   - 选择/操作事件与 DatasetImageList 完全对齐, 父级可无差别切换视图
  *
  * 单图卡片内容: 缩略图 + 复选框 + 状态 tag + 详情/清除/删除 按钮 + 文件名/大小 + 最终类别/AI 预测
  */
 import { View, Delete, RefreshLeft, Check } from '@element-plus/icons-vue'
 import { imageApi } from '@/api'
 import { getRejectReasonLabel } from '@/utils/rejectReason'  // v3.0.0 新增
+import { computed } from 'vue'
 
 const props = defineProps<{
   images: any[]
@@ -18,6 +22,8 @@ const props = defineProps<{
   confColor: (c: number) => string
   formatBytes: (b: number) => string
   hasAnnotation: (img: any) => boolean
+  /** v3.x: 网格尺寸 (small/medium/large) - 控制每行卡片数 */
+  gridSize?: 'small' | 'medium' | 'large'
 }>()
 
 const emit = defineEmits<{
@@ -28,20 +34,60 @@ const emit = defineEmits<{
   (e: 'deleteOne', img: any): void
   (e: 'unmarkUnqualified', img: any): void  // v3.0.0 新增
 }>()
+
+/**
+ * v3.x: 根据 gridSize 动态计算 el-col 响应式 span
+ * - large: 大卡片, 每行少几张 (xs=12 sm=8 md=8 lg=6 xl=4)
+ * - medium: 默认, 平衡展示 (xs=12 sm=8 md=6 lg=4 xl=4)
+ * - small: 小卡片, 每行多几张 (xs=8 sm=6 md=4 lg=3 xl=3)
+ * - el-col 的 span 数字代表占 24 栅格的格数
+ */
+const colSpans = computed(() => {
+  switch (props.gridSize || 'medium') {
+    case 'large':
+      return { xs: 12, sm: 8, md: 8, lg: 6, xl: 4 }
+    case 'small':
+      return { xs: 8, sm: 6, md: 4, lg: 3, xl: 3 }
+    case 'medium':
+    default:
+      return { xs: 12, sm: 8, md: 6, lg: 4, xl: 4 }
+  }
+})
+
+/** v3.x: 根据 gridSize 调整缩略图后端请求尺寸 (减少小图的带宽浪费) */
+const thumbnailSize = computed(() => {
+  switch (props.gridSize || 'medium') {
+    case 'large': return 480  // 大图请求更高清
+    case 'small': return 160  // 小图降低请求尺寸
+    case 'medium':
+    default:      return 320
+  }
+})
 </script>
 
 <template>
   <el-row :gutter="14">
-    <el-col v-for="img in images" :key="img.id" :xs="12" :sm="8" :md="6" :lg="4" :xl="4">
+    <el-col
+      v-for="img in images"
+      :key="img.id"
+      :xs="colSpans.xs"
+      :sm="colSpans.sm"
+      :md="colSpans.md"
+      :lg="colSpans.lg"
+      :xl="colSpans.xl"
+    >
       <el-card
         shadow="hover"
         class="image-card"
-        :class="{ selected: selectedIds.includes(img.id) }"
+        :class="[
+          { selected: selectedIds.includes(img.id) },
+          `image-card--${gridSize || 'medium'}`,
+        ]"
         @click="emit('toggleSelect', img.id)"
       >
         <div class="image-thumb">
           <img
-            :src="imageApi.thumbnailUrl(img.id, 320)"
+            :src="imageApi.thumbnailUrl(img.id, thumbnailSize)"
             :alt="img.filename"
             loading="lazy"
             @error="(e: any) => { e.target.src = imageApi.fileUrl(img.id) }"
@@ -255,4 +301,21 @@ const emit = defineEmits<{
 .image-label, .image-ai { margin-top: 6px; }
 .image-ai { display: flex; align-items: center; gap: 4px; }
 .image-ai-prefix { font-size: 11px; color: #909399; }
+
+/* v3.x: 网格尺寸差异化样式
+ * - .image-card--small: 小卡片, 信息区更紧凑, 部分元数据隐藏
+ * - .image-card--medium: 默认
+ * - .image-card--large: 大卡片, 信息更突出, 字号略大
+ */
+.image-card--small .image-info { padding: 6px 2px 0; }
+.image-card--small .image-name { font-size: 12px; }
+.image-card--small .image-meta { font-size: 10px; }
+.image-card--small .image-label,
+.image-card--small .image-ai { margin-top: 4px; }
+
+.image-card--large .image-info { padding: 12px 6px 0; }
+.image-card--large .image-name { font-size: 14px; }
+.image-card--large .image-meta { font-size: 12px; margin-top: 4px; }
+.image-card--large .image-label,
+.image-card--large .image-ai { margin-top: 8px; }
 </style>

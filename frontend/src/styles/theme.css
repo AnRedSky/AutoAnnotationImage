@@ -619,3 +619,12 @@ body {
   background: rgba(148, 163, 184, 0.5);
 }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* =============================================================
+   页面级滚动锁定
+   - 某些页面 (如 DatasetDetail) 内部有独立滚动区域, 需要锁住外层
+   - 由页面在 onMounted/onBeforeUnmount 切换 .app-main--locked
+   ============================================================= */
+.app-main--locked {
+  overflow: hidden !important;
+}
