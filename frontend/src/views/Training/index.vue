@@ -396,6 +396,7 @@ onBeforeUnmount(() => {
       :row="retrainRow"
       :datasets="DATASET_OPTIONS"
       :base-models-by-task="baseModelsByTask"
+      :gen-default-model-name="genDefaultModelName"
       @submit="onRetrainSubmit"
     />
 

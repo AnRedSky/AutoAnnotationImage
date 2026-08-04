@@ -100,12 +100,20 @@ export function useTrainingFormatters() {
     return undefined
   }
 
-  // ============== 默认 model_name 生成 ==============
-  // 格式: {base_model}_v{ver}_{ts} (10 位时间戳, 短而唯一)
-  const genDefaultModelName = (baseModel: string): string => {
-    const ver = '1'
+  // ============== 默认 model_name 生成 (v3.5.1 重新启用) ==============
+  // 规则 (与后端 _default_model_name 完全一致, 前端无 DB 查重能力, 重名时由后端兜底):
+  //   - 新建任务: `${baseModel}_${ts}` (e.g. resnet50_1701234567)
+  //   - 再训练任务: `${baseModel}_r_${ts}` (e.g. resnet50_r_1701234567)
+  //   - 时间戳: 10位秒级 (避免 13位毫秒太长, 也保证一年内不重复)
+  //
+  // 历史:
+  //   - v3.0.0 改版曾废弃前端拼接, 全部由后端接管; 但用户反馈主动生成名称更直观
+  //   - v3.5.1 重新启用前端「生成」按钮, 仅生成默认名 (后端仍做查重/截断兜底)
+  // @see backend/app/tasks/api/training/start.py::_default_model_name
+  const genDefaultModelName = (baseModel: string, retrain = false): string => {
     const ts = Math.floor(Date.now() / 1000) % 10000000000
-    return `${baseModel}_v${ver}_${ts}`
+    const suffix = retrain ? `_r_${ts}` : `_${ts}`
+    return `${baseModel}${suffix}`
   }
 
   return {

@@ -18,7 +18,16 @@ const props = defineProps<{
   modelValue: boolean
   datasets: any[]
   baseModelsByTask: Record<string, BaseModelOption[]>
-  genDefaultModelName: (baseModel: string) => string
+  /**
+   * 生成默认 model_name 的函数 (父组件注入)
+   * 签名: (baseModel: string, retrain?: boolean) => string
+   * 新建场景: retrain=false → `{base}_{ts}`
+   * 再训练场景: retrain=true  → `{base}_r_{ts}`
+   *
+   * v3.5.1 改版: 父组件传 genDefaultModelName, 恢复「生成」按钮 (用户可主动调),
+   * 规则与后端 _default_model_name 完全一致 (前端无法做查重, 重名时由后端兜底).
+   */
+  genDefaultModelName: (baseModel: string, retrain?: boolean) => string
 }>()
 
 const emit = defineEmits<{
@@ -56,12 +65,12 @@ const form = ref<TrainingParams>({
   learning_rate: 0.0001,
 })
 
-// 切换 task_type 时: 重置 base_model + model_name
+// 切换 task_type 时: 重置 base_model, model_name 留空 (后端接管生成)
 const resetByTaskType = (t: string) => {
   const opts = props.baseModelsByTask[t] || []
   const newBase = opts[0]?.name || getDefaultBaseModel(t)
   form.value.base_model = newBase
-  form.value.model_name = props.genDefaultModelName(newBase)
+  form.value.model_name = ''
 }
 
 const onTaskTypeChange = (t: string) => {
@@ -92,10 +101,11 @@ const filteredDatasets = computed(() => {
 watch(visible, (v) => {
   if (v) {
     taskType.value = 'classification'
+    // v3.0.0: model_name 默认空, 由后端 _default_model_name 接管生成
     form.value = {
       dataset_id: null,
       base_model: 'resnet50',
-      model_name: props.genDefaultModelName('resnet50'),
+      model_name: '',
       epochs: 20,
       batch_size: 32,
       learning_rate: 0.0001,
@@ -108,21 +118,21 @@ const onSubmit = async () => {
     ElMessage.warning('请选择数据集')
     return
   }
-  if (!form.value.model_name) {
-    ElMessage.warning('请填写模型版本名')
-    return
-  }
+  // v3.0.0: model_name 留空 = 后端按 _default_model_name(base_model) 生成
   submitting.value = true
   try {
+    // model_name 留空时显式传 '', 让后端接管
+    const payloadModelName = (form.value.model_name || '').trim()
     const r: any = await trainingApi.start({
       ...form.value,
+      model_name: payloadModelName,
       dataset_id: form.value.dataset_id!,
     })
     const newTaskId: string = r.task_id
     const newJobId: number | undefined = r.job_id
     ElMessage.success(`训练任务已提交 (job=#${newJobId ?? '?'})`)
     visible.value = false
-    emit('submit', { params: { ...form.value }, newTaskId, newJobId })
+    emit('submit', { params: { ...form.value, model_name: payloadModelName }, newTaskId, newJobId })
   } catch (e: any) {
     ElMessage.error('启动失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
@@ -157,6 +167,7 @@ const onSubmit = async () => {
       :form="form"
       :datasets="filteredDatasets"
       :base-models="baseOptions"
+      :gen-default-model-name="genDefaultModelName"
       @form-change="(p) => onParamsChange(form, p)"
     />
     <el-alert

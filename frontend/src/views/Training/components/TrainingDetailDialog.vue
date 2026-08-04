@@ -27,6 +27,7 @@ import { computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { VideoPlay, InfoFilled } from '@element-plus/icons-vue'
 import { getTaskTypeMeta } from '@/utils/taskType'
+import { getPretrainModeMeta } from '@/utils/pretrainMode'
 import StateBadge from './StateBadge.vue'
 import { useTrainingDetailStream } from '@/composables/useTrainingDetailStream'
 
@@ -212,6 +213,38 @@ const onCloseDialog = () => {
           <code style="word-break: break-all; font-family: var(--font-mono); font-size: 12px;">
             {{ job.celery_task_id || '-' }}
           </code>
+        </el-descriptions-item>
+        <!-- v3.0.0: 训练模式 + 来源 MV (用于追溯"这个任务是增量还是从头") -->
+        <el-descriptions-item label="训练模式">
+          <el-tooltip
+            :content="getPretrainModeMeta(job.pretrain_mode).desc"
+            placement="top"
+          >
+            <el-tag
+              :type="getPretrainModeMeta(job.pretrain_mode).type"
+              size="small"
+              effect="plain"
+            >
+              {{ getPretrainModeMeta(job.pretrain_mode).label }}
+            </el-tag>
+          </el-tooltip>
+        </el-descriptions-item>
+        <el-descriptions-item label="来源 MV" :span="2">
+          <template v-if="job.pretrain_source_mv_id">
+            <el-tooltip
+              v-if="job.pretrain_source_mv_name"
+              :content="`ModelVersion #${job.pretrain_source_mv_id} · ${job.pretrain_source_mv_name}`"
+              placement="top"
+            >
+              <el-tag type="success" size="small" effect="plain">
+                #{{ job.pretrain_source_mv_id }} · {{ job.pretrain_source_mv_name }}
+              </el-tag>
+            </el-tooltip>
+            <el-tag v-else type="info" size="small" effect="plain">
+              ModelVersion #{{ job.pretrain_source_mv_id }}
+            </el-tag>
+          </template>
+          <span v-else style="color: #c0c4cc;">-</span>
         </el-descriptions-item>
       </el-descriptions>
 

@@ -25,6 +25,15 @@ export interface TrainingJob {
   dataset_id?: number
   task_type?: string
   epochs?: number
+  // v3.0.0: 训练模式追溯 (后端 TrainingJob.pretrain_mode)
+  // - from_scratch: 全新训练 (基于 timm ImageNet 预训练权重)
+  // - incremental:  增量训练 / 再训练 (基于某 MV 继续)
+  // - resume:       继续暂停的同 job
+  pretrain_mode?: string | null
+  // 增量训练时, 来源 ModelVersion ID
+  pretrain_source_mv_id?: number | null
+  // 增量训练时, 来源 ModelVersion 名称 (后端 list/detail join MV 拿名, 避免前端再查)
+  pretrain_source_mv_name?: string | null
   is_placeholder?: boolean
   _placeholder_at?: number
   [k: string]: any

@@ -20,6 +20,7 @@
  */
 import { Promotion, VideoPlay, VideoPause, CircleClose, View, Delete } from '@element-plus/icons-vue'
 import { getTaskTypeMeta } from '@/utils/taskType'
+import { getPretrainModeMeta } from '@/utils/pretrainMode'
 import StateBadge from './StateBadge.vue'
 
 defineProps<{
@@ -93,6 +94,18 @@ const rowClassName = ({ row }: { row: any }) => {
           >
             {{ getTaskTypeMeta(row.task_type || 'classification').label }}
           </el-tag>
+        </template>
+      </el-table-column>
+      <!-- v3.0.0: 训练模式 chip 列 (追溯: 基础 / 增量) -->
+      <el-table-column label="训练模式" width="100" align="center">
+        <template #default="{ row }">
+          <el-tag
+              :type="getPretrainModeMeta(row.pretrain_mode).type"
+              effect="plain"
+              size="small"
+            >
+              {{ getPretrainModeMeta(row.pretrain_mode).label }}
+            </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="model_name" label="模型版本" min-width="118" show-overflow-tooltip />
