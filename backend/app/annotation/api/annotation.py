@@ -37,6 +37,10 @@ class AnnotateRequest(BaseModel):
     label_id: int
     time_spent_ms: int = 0
     is_confirm: bool = False  # True=确认 AI 标注, False=修正 AI 标注
+    # v3.4.0: 人工修正方案 - 可选修正原因 (选填, 默认空)
+    # - 存储到 AnnotationLog.payload.comment
+    # - 不强制填写, 保留原有向后兼容行为
+    comment: Optional[str] = None
 
 
 @router.post("/save")
@@ -91,6 +95,31 @@ async def save_annotation(
     #   - 修改标注 (from_label_id 不为空): 强制记 "correct" (与 is_confirm 无关, 因为确实是改了)
     is_modify = from_label_id is not None
     action = "correct" if is_modify else ("confirm" if req.is_confirm else "correct")
+
+    # v3.4.0: 修正方案 - 计算 diff 写入 payload
+    # - 仅对"修正"行为 (action=correct) 计算 diff, 确认行为不写
+    # - diff.from: 修正前状态 (AI 预测 top1 或 上次人工 final_label)
+    # - diff.to:   修正后状态 (新的 label_id/name)
+    # - comment: 用户填的修正原因 (选填)
+    # - ai_top1: 修正时 AI 的 top1 (用于「恢复 AI 预测」回滚定位)
+    payload: Optional[dict] = None
+    if action == "correct":
+        ai_top1 = (img.ai_prediction or {}).get("top1") if img.ai_prediction else None
+        ai_top1_conf = (img.ai_prediction or {}).get("top1_conf") if img.ai_prediction else None
+        payload = {
+            "correction_type": "modify_label",
+            "diff": {
+                "from": {
+                    "label_id": from_label_id,
+                    "ai_top1": ai_top1,
+                    "ai_top1_conf": ai_top1_conf,
+                },
+                "to": {"label_id": req.label_id},
+            },
+        }
+        if req.comment:
+            payload["comment"] = req.comment[:500]  # 限制长度, 避免滥用
+
     log = AnnotationLog(
         image_id=req.image_id,
         user_id=current_user.id,
@@ -98,6 +127,7 @@ async def save_annotation(
         from_label_id=from_label_id,
         to_label_id=req.label_id,
         time_spent_ms=req.time_spent_ms,
+        payload=payload,
     )
     db.add(log)
     if auto_unmarked:
@@ -750,3 +780,316 @@ async def recent_annotations(
             "created_at": log.created_at.isoformat() if log.created_at else None,
         })
     return {"items": items}
+
+
+# ============== v3.4.0: 人工修正方案扩展接口 ==============
+
+@router.get("/correction-history/{image_id}")
+async def get_correction_history(
+    image_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    获取单图的完整修正历史 (含 diff)
+
+    - 仅返回与"标注/修正"相关的日志: confirm / correct / revert_to_ai
+    - 每条记录附带 payload 中的 diff (AI 预测 → 人工结果)
+    - 权限: 需对 image 所属 dataset 有读权限
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(404, "Image not found")
+
+    # 权限校验
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds)
+
+    # 拉取相关日志
+    stmt = (
+        select(AnnotationLog, User.username)
+        .join(User, User.id == AnnotationLog.user_id)
+        .where(
+            AnnotationLog.image_id == image_id,
+            AnnotationLog.action.in_(("confirm", "correct", "revert_to_ai")),
+        )
+        .order_by(AnnotationLog.id.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+
+    # 批量查 category 名称 (消除 N+1)
+    cat_ids: set = set()
+    for log, _u in rows:
+        if log.from_label_id:
+            cat_ids.add(log.from_label_id)
+        if log.to_label_id:
+            cat_ids.add(log.to_label_id)
+    cat_map: dict = {}
+    if cat_ids:
+        cat_rows = (await db.execute(
+            select(Category.id, Category.name).where(Category.id.in_(cat_ids))
+        )).all()
+        cat_map = {r[0]: r[1] for r in cat_rows}
+
+    items = []
+    for log, username in rows:
+        from_name = cat_map.get(log.from_label_id) if log.from_label_id else None
+        to_name = cat_map.get(log.to_label_id) if log.to_label_id else None
+        items.append({
+            "id": log.id,
+            "action": log.action,
+            "username": username,
+            "from_label_id": log.from_label_id,
+            "from_label_name": from_name,
+            "to_label_id": log.to_label_id,
+            "to_label_name": to_name,
+            "time_spent_ms": log.time_spent_ms,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "payload": log.payload,  # 含 diff / comment
+        })
+
+    return {
+        "image_id": image_id,
+        "current_status": img.status,
+        "current_label_id": img.final_label_id,
+        "current_label_name": cat_map.get(img.final_label_id) if img.final_label_id else None,
+        "ai_prediction": img.ai_prediction,  # 用于前端「AI vs 当前」对比
+        "items": items,
+    }
+
+
+@router.post("/revert-to-ai/{image_id}")
+async def revert_to_ai(
+    image_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    恢复 AI 预测 (撤销人工修正, 状态回 ai_labeled)
+
+    业务规则:
+    - 仅当 image.status ∈ {human_confirmed, human_corrected} 可回滚
+    - status=trained (已被训练) 时拒绝回滚 (避免破坏训练快照)
+    - 清空 final_label_id / annotated_by / annotated_at
+    - 保留 ai_prediction 字段 (这是回滚的核心)
+    - 写一条 action=revert_to_ai 审计, payload.from_log_id 指向被回滚的 log
+    - 权限: 需对 dataset 有写权限 (与保存标注一致)
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(404, "Image not found")
+
+    # 权限校验 (需写权限)
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, img.dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
+
+    # 状态校验
+    if img.status == "trained":
+        raise HTTPException(
+            409,
+            "已参与训练 (status=trained) 的图片禁止恢复 AI 预测, 避免破坏训练快照"
+        )
+    if img.status not in ("human_confirmed", "human_corrected"):
+        raise HTTPException(
+            409,
+            f"图片当前 status={img.status}, 不在可回滚状态 (human_confirmed / human_corrected)"
+        )
+
+    # 必须有 AI 预测可恢复
+    if not img.ai_prediction:
+        raise HTTPException(
+            409, "该图无 AI 预测快照, 无法恢复 (请重新运行 AI 预标注)"
+        )
+
+    # 找最近一条 correct/confirm 记录 (用于审计追溯)
+    last_log = (await db.execute(
+        select(AnnotationLog)
+        .where(
+            AnnotationLog.image_id == image_id,
+            AnnotationLog.action.in_(("confirm", "correct")),
+        )
+        .order_by(AnnotationLog.id.desc())
+        .limit(1)
+    )).scalars().first()
+
+    # 清空当前人工标注, 状态回 ai_labeled
+    from_label_id_backup = img.final_label_id
+    img.final_label_id = None
+    img.annotated_by = None
+    img.annotated_at = None
+    img.status = "ai_labeled"
+
+    # 写审计
+    revert_log = AnnotationLog(
+        image_id=image_id,
+        user_id=current_user.id,
+        action="revert_to_ai",
+        from_label_id=from_label_id_backup,
+        to_label_id=None,
+        time_spent_ms=0,
+        payload={
+            "from_log_id": last_log.id if last_log else None,
+            "reason": "user_revert",
+            "ai_top1": (img.ai_prediction or {}).get("top1"),
+        },
+    )
+    db.add(revert_log)
+
+    # 同步扣减原 category 的 sample_count
+    if from_label_id_backup:
+        from app.tasks.model.category import Category as CatModel
+        old_cat = await db.get(CatModel, from_label_id_backup)
+        if old_cat:
+            old_cat.sample_count = max(0, (old_cat.sample_count or 0) - 1)
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "image_id": image_id,
+        "new_status": img.status,
+        "ai_top1": (img.ai_prediction or {}).get("top1"),
+        "revert_log_id": revert_log.id,
+    }
+
+
+@router.get("/correction-stats/{dataset_id}")
+async def get_correction_stats(
+    dataset_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    人工修正统计 (v3.4.0 新增)
+
+    - 修正率: 被修正图 / AI 标注图
+    - 平均修正次数: 每张被修过的图平均被修几次
+    - 热门修正方向: category A → B 的 top 5
+    - 修正原因分布: comment 文本频次 (top 10)
+    """
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    ds = await db.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    await assert_can_access_dataset(db, current_user, ds)
+
+    # 1) 基础计数
+    total_ai_labeled = (await db.execute(
+        select(func.count(Image.id)).where(
+            Image.dataset_id == dataset_id,
+            Image.status.in_(("ai_labeled", "human_confirmed", "human_corrected", "trained")),
+        )
+    )).scalar() or 0
+    total_corrected = (await db.execute(
+        select(func.count(func.distinct(AnnotationLog.image_id)))
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            AnnotationLog.action == "correct",
+        )
+    )).scalar() or 0
+    total_confirmed = (await db.execute(
+        select(func.count(func.distinct(AnnotationLog.image_id)))
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            AnnotationLog.action == "confirm",
+        )
+    )).scalar() or 0
+    total_revert = (await db.execute(
+        select(func.count(AnnotationLog.id))
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            AnnotationLog.action == "revert_to_ai",
+        )
+    )).scalar() or 0
+    total_corrections = (await db.execute(
+        select(func.count(AnnotationLog.id))
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            AnnotationLog.action == "correct",
+        )
+    )).scalar() or 0
+
+    correction_rate = round(total_corrected / total_ai_labeled, 4) if total_ai_labeled else 0
+    avg_corrections_per_image = (
+        round(total_corrections / total_corrected, 2) if total_corrected else 0
+    )
+
+    # 2) 热门修正方向 (from_category → to_category)
+    # - 取所有 correct 日志, join category 取名称
+    cat_id_to_name: dict = {}
+    if total_corrections > 0:
+        cat_rows = (await db.execute(
+            select(Category.id, Category.name)
+            .join(Dataset, Dataset.id == Category.dataset_id)
+            .where(Dataset.id == dataset_id)
+        )).all()
+        cat_id_to_name = {r[0]: r[1] for r in cat_rows}
+
+    flip_counter: dict = {}
+    correct_logs = (await db.execute(
+        select(AnnotationLog.from_label_id, AnnotationLog.to_label_id)
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            AnnotationLog.action == "correct",
+            AnnotationLog.from_label_id.isnot(None),
+            AnnotationLog.to_label_id.isnot(None),
+        )
+    )).all()
+    for from_id, to_id in correct_logs:
+        if from_id == to_id:
+            continue  # 跳过"假修正" (from==to)
+        from_name = cat_id_to_name.get(from_id, f"id_{from_id}")
+        to_name = cat_id_to_name.get(to_id, f"id_{to_id}")
+        key = f"{from_name} → {to_name}"
+        flip_counter[key] = flip_counter.get(key, 0) + 1
+    top_flips = sorted(
+        [{"from_to": k, "count": v} for k, v in flip_counter.items()],
+        key=lambda x: -x["count"],
+    )[:5]
+
+    # 3) 修正原因分布 (从 payload.comment 提取)
+    comment_counter: dict = {}
+    payload_rows = (await db.execute(
+        select(AnnotationLog.payload)
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .where(
+            Image.dataset_id == dataset_id,
+            AnnotationLog.action == "correct",
+            AnnotationLog.payload.isnot(None),
+        )
+    )).all()
+    for (payload,) in payload_rows:
+        if not payload:
+            continue
+        c = payload.get("comment")
+        if c and isinstance(c, str) and c.strip():
+            comment_counter[c.strip()] = comment_counter.get(c.strip(), 0) + 1
+    top_comments = sorted(
+        [{"comment": k, "count": v} for k, v in comment_counter.items()],
+        key=lambda x: -x["count"],
+    )[:10]
+
+    return {
+        "total_ai_labeled": total_ai_labeled,
+        "total_confirmed": total_confirmed,
+        "total_corrected": total_corrected,
+        "total_revert": total_revert,
+        "correction_rate": correction_rate,
+        "avg_corrections_per_image": avg_corrections_per_image,
+        "top_flip_directions": top_flips,
+        "top_correction_comments": top_comments,
+    }
