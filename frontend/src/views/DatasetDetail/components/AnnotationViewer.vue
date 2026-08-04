@@ -8,10 +8,12 @@
  * - 确认/修正/强制采用按钮
  */
 import { ref, watch, onMounted, computed } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Check, Close, Position, Clock, User, Warning } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Check, Close, Position, Clock, User, Warning, Histogram, RefreshLeft } from '@element-plus/icons-vue'
 import { imageApi, annotationApi, datasetApi } from '@/api'
 import { getRejectReasonLabel } from '@/utils/rejectReason'  // v3.0.0: 不合格原因中文映射
+// v3.4.0: 修正历史弹窗 (含 diff / 恢复 AI 预测)
+import CorrectionHistoryDialog from '@/components/annotation-business/CorrectionHistoryDialog.vue'
 
 const props = defineProps<{
   imageId: number
@@ -33,6 +35,10 @@ const startTs = ref(0)
 const submitting = ref(false)
 const newLabelId = ref<number | null>(null)
 const overrideStart = ref(0)  // 强制覆盖计时起点
+// v3.4.0: 修正历史弹窗状态
+const historyDialogVisible = ref(false)
+// v3.4.0: 「恢复 AI 预测」按钮 loading 状态
+const reverting = ref(false)
 
 async function load() {
   if (!props.imageId) return
@@ -212,6 +218,69 @@ function formatCost(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(2)}s`
 }
+
+// ============== v3.4.0: 人工修正方案扩展 ==============
+
+/**
+ * 判定当前图片是否可「恢复 AI 预测」
+ * 业务规则:
+ * - status ∈ {human_confirmed, human_corrected}: 可恢复
+ * - status = trained: 禁止 (避免破坏训练快照)
+ * - 其他状态 (pending / ai_labeled): 没必要 (已是初始或 AI 状态)
+ * - 必须有 ai_prediction 字段
+ */
+const canRevert = computed(() => {
+  const s = detail.value?.status
+  if (s !== 'human_confirmed' && s !== 'human_corrected') return false
+  if (!detail.value?.ai_prediction) return false
+  return true
+})
+
+const canRevertBlocked = computed(() => {
+  // 业务约束: status=trained 不可恢复 (前端做软提示, 后端为强约束)
+  return detail.value?.status === 'trained'
+})
+
+/** 打开完整修正历史弹窗 */
+function openHistoryDialog() {
+  if (!props.imageId) return
+  historyDialogVisible.value = true
+}
+
+/** 内联「恢复 AI 预测」按钮: 与弹窗内按钮行为一致, 调 API + 刷新 */
+async function onRevertInline() {
+  if (!props.imageId || !canRevert.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确认恢复到 AI 预标注? 此操作会清空当前人工标注 (final_label), 保留 AI 预测快照, 状态回到「AI 预标注」。',
+      '恢复 AI 预测',
+      {
+        type: 'warning',
+        confirmButtonText: '恢复',
+        cancelButtonText: '取消',
+      }
+    )
+  } catch {
+    return  // 用户取消
+  }
+
+  reverting.value = true
+  try {
+    const r: any = await annotationApi.revertToAi(props.imageId)
+    ElMessage.success(`已恢复 AI 预测 (${r?.ai_top1 || '无 top1'})`)
+    // 刷新详情, 让 status / final_label 同步更新
+    await load()
+  } catch (e: any) {
+    ElMessage.error('恢复失败: ' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    reverting.value = false
+  }
+}
+
+/** 弹窗内「恢复 AI 预测」成功后回调: 刷新本地详情 + 关闭弹窗 */
+async function onHistoryReverted() {
+  await load()
+}
 </script>
 
 <template>
@@ -314,7 +383,37 @@ function formatCost(ms: number): string {
         </el-card>
 
         <!-- 标注历史 -->
-        <el-card shadow="never" header="标注历史" class="block">
+        <el-card shadow="never" class="block">
+          <template #header>
+            <div class="history-card-header">
+              <span>标注历史</span>
+              <div class="history-card-header-actions">
+                <!-- v3.4.0: 恢复 AI 预测 (内联) -->
+                <el-tooltip
+                  v-if="canRevert"
+                  content="恢复到 AI 预标注: 清空 final_label, 保留 ai_prediction, 状态回到 AI 预标注"
+                  placement="top"
+                >
+                  <el-button
+                    type="warning" plain size="small" :icon="RefreshLeft"
+                    :loading="reverting" @click="onRevertInline"
+                  >恢复 AI 预测</el-button>
+                </el-tooltip>
+                <el-tooltip
+                  v-else-if="canRevertBlocked"
+                  content="已用于训练 (status=trained), 禁止恢复 (避免破坏训练快照)"
+                  placement="top"
+                >
+                  <el-button type="info" plain size="small" disabled>已训练, 禁止恢复</el-button>
+                </el-tooltip>
+                <!-- v3.4.0: 完整修正历史 (含 diff) 弹窗 -->
+                <el-button
+                  type="primary" plain size="small" :icon="Histogram"
+                  @click="openHistoryDialog"
+                >查看完整修正历史</el-button>
+              </div>
+            </div>
+          </template>
           <el-empty v-if="!detail.annotation_history || detail.annotation_history.length === 0"
             description="暂无标注操作" :image-size="60" />
           <el-timeline v-else>
@@ -348,6 +447,14 @@ function formatCost(ms: number): string {
       </div>
     </div>
     <el-empty v-else-if="!loading" description="未选择图片" />
+
+    <!-- v3.4.0: 完整修正历史弹窗 (含 diff / 恢复 AI 预测) -->
+    <CorrectionHistoryDialog
+      v-if="props.imageId"
+      v-model="historyDialogVisible"
+      :image-id="props.imageId"
+      @reverted="onHistoryReverted"
+    />
   </div>
 </template>
 
@@ -411,5 +518,20 @@ function formatCost(ms: number): string {
   color: #f56c6c;
   font-style: italic;
   font-weight: 600;
+}
+
+/* v3.4.0: 标注历史卡头部: 标题 + 操作按钮组 */
+.history-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+}
+.history-card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>
