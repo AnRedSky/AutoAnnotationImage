@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Annotate.vue - 人工标注工作台 (v2.5.7 重构版)
+ * Annotate.vue - 人工标注工作台 (v3.5.0 增强版)
  * ==================================================
  * - 选择数据集 → 显示下一张待标注图
  * - 显示 AI Top-5 候选 + 确认/修正
@@ -9,14 +9,19 @@
  * - 「使用项目训练模型」开关 ON 时, 显示项目微调模型下拉 (默认=激活的)
  * - 显示当前激活的模型名 + 训练后引导用户到标注页
  *
- * v2.5.7 重构:
- * - 顶部统计 + 工具栏 → AnnotationToolbar.vue
+ * v3.5.0 优化:
+ * - 顶部统计 + 工具栏 → AnnotationToolbar.vue (其中状态卡组拆为 AnnotationStatusCards)
  * - 画布壳 → AnnotationCanvas.vue (slot 注入 3 个 annotator)
  * - 3 个任务右侧面板 → ClassificationPanel / DetectionPanel / SegmentationPanel
  * - 检测 / 分割 / AI 预标注业务逻辑 → composables
  *   · useDetectionAnnotate (bboxList, 复制建议, 保存, popover)
  *   · useSegmentationAnnotate (initialMaskUrl, 模式, 保存)
  *   · useAutoAnnotate (runAutoAnnotate, runDetectionAutoAnnotate)
+ *   · useAnnotationStatusFilter (状态筛选, localStorage 持久化)
+ *   · useAnnotationKeyboard (页面级快捷键: → / ← / Enter / u / h)
+ * - 批量操作 → AnnotationBatchBar.vue + annotationApi.clear / batchMarkUnqualified
+ * - AI 已标图片 → 「确认修正」/「重新标注」双路径 (ClassificationPanel)
+ * - 修正历史 → CorrectionHistoryDialog (从 /annotations/correction-history/{id} 拉数据)
  */
 import { ref, onMounted, onBeforeUnmount, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -25,6 +30,12 @@ import { annotationApi, imageApi, autoAnnotateApi, datasetApi, modelApi } from '
 import { useDetectionAnnotate } from '@/composables/useDetectionAnnotate'
 import { useSegmentationAnnotate } from '@/composables/useSegmentationAnnotate'
 import { useAutoAnnotate } from '@/composables/useAutoAnnotate'
+// v3.5.0: 状态筛选 + 页面级快捷键 + 批量操作 + 图片导航 + AI 修正事件
+import { useAnnotationStatusFilter, STATUS_FILTER_LABEL, type StatusFilterValue } from '@/composables/useAnnotationStatusFilter'
+import { useAnnotationKeyboard } from '@/composables/useAnnotationKeyboard'
+import { useAnnotationBatch } from '@/composables/useAnnotationBatch'
+import { useAnnotateNav } from '@/composables/useAnnotateNav'
+import { useAnnotationAICorrection } from '@/composables/useAnnotationAICorrection'
 // v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录, 引用统一使用相对路径
 import DetectionAnnotator from './components/DetectionAnnotator.vue'
 import SegmentationAnnotator from './components/SegmentationAnnotator.vue'
@@ -34,8 +45,12 @@ import DetectionPanel from './components/DetectionPanel.vue'
 import SegmentationPanel from './components/SegmentationPanel.vue'
 import AnnotationToolbar from './components/AnnotationToolbar.vue'
 import AnnotationCanvas from './components/AnnotationCanvas.vue'
+// v3.5.0: 批量操作条 (页面私有子组件)
+import AnnotationBatchBar from './components/AnnotationBatchBar.vue'
 // v2.5.9 新增: 标注工作台左侧"操作指导"侧栏
 import AnnotationGuideSidebar from './components/AnnotationGuideSidebar.vue'
+// v3.5.0: 修正历史弹窗 (复用 business 层组件)
+import CorrectionHistoryDialog from '@/components/annotation-business/CorrectionHistoryDialog.vue'
 // v2.5.44 新增: 顶部"返回数据集详情"按钮 (跳转回 /datasets/:id)
 import { ArrowLeft, Grid } from '@element-plus/icons-vue'
 
@@ -67,6 +82,15 @@ const loadTaskTypeFromStorage = (): string => {
   return 'classification'
 }
 const taskTypeFilter = ref<string>(loadTaskTypeFromStorage())
+// v3.5.0: 图片状态筛选 (待标注 / AI 已标 / 已人工标注)
+// - 持久化于 localStorage, 用户下次进入工作台时自动恢复
+// - 切换状态时, 重新拉取对应状态的图 (后端 imageApi.list 支持 status= 过滤)
+// - 默认 'pending', 与"进入工作台默认标注未标图"的语义一致
+const {
+  statusFilter, apiStatusParam,
+  isAiCorrectionMode,
+  setStatusFilter,
+} = useAnnotationStatusFilter()
 const datasetId = ref<number | null>(null)
 const categories = ref<any[]>([])
 const stats = ref<any>(null)
@@ -158,19 +182,11 @@ const {
   },
 })
 
-// ============== 浏览历史栈 (按访问顺序记录看过的 image id) ==============
-const historyIds = ref<number[]>([])
-const historyCursor = ref(-1)
-// 是否已到末尾 (栈顶时后端 list 返回空, 没有更多待标注图)
-const noMore = ref(false)
-// autoSaveBeforeSwitch 分割分支的兜底超时句柄，卸载时需清理避免回调在卸载后执行
-let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
-
-// 组件卸载清理: 回收分割 mask blob URL + 清除自动保存兜底定时器，避免内存泄漏
-onBeforeUnmount(() => {
-  revokeMaskUrl()
-  if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null }
-})
+// ============== 浏览历史栈 + 切图逻辑 (v3.5.0 抽离到 useAnnotateNav composable) ==============
+// - historyIds / historyCursor / noMore / canGoPrev / loadNext / loadPrev / loadSpecificImage
+//   全部由 composable 自管, 父组件通过返回值使用
+// - 注意: composable 调用延后到 fillImage / currentTaskTypeRaw 声明之后 (TS 块作用域前引用问题)
+//   下面先占位声明, 真正初始化在 fileImage 之后 (见下方 "延迟初始化 nav composable" 块)
 
 onMounted(async () => {
   try {
@@ -272,16 +288,51 @@ watch(taskTypeFilter, (newVal) => {
   } catch (e) { /* localStorage 不可用时静默 */ }
 })
 
+/**
+ * v3.5.0: 状态筛选变化 → 重新拉取当前状态的图 + 清空选中
+ * - 用户点击 AnnotationStatusCards 卡片切换状态时触发
+ * - 后端 imageApi.list 已支持 status= 与多状态 CSV 过滤
+ * - 重新拉列表 (用于批量操作 / 全选) + 自动跳到该状态第一张图
+ * - 切换 dataset 时 statusFilter 不重置, 用户的筛选偏好跨 dataset 保留
+ */
+watch(statusFilter, async () => {
+  selectedIds.value = []
+  if (datasetId.value) {
+    await refreshViewList()
+    loadNext()
+  }
+})
+
+/**
+ * v3.5.0: 拉取当前 statusFilter 下的图片列表 (用于批量操作)
+ * - 仅在用户切换状态筛选时调用, 不在每次 loadNext 调用 (避免冗余请求)
+ * - 拉取时使用后端 page_size=100 (批量操作单次最多操作 100 张)
+ * - 失败时静默, viewImageList 保持空数组 (批量操作按钮自动 disabled)
+ */
+async function refreshViewList() {
+  if (!datasetId.value) {
+    viewImageList.value = []
+    return
+  }
+  try {
+    const resp: any = await imageApi.list(datasetId.value, {
+      status: apiStatusParam.value,
+      page: 1,
+      page_size: 100,
+    })
+    viewImageList.value = resp?.items || []
+  } catch {
+    viewImageList.value = []
+  }
+}
+
 watch(datasetId, async (v) => {
   if (!v) return
   sessionStats.value = { confirmed: 0, corrected: 0, total_time_ms: 0 }
-  // 切换 dataset 时, 清空浏览历史 (新 dataset 的 id 集合不同)
-  historyIds.value = []
-  historyCursor.value = -1
-  noMore.value = false
-  image.value = null
+  // v3.5.0: 切换 dataset 时, 调用 useAnnotateNav 提供的 resetHistory 清空浏览历史
+  // (新 dataset 的 id 集合不同, 必须清)
+  resetHistory()
   candidates.value = []
-  revokeMaskUrl()
   // 三类互不依赖的请求并行拉取，避免串行 RTT 累加（原 200-800ms → 单次 RTT）
   const [cats, s, actResp] = await Promise.all([
     datasetApi.categories(v).catch(() => null),
@@ -294,15 +345,12 @@ watch(datasetId, async (v) => {
   const r: any = actResp
   activeModel.value = r?.items?.[0] || r?.model || null
   await refreshFinetuneModels()
+  await refreshViewList()
   // v2.5.44: 优先消费 URL 上的 ?imageId= query (来自数据集详情页"去标注"按钮)
-  // - 存在则调 loadSpecificImage, 跳过 loadNext, 工作台首张图即用户勾选的「待标注」图
-  // - 加载成功后清掉 query, 避免后续 dataset 切换时再次误用
-  // - 加载失败 (例如该 imageId 不属于当前 dataset / 已被删除) 回退到 loadNext
   const targetImageId = Number(route.query.imageId)
   if (targetImageId && !Number.isNaN(targetImageId)) {
     const ok = await loadSpecificImage(targetImageId)
     if (ok) {
-      // 清除 query, 避免后续 watch(datasetId) 再次触发同一 imageId 加载
       router.replace({ query: {} })
       return
     }
@@ -310,39 +358,7 @@ watch(datasetId, async (v) => {
   loadNext()
 })
 
-/**
- * v2.5.44: 加载指定的 imageId 作为当前图
- * - 用于支持「数据集详情页勾选 N 张图, 点击去标注, 工作台默认显示选中区域第一张待标注图」
- * - 实现: 调 imageApi.detail 拉详情, 推入 historyIds 头, cursor=0
- *   之后用户点「下一张」会从后端拉新图 (排除 historyIds), 流转顺畅
- * - 返回值: true=成功, false=失败 (后端报错 / 数据不合法)
- *   失败时 caller 决定回退策略 (目前是回退到 loadNext)
- */
-const loadSpecificImage = async (imageId: number): Promise<boolean> => {
-  if (!datasetId.value) return false
-  loading.value = true
-  try {
-    const detail: any = await imageApi.detail(imageId)
-    // 基础校验: 详情必须属于当前 dataset, 否则视为失败 (避免跨 dataset 误显示)
-    if (detail?.dataset_id && Number(detail.dataset_id) !== Number(datasetId.value)) {
-      ElMessage.warning('指定的图片不属于当前数据集, 已回退到默认加载')
-      return false
-    }
-    // 推入 history 栈头, cursor=0
-    historyIds.value = [imageId]
-    historyCursor.value = 0
-    fillImage(detail)
-    return true
-  } catch (e: any) {
-    ElMessage.error(
-      '加载指定图片失败, 已回退到默认加载: ' +
-      (e?.response?.data?.detail || e?.message)
-    )
-    return false
-  } finally {
-    loading.value = false
-  }
-}
+// v3.5.0: loadSpecificImage 已抽离到 useAnnotateNav composable, 父组件直接用返回值
 
 // ============== 切图 race 控制 (v3.0.0) ==============
 // onMarkUnqualified 后 600ms 自动 loadNext, 但用户在窗口期内可能点"下一张"
@@ -457,31 +473,18 @@ const currentImageTaskType = computed<'classification' | 'detection' | 'segmenta
   return (image.value?.task_type as any) || currentTaskTypeRaw.value
 })
 // 全部 AI 候选标签都不在项目 category 里 → 等同于基础模型 (ImageNet) 输出
+// v3.5.0: findCategory 在 index.vue 内统一维护 (原 ClassificationPanel 内部函数, 提升到顶层供 allUnknown / 快捷键 / 分类提交复用)
+const findCategory = (label: string) => {
+  return categories.value.find((c: any) => c.name === label)
+}
 const allUnknown = computed(() => {
   if (!candidates.value.length) return false
   return candidates.value.every((c) => !findCategory(c.label))
 })
 // 上一张按钮是否可用
-const canGoPrev = computed(() => historyCursor.value > 0)
-// v2.5.44 新增: 当前数据集名称 (顶部返回按钮旁展示, 增强上下文)
-const currentDatasetName = computed(() => {
-  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
-  return ds?.name || ''
-})
-// v2.5.44 新增: 返回按钮 — 跳转到当前数据集的详情页 (/datasets/:id)
-// - 仅在 datasetId 存在时启用, 避免空态时跳到不存在的路由
-// - 与右侧 viewDataset 行为一致, 但放在顶部更醒目
-function goBackToDataset() {
-  if (datasetId.value) router.push(`/datasets/${datasetId.value}`)
-}
-
-async function refreshStats() {
-  if (!datasetId.value) return
-  try {
-    const s: any = await annotationApi.stats(datasetId.value)
-    stats.value = s
-  } catch {}
-}
+// v3.5.0: canGoPrev / autoSaveBeforeSwitch / loadNext / loadPrev 已抽离到 useAnnotateNav composable
+// - 父组件通过解构返回值获取
+// - 这里只保留 viewDataset 的本地实现 (router 已在 index.vue 顶层创建, composable 内复用即可)
 
 /**
  * 按 item 填充 image / candidates / startTs, 按 task_type 拉取已有标注
@@ -508,180 +511,62 @@ const fillImage = (item: any) => {
   }
 }
 
-/**
- * 切图前自动保存检测/分割标注 (避免用户画了 bbox/mask 没点保存就跳走)
- * - dirty + 是检测任务 -> 调子组件 save
- * - dirty + 是分割任务 -> 调子组件 save (Promise 间接通过 watch segDirty)
- */
-const autoSaveBeforeSwitch = async (): Promise<boolean> => {
-  if (currentTaskTypeRaw.value === 'classification') return true
-  if (currentTaskTypeRaw.value === 'detection') {
-    if (!detAnnotRef.value) return true
-    if (!detDirty.value) return true
-    try {
-      annotatorSaving.value = true
-      const cur = detAnnotRef.value.modelValue || []
-      await saveDetectionBBoxes(cur)
-      return true
-    } catch (e: any) {
-      ElMessage.error('自动保存失败: ' + (e?.response?.data?.detail || e?.message))
-      return false
-    } finally {
-      annotatorSaving.value = false
-    }
-  }
-  if (currentTaskTypeRaw.value === 'segmentation') {
-    if (!segAnnotRef.value) return true
-    if (!segDirty.value) return true
-    return new Promise<boolean>((resolve) => {
-      const stop = watch(
-        segDirty,
-        (v) => {
-          if (!v) { stop(); resolve(true) }
-        },
-        { flush: 'sync' }
-      )
-      autoSaveTimer = setTimeout(() => { stop(); resolve(true) }, 5000)
-      segAnnotRef.value?.save?.()
-    })
-  }
-  return true
-}
+// ============== v3.5.0: 延迟初始化 nav composable (放在 fillImage / currentTaskTypeRaw 声明之后) ==============
+// - composable 引用了 fillImage (const 函数) + currentTaskTypeRaw (computed), 必须在它们声明后才能调用
+// - 之前位置 (在文件上方) 会触发 TS2448 "Block-scoped variable used before its declaration"
+const {
+  historyIds, historyCursor, noMore, canGoPrev,
+  loadNext, loadPrev, loadSpecificImage, viewDataset,
+  resetHistory, cleanup: navCleanup,
+} = useAnnotateNav({
+  image, datasetId,
+  detAnnotRef, segAnnotRef,
+  detDirty, segDirty, annotatorSaving,
+  currentTaskType: currentTaskTypeRaw as any,
+  statusFilter, apiStatusParam,
+  saveDetectionBBoxes, saveSegmentationMask,
+  revokeMaskUrl, fillImage,
+})
 
-/**
- * 「下一张」逻辑:
- * 1. 在历史栈中间 → cursor++ 直接拿历史图, 不发请求 (浏览器行为)
- * 2. 已在栈顶 → 调后端 list (排除整个 history) 拉新图, 推入栈尾
- */
-const loadNext = async () => {
-  if (!datasetId.value) { ElMessage.warning('请先选择数据集'); return }
-  const ok = await autoSaveBeforeSwitch()
-  if (!ok) return
-  // 情况 1: 历史栈中间, 直接前进
-  if (historyCursor.value < historyIds.value.length - 1) {
-    historyCursor.value++
-    const id = historyIds.value[historyCursor.value]
-    loading.value = true
-    try {
-      const detail: any = await imageApi.detail(id)
-      fillImage(detail)
-    } catch (e: any) {
-      ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message))
-    } finally {
-      loading.value = false
-    }
-    return
-  }
-  // 情况 2: 栈顶, 拉新图
-  loading.value = true
+// 组件卸载清理: 回收分割 mask blob URL + 清除自动保存兜底定时器
+onBeforeUnmount(() => {
+  revokeMaskUrl()
+  navCleanup()
+})
+
+// v3.5.0: loadNext / loadPrev / autoSaveBeforeSwitch / viewDataset 已在 useAnnotateNav composable 内实现
+
+// ============== 工具函数 (refreshStats / 当前数据集名 / 返回顶部) ==============
+async function refreshStats() {
+  if (!datasetId.value) return
   try {
-    const excludeIdsParam = historyIds.value.length > 0
-      ? historyIds.value.join(',')
-      : undefined
-    const resp: any = await imageApi.list(datasetId.value, {
-      status: 'pending',
-      page: 1,
-      page_size: 20,  // v3.0.0: 拉多个候选, 兜底过滤 historyIds 后取第一个 (防止 race 返回已加载的图)
-      exclude_ids: excludeIdsParam,
-    })
-    const items = resp?.items || []
-    // v3.0.0 兜底过滤: 排除 historyIds 中已加载的图
-    // - 后端 list_images 已通过 exclude_ids 过滤, 但若 race (onMarkUnqualified 后端
-    //   还没改 quality_flag 时前端已发起 loadNext), 仍可能返回历史图
-    // - 前端二次过滤保证: 「下一张」永远不会返回用户已处理过的图
-    const seen = new Set(historyIds.value)
-    const safeItem = items.find((it: any) => it && !seen.has(it.id))
-    const item = safeItem || null
-    if (!item) {
-      noMore.value = true
-      if (historyIds.value.length > 0) {
-        ElMessage.warning({
-          message: '已经是最后一张了, 没有更多待标注图片。可点击「启动 AI 预标注」让 AI 继续标注。',
-          duration: 3500,
-          showClose: true,
-        })
-      } else {
-        ElMessage.info('当前数据集没有待标注的图片')
-      }
-      return
-    }
-    noMore.value = false
-    historyIds.value.push(item.id)
-    historyCursor.value = historyIds.value.length - 1
-    fillImage(item)
-  } catch (e: any) {
-    ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message))
-  } finally {
-    loading.value = false
-  }
+    const s: any = await annotationApi.stats(datasetId.value)
+    stats.value = s
+  } catch {}
 }
 
-/**
- * 「上一张」逻辑: 从 cursor-1 往前遍历, 跳过已处理图 (confirmed/corrected/unqualified)
- * v3.0.0: 与 list_images 后端过滤语义对齐 — 只有 pending/ai_labeled 才是"待标注"
- * - 跳过的图从 historyIds 中移除 (避免重复跳过, 保持历史栈干净)
- * - 找到第一张 pending/ai_labeled → fillImage
- * - 全部已处理 → 提示, cursor 不动 (用户仍停留在当前图)
- * - 加载异常 (如图被删除) → 也跳过并移除
- */
-const loadPrev = async () => {
-  if (historyCursor.value <= 0) {
-    ElMessage.info('已经是第一张了')
-    return
-  }
-  const ok = await autoSaveBeforeSwitch()
-  if (!ok) return
-  noMore.value = false
-
-  let foundIdx = -1
-  let foundDetail: any = null
-  const skipIndices: number[] = []  // 要从 historyIds 移除的索引 (已处理/异常)
-
-  for (let i = historyCursor.value - 1; i >= 0; i--) {
-    const candidateId = historyIds.value[i]
-    loading.value = true
-    try {
-      const detail: any = await imageApi.detail(candidateId)
-      const status = detail?.status
-      // 跳过已处理图 (与后端 list_images status=pending + quality_flag IS NULL 过滤对齐)
-      if (status && status !== 'pending' && status !== 'ai_labeled') {
-        skipIndices.push(i)
-        continue
-      }
-      // 找到待标注图
-      foundIdx = i
-      foundDetail = detail
-      break
-    } catch {
-      // 图被删除等异常, 也跳过并移除
-      skipIndices.push(i)
-      continue
-    }
-  }
-
-  loading.value = false
-
-  if (foundIdx === -1) {
-    // 前面全部已处理: 移除跳过的图, cursor 相应前移 (这些图都不在当前 cursor 之前, 不影响当前图)
-    skipIndices.sort((a, b) => b - a)  // 降序 splice 避免索引移位
-    for (const idx of skipIndices) {
-      historyIds.value.splice(idx, 1)
-    }
-    historyCursor.value -= skipIndices.length
-    ElMessage.info('前面没有未处理的待标注图片了')
-    return
-  }
-
-  // 找到待标注图: 移除 foundIdx 之后到 cursor 之间被跳过的图
-  const toRemove = skipIndices.filter(idx => idx > foundIdx)
-  toRemove.sort((a, b) => b - a)
-  for (const idx of toRemove) {
-    historyIds.value.splice(idx, 1)
-  }
-  // cursor 指向 foundDetail (foundIdx 位置的元素, 前面的元素没被动过, 索引不变)
-  historyCursor.value = foundIdx
-  fillImage(foundDetail)
+// v2.5.44 新增: 当前数据集名称 (顶部返回按钮旁展示, 增强上下文)
+const currentDatasetName = computed(() => {
+  const ds = datasets.value.find((d: any) => d.id === datasetId.value)
+  return ds?.name || ''
+})
+// v2.5.44 新增: 返回按钮 — 跳转到当前数据集的详情页 (/datasets/:id)
+function goBackToDataset() {
+  if (datasetId.value) router.push(`/datasets/${datasetId.value}`)
 }
+
+// v3.5.0: 检测/分割 AI 修正事件处理 (抽离到 useAnnotationAICorrection composable)
+// - 父组件仅透传 ref + save 函数, composable 内完成弹窗 + save + loadNext 编排
+const {
+  onConfirmDetectionCorrection,
+  onReAnnotateDetection,
+  onConfirmSegmentationCorrection,
+  onReAnnotateSegmentation,
+} = useAnnotationAICorrection({
+  image, detAnnotRef, segAnnotRef, annotatorSaving,
+  bboxList, historyCursor, historyIds,
+  saveDetectionBBoxes, revokeMaskUrl, refreshStats, loadNext,
+})
 
 /**
  * 「启动 AI 预标注」按钮: 按 task_type 分派
@@ -741,11 +626,51 @@ const submit = async (labelId: number, labelName: string, isConfirm: boolean, co
   }
 }
 
-const viewDataset = () => {
-  if (datasetId.value) router.push(`/datasets/${datasetId.value}`)
-}
+// ============== v3.5.0: 批量操作 + AI 修正事件 + 修正历史 (抽离到 useAnnotationBatch composable) ==============
+// 状态自管 (viewImageList / selectedIds / batchOperating / historyDialogVisible),
+// 父组件通过返回的 ref + 方法与子组件交互, 保持单向数据流
+const {
+  viewImageList, selectedIds, batchOperating, historyDialogVisible, statusLabel,
+  onBatchClear, onBatchMarkUnqualified,
+  onSelectAll, onClearSelection,
+  onConfirmCorrection, onReAnnotate,
+  openHistoryDialog, onRevertedFromHistory,
+} = useAnnotationBatch({
+  image, datasetId, statusFilter,
+  refreshStats, refreshViewList, loadNext, submit,
+})
 
-const findCategory = (label: string) => categories.value.find((c) => c.name === label)
+// ============== v3.5.0: 页面级键盘快捷键 ==============
+// 仅在分类任务下启用「确认/修正」快捷键 (检测/分割的快捷键由子组件 useDetectionKeyboard 处理)
+const confirmTop1Available = computed(() => {
+  if (!image.value || currentTaskTypeRaw.value !== 'classification') return false
+  if (!candidates.value.length) return false
+  const top1 = candidates.value[0]?.label
+  if (!top1) return false
+  return !!findCategory(top1)
+})
+useAnnotationKeyboard({
+  onNext: () => { if (!noMore.value) loadNext() },
+  onPrev: () => { if (canGoPrev.value) loadPrev() },
+  onConfirm: () => {
+    if (!confirmTop1Available.value) return
+    const top1 = candidates.value[0].label
+    const cat = findCategory(top1)
+    if (cat) submit(cat.id, cat.name, true, undefined)
+  },
+  onCorrect: () => {
+    if (!confirmTop1Available.value) return
+    const top1 = candidates.value[0].label
+    const cat = findCategory(top1)
+    if (cat) submit(cat.id, cat.name, false, '[快捷键] 强制采用 top1')
+  },
+  onMarkUnqualified: () => {
+    if (image.value && !isUnqualified.value) onMarkUnqualified('blurry_or_unrecognizable', '')
+  },
+  onShowHistory: openHistoryDialog,
+  canPrev: () => canGoPrev.value,
+  canNext: () => !noMore.value,
+})
 </script>
 
 <template>
@@ -830,6 +755,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
       :auto-labeling="autoLabeling"
       :auto-label-progress="autoLabelProgress"
       :auto-label-progress-message="autoLabelProgressMessage"
+      :active-status-filter="statusFilter"
       @dataset-change="(v: number) => datasetId = v"
       @task-type-filter-change="onTaskTypeFilterChange"
       @threshold-change="(v: number) => threshold = v"
@@ -840,6 +766,19 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
       @model-name-change="(v: string) => modelName = v"
       @use-finetune-change="(v: boolean) => useFinetune = v"
       @ai-start="onStartAutoLabelClick(currentTaskTypeRaw)"
+      @status-filter-change="(v: any) => setStatusFilter(v)"
+    />
+
+    <!-- v3.5.0: 批量操作条 (页面私有子组件, 仅在有图时显示) -->
+    <AnnotationBatchBar
+      :total-in-view="viewImageList.length"
+      :selected-count="selectedIds.length"
+      :status-label="STATUS_FILTER_LABEL[statusFilter]"
+      :batch-operating="batchOperating"
+      @select-all="onSelectAll"
+      @clear-selection="onClearSelection"
+      @batch-clear="onBatchClear"
+      @batch-mark-unqualified="onBatchMarkUnqualified"
     />
 
     <!-- 主体: 左侧操作指导 + 中间画布 + 右侧任务面板 (v2.5.9: 由 2 栏扩为 3 栏)
@@ -929,6 +868,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           @view-dataset="viewDataset"
           @mark-unqualified="onMarkUnqualified"
           @unmark-unqualified="onUnmarkUnqualified"
+          @confirm-correction="onConfirmCorrection"
+          @re-annotate="onReAnnotate"
         />
         <!-- v2.5.14: 移除 @undo, @redo, @clear-draft, @cancel 监听
              撤销、重做、清空 改为 DetectionPanel 直接调 detAnnotRef 子组件方法
@@ -963,6 +904,8 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           @target-category-change="onDetTargetCategoryChange"
           @mark-unqualified="onMarkUnqualified"
           @unmark-unqualified="onUnmarkUnqualified"
+          @confirm-correction="onConfirmDetectionCorrection"
+          @re-annotate="onReAnnotateDetection"
         />
         <SegmentationPanel
           v-else-if="image.task_type === 'segmentation'"
@@ -978,6 +921,7 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           :image="image"
           :is-unqualified="isUnqualified"
           :reject-reason="rejectReason"
+          :initial-mask-url="initialMaskUrl"
           @mode-change="onSegModeChange"
           @category-change="onSegCategoryChange"
           @brush-size-change="onSegBrushSizeChange"
@@ -988,9 +932,21 @@ const findCategory = (label: string) => categories.value.find((c) => c.name === 
           @cancel="onSegClear"
           @mark-unqualified="onMarkUnqualified"
           @unmark-unqualified="onUnmarkUnqualified"
+          @confirm-correction="onConfirmSegmentationCorrection"
+          @re-annotate="onReAnnotateSegmentation"
         />
       </el-col>
     </el-row>
+
+    <!-- v3.5.0: 修正历史弹窗 (业务通用组件, 单图完整历史 + 恢复 AI 预测)
+         - 按 'h' 键或主操作区"查看历史"按钮触发
+         - 关闭不影响工作台状态, 仅展示历史数据 -->
+    <CorrectionHistoryDialog
+      v-if="image"
+      v-model="historyDialogVisible"
+      :image-id="image.id"
+      @reverted="onRevertedFromHistory"
+    />
   </div>
 </template>
 

@@ -1,7 +1,12 @@
 <!--
-  SegmentationPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本)
+  SegmentationPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本, v3.5.0 AI 修正)
   ===================================================
-  图像分割任务右侧操作面板 (4 sections, 仅保留操作)
+  图像分割任务右侧操作面板 (4 sections, 仅保留操作, + AI 修正区)
+
+  v3.5.0: AI 已标注图片专用「确认修正 / 重新标注」操作区
+  - 仅在 image.status === 'ai_labeled' && initialMaskUrl 存在时显示
+  - 「确认修正」: 把当前 AI 预测 mask 作为确认结果保存 (走 save 流程, 触发后端 status -> human_confirmed)
+  - 「重新标注」: 清空 mask 让用户重画
 
   设计:
   - 4 sections: 1 工具模式 / 2 类别 / 3 笔刷大小 / 4 图片导航 / 5 提交
@@ -17,14 +22,44 @@
     categories:         类别列表
     segMode:            当前模式 (brush/erase/pan)
     canGoPrev, noMore, historyCursor, historyIds, image
+    initialMaskUrl:     已有 mask 的 blob URL (v3.5.0: 用于判断 AI 是否有 mask)
 
   Emits:
     mode-change, category-change, brush-size-change
     prev, next, view-dataset
     save, cancel
+    confirm-correction, re-annotate   // v3.5.0
 -->
 <template>
   <el-card class="op-card" title="分割操作面板">
+    <!-- v3.5.0: AI 已标图片专用「确认修正 / 重新标注」操作区
+         - 仅在 image.status === 'ai_labeled' && initialMaskUrl 存在时显示
+         - 分割场景: AI 预测 mask 已加载到画布, 用户可一键确认或清空重画 -->
+    <div v-if="image && image.status === 'ai_labeled' && initialMaskUrl" class="ai-correction-bar">
+      <el-alert
+        type="info" :closable="false" show-icon
+        title="该图已由 AI 预标注 (mask 已加载), 请选择下一步:"
+        style="margin-bottom: 8px;"
+      />
+      <div style="display: flex; gap: 8px;">
+        <el-button
+          type="success" size="default" :icon="Check"
+          style="flex: 1;"
+          :disabled="annotatorSaving"
+          @click="emit('confirm-correction')"
+        >
+          确认修正
+        </el-button>
+        <el-button
+          type="warning" size="default" plain :icon="Refresh"
+          style="flex: 1;"
+          @click="emit('re-annotate')"
+        >
+          重新标注
+        </el-button>
+      </div>
+    </div>
+
     <!-- 1. 工具模式 -->
     <div class="op-section">
       <div class="op-section-title">1. 工具模式</div>
@@ -165,7 +200,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight } from '@element-plus/icons-vue'
+import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight, Refresh } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 
 interface Category { id: number; name: string }
@@ -174,6 +209,7 @@ interface Image {
   filename: string
   width: number
   height: number
+  status?: string
 }
 
 const props = defineProps<{
@@ -190,6 +226,8 @@ const props = defineProps<{
   // v3.0.0: 不合格标记状态 (从父组件 image 派生)
   isUnqualified: boolean
   rejectReason: string | null
+  // v3.5.0: 已有 mask 的 blob URL, 用于 AI 修正区显示判断
+  initialMaskUrl: string | null
 }>()
 
 const emit = defineEmits<{
@@ -204,6 +242,9 @@ const emit = defineEmits<{
   // v3.0.0: 不合格标记事件 (单向数据流, 由父组件处理 API 调用)
   (e: 'mark-unqualified', reason: string, customText: string): void
   (e: 'unmark-unqualified'): void
+  // v3.5.0: AI 已标图片「确认修正」/「重新标注」双路径
+  (e: 'confirm-correction'): void
+  (e: 're-annotate'): void
 }>()
 
 // 调色板 (与 SegmentationAnnotator 一致)
@@ -283,5 +324,21 @@ watch(() => props.image?.id, () => {
   border-radius: 50%;
   margin-right: 6px;
   vertical-align: middle;
+}
+
+/* v3.5.0: AI 已标图片「确认修正/重新标注」操作区
+   - 与 ClassificationPanel / DetectionPanel 风格保持一致 */
+.ai-correction-bar {
+  background: #f5f7fa;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+}
+.ai-correction-bar__hint {
+  font-weight: 400;
+  font-size: 12px;
+  opacity: 0.9;
+  margin-left: 2px;
 }
 </style>

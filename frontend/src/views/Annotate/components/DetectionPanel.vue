@@ -1,7 +1,12 @@
 <!--
-  DetectionPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本)
+  DetectionPanel.vue (v2.5.7 拆分自 Annotate.vue, v2.5.11 精简文本, v3.5.0 AI 修正)
   ===============================================
-  目标检测任务右侧操作面板 (5 sections + el-popover)
+  目标检测任务右侧操作面板 (5 sections + el-popover + AI 修正区)
+
+  v3.5.0: AI 已标注图片专用「确认修正 / 重新标注」操作区
+  - 仅在 image.status === 'ai_labeled' && bboxList.length > 0 时显示
+  - 「确认修正」: 把当前 AI 预测 bbox 作为确认结果保存 (走 save 流程, 触发后端 status -> human_confirmed)
+  - 「重新标注」: 清空 bbox 让用户重画, 状态保持 ai_labeled (用户改完会变成 human_corrected)
 
   v2.5.6 关键设计:
   - 类别下拉已迁移到 Section 4 el-popover (点 el-tag 弹出改类别)
@@ -32,13 +37,45 @@
     detOpenPopoverIdx:  当前打开 popover 的 bbox idx (同时只能一个)
 
   Emits:
-    undo, redo, clear-draft, save, cancel
+    save
     apply-copy-suggestions, ignore-copy-suggestions
     prev, next, view-dataset
     tag-click(idx), category-change(idx, catId), popover-visible-change(idx, v)
+    confirm-correction, re-annotate   // v3.5.0: AI 已标图修正事件
 -->
 <template>
   <el-card class="op-card" title="检测操作面板">
+    <!-- v3.5.0: AI 已标图片专用「确认修正 / 重新标注」操作区
+         - 仅在 image.status === 'ai_labeled' 时显示
+         - 检测场景: AI 预测 bbox 已加载到 bboxList, 用户可一键确认或清空重画 -->
+    <div v-if="image && image.status === 'ai_labeled'" class="ai-correction-bar">
+      <el-alert
+        type="info" :closable="false" show-icon
+        :title="`该图已由 AI 预标注 (${bboxList.length} 个 bbox), 请选择下一步:`"
+        style="margin-bottom: 8px;"
+      />
+      <div style="display: flex; gap: 8px;">
+        <el-button
+          type="success" size="default" :icon="Check"
+          style="flex: 1;"
+          :disabled="!annotatorSaving === false && bboxList.length === 0"
+          @click="emit('confirm-correction')"
+        >
+          确认修正
+          <span v-if="bboxList.length > 0" class="ai-correction-bar__hint">
+            ({{ bboxList.length }} 个 bbox)
+          </span>
+        </el-button>
+        <el-button
+          type="warning" size="default" plain :icon="Refresh"
+          style="flex: 1;"
+          @click="emit('re-annotate')"
+        >
+          重新标注
+        </el-button>
+      </div>
+    </div>
+
     <!-- 1. 工具与历史
          v2.5.14 调整:
          - 撤销按钮: 一键撤销本次所有修改 (替代原"取消"按钮)
@@ -272,7 +309,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Check, Close, ArrowLeft, View, MagicStick, RefreshLeft, RefreshRight, Warning, ArrowRight } from '@element-plus/icons-vue'
+import { Check, Close, ArrowLeft, View, MagicStick, RefreshLeft, RefreshRight, Warning, ArrowRight, Refresh } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 
 interface Category { id: number; name: string }
@@ -292,6 +329,7 @@ interface Image {
   filename: string
   width: number
   height: number
+  status?: string
 }
 
 const props = defineProps<{
@@ -331,6 +369,9 @@ const emit = defineEmits<{
   // v3.0.0: 不合格标记事件 (单向数据流, 由父组件处理 API 调用)
   (e: 'mark-unqualified', reason: string, customText: string): void
   (e: 'unmark-unqualified'): void
+  // v3.5.0: AI 已标图片「确认修正」/「重新标注」双路径
+  (e: 'confirm-correction'): void
+  (e: 're-annotate'): void
 }>()
 
 // 调色板 (与 DetectionAnnotator 一致, 保证 bbox 颜色一致)
@@ -464,5 +505,22 @@ watch(() => props.image?.id, () => {
   color: #909399;
   margin-bottom: 6px;
   letter-spacing: 0.3px;
+}
+
+/* v3.5.0: AI 已标图片「确认修正/重新标注」操作区
+   - 顶部蓝色提示条 + 双按钮主行动, 视觉权重高于普通操作
+   - 与 ClassificationPanel.ai-correction-bar 风格保持一致 */
+.ai-correction-bar {
+  background: #f5f7fa;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+}
+.ai-correction-bar__hint {
+  font-weight: 400;
+  font-size: 12px;
+  opacity: 0.9;
+  margin-left: 2px;
 }
 </style>

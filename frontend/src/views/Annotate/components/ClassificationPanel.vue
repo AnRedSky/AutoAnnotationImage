@@ -33,6 +33,39 @@
       style="text-align: center; padding: 24px 12px; border: 1px dashed #f56c6c; border-radius: 6px; background: #fef0f0;">
       <el-tag type="danger" size="large" effect="dark">未知</el-tag>
     </div>
+    <!-- v3.5.0: AI 已标图片专用「确认修正 / 重新标注」操作区
+         - 仅在 image.status === 'ai_labeled' 时显示
+         - 提供更明确的双路径 UI, 与「强制采用」(已实现) 并行存在
+         - 「确认修正」: 接受 AI top1, 显式走 confirm 流 (带 audit comment)
+         - 「重新标注」: 清空 AI 预测, 把图回到 pending 状态 (即当作新图对待) -->
+    <div v-if="image && image.status === 'ai_labeled' && !allUnknown" class="ai-correction-bar">
+      <el-alert
+        type="info" :closable="false" show-icon
+        title="该图已由 AI 预标注, 请选择下一步:"
+        style="margin-bottom: 8px;"
+      />
+      <div style="display: flex; gap: 8px;">
+        <el-button
+          type="success" size="default" :icon="Check"
+          style="flex: 1;"
+          :disabled="!aiTop1Label || !findCategory(aiTop1Label)"
+          @click="onConfirmCorrection"
+        >
+          确认修正
+          <span v-if="aiTop1Label && findCategory(aiTop1Label)" class="ai-correction-bar__hint">
+            ({{ findCategory(aiTop1Label)!.name }})
+          </span>
+        </el-button>
+        <el-button
+          type="warning" size="default" plain :icon="Refresh"
+          style="flex: 1;"
+          @click="onReAnnotate"
+        >
+          重新标注
+        </el-button>
+      </div>
+    </div>
+
     <div v-for="(c, idx) in candidates" v-show="!allUnknown" :key="`${c.label}-${idx}`" class="model-confidence-bar">
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <span>
@@ -150,7 +183,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
-import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight } from '@element-plus/icons-vue'
+import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight, Refresh } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 // v3.4.0: 人工修正方案 - 复用 common/annotation-business 公共组件
 import CorrectionDiffBadge from '@/components/common/CorrectionDiffBadge.vue'
@@ -158,7 +191,7 @@ import CorrectionCommentInput from '@/components/annotation-business/CorrectionC
 
 interface Category { id: number; name: string }
 interface Candidate { label: string; confidence: number }
-interface Image { id: number; filename: string }
+interface Image { id: number; filename: string; status?: string }
 
 const props = defineProps<{
   image: Image | null
@@ -182,6 +215,9 @@ const emit = defineEmits<{
   // v3.0.0: 不合格标记事件 (单向数据流, 由父组件处理 API 调用)
   (e: 'mark-unqualified', reason: string, customText: string): void
   (e: 'unmark-unqualified'): void
+  // v3.5.0: AI 已标图片「确认修正」/「重新标注」双路径操作
+  (e: 'confirm-correction', categoryId: number, label: string): void
+  (e: 're-annotate'): void
 }>()
 
 function findCategory(label: string): Category | undefined {
@@ -217,6 +253,21 @@ function onCategoryChange(id: number) {
     otherCategoryId.value = null
     commentText.value = ''
   }
+}
+
+// ============== v3.5.0: 「确认修正」/「重新标注」双路径操作 ==============
+// 「确认修正」: 接受 AI top1, 走 confirm 流 + audit comment, 与 click "确认此标签" 行为一致
+//  - 区别: emit('confirm-correction') 事件, 父组件会带上 "已审阅 AI 预测" 标识的 comment
+// 「重新标注」: 不修改 status, 只触发父组件跳到"选择其他类别"工作流 (实际由父组件自动选中下拉)
+function onConfirmCorrection() {
+  const top1 = props.candidates?.[0]?.label
+  if (!top1) return
+  const cat = findCategory(top1)
+  if (!cat) return
+  emit('confirm-correction', cat.id, cat.name)
+}
+function onReAnnotate() {
+  emit('re-annotate')
 }
 
 // ============== v3.0.0: 不合格标记本地状态 ==============
@@ -262,5 +313,24 @@ watch(() => props.image?.id, () => {
 }
 .unknown-label {
   color: #f56c6c;
+}
+
+/* v3.5.0: AI 已标图片「确认修正/重新标注」操作区
+   - 顶部蓝色提示条 + 双按钮主行动, 视觉权重高于单条候选
+   - 区别于「强制采用」单按钮: 这里明确告诉用户有 2 个路径 */
+.ai-correction-bar {
+  padding: 10px 0 8px;
+  border-bottom: 1px dashed #dcdfe6;
+  margin-bottom: 4px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 4px -8px 8px;
+}
+.ai-correction-bar__hint {
+  font-weight: 400;
+  font-size: 12px;
+  opacity: 0.9;
+  margin-left: 2px;
 }
 </style>

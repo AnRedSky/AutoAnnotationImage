@@ -213,9 +213,25 @@ useTrainingListSSE({
   onComplete: () => loadJobs(),
 })
 
-// ============== 静默兜底刷新 (详情打开时跳过) ==============
-const { start: startSilentRefresh, stop: stopSilentRefresh, pause: pauseSilentRefresh, resume: resumeSilentRefresh } = useSilentRefresh({
+// ============== 静默兜底刷新 (v3.5.0 Phase T6 优化) ==============
+// 1) shouldRun: 仅当列表中存在 PENDING/PROGRESS 任务时才启动定时器
+//    - 空闲时 (全为终态) 后端不可能有状态变化, 彻底停掉避免空转
+// 2) enabledByVisibility: 默认 true, 标签页不可见时自动停, 切回时 evaluate 恢复
+// 3) 监听 jobs 变化 → evaluate, 新建任务 / 任务终态变化时立即启停
+// 4) 详情打开时走原有 pause/resume (跳过本次 tick, 定时器保留以减少抖动)
+const hasActiveJob = computed(() =>
+  jobs.value.some((j: any) => j.state === 'PENDING' || j.state === 'PROGRESS'),
+)
+
+const {
+  start: startSilentRefresh,
+  stop: stopSilentRefresh,
+  pause: pauseSilentRefresh,
+  resume: resumeSilentRefresh,
+  evaluate: evaluateSilentRefresh,
+} = useSilentRefresh({
   intervalMs: 60000,
+  shouldRun: () => hasActiveJob.value,
   skipWhen: () => detailVisible.value,
   onTick: () => loadJobs(),
 })
@@ -226,10 +242,20 @@ watch(detailVisible, (v) => {
   else resumeSilentRefresh()
 })
 
+// v3.5.0 Phase T6: 列表中"活跃任务存在性"变化时, 重新评估兜底启停
+// - 新建任务 / 任务进入 PROGRESS → 立即启动兜底 (双保险)
+// - 全部任务进入终态 → 立即停止兜底
+// - SSE 接管时 evaluate 也会调, 但 useSilentRefresh 内部已处理 SSE skip, 不冲突
+watch(hasActiveJob, () => {
+  evaluateSilentRefresh()
+})
+
 // ============== 生命周期 ==============
 onMounted(async () => {
   await Promise.all([loadDatasets(), loadJobs(), loadBaseModels()])
+  // 启动后再 evaluate 一次, 处理"加载完成时 jobs 已有活跃任务"的初始判定
   startSilentRefresh()
+  evaluateSilentRefresh()
 })
 
 onBeforeUnmount(() => {
