@@ -13,10 +13,17 @@
      - 「清空选择」按钮 → emit('clear-selection')
   4. 显示当前已选数量 / 当前列表总数
 
+  v3.5.0 P0-2: 展示「已加载/总数」, 截断时显示「超过 2000 上限」提示
+  - 旧: totalInView 既是已加载数也是总数, 100 张上限
+  - 新: totalInView = 已加载数 (listIds 返回的 items 数量), viewTotal = 后端真实总数
+  - viewTruncated=true 时, 显示「已加载 X / 总 Y 张 (仅显示前 2000)」
+
   Props:
-    totalInView: 当前视图 (按状态筛选后) 的图总数
-    selectedCount: 已选中的图数量
-    statusLabel: 当前状态的中文标签
+    totalInView:    已加载的图片数 (listIds 返回的 items 数量, 受 max_ids 限制)
+    viewTotal:      后端返回的真实总数 (可能 > totalInView, 例如 total=5230 / items=2000)
+    viewTruncated:  是否被 max_ids=2000 截断
+    selectedCount:  已选中的图数量
+    statusLabel:    当前状态的中文标签
     batchOperating: 父组件传入的 loading flag (避免按钮重复触发)
 
   Emits:
@@ -29,7 +36,19 @@
     <div class="batch-bar__left">
       <span class="batch-bar__label">
         当前 <strong>{{ statusLabel }}</strong> 共
-        <strong class="batch-bar__count">{{ totalInView }}</strong> 张,
+        <!-- v3.5.0 P0-2: 已加载 ≠ 总数时, 显示「X / Y」格式 -->
+        <template v-if="viewTotal > totalInView">
+          <strong class="batch-bar__count">{{ totalInView }}</strong>
+          <span class="batch-bar__sep">/</span>
+          <strong class="batch-bar__count">{{ viewTotal }}</strong>
+          <span v-if="viewTruncated" class="batch-bar__truncated" :title="`已超过 listIds 上限 2000, 批量操作仅覆盖前 ${totalInView} 张`">
+            (仅前 2000)
+          </span>
+        </template>
+        <template v-else>
+          <strong class="batch-bar__count">{{ totalInView }}</strong>
+        </template>
+        张,
         已选 <strong class="batch-bar__count batch-bar__count--accent">{{ selectedCount }}</strong> 张
       </span>
     </div>
@@ -66,6 +85,10 @@ import { ElMessageBox } from 'element-plus'
 
 const props = defineProps({
   totalInView: { type: Number, required: true },
+  /** v3.5.0 P0-2: 后端返回的真实总数 */
+  viewTotal: { type: Number, default: 0 },
+  /** v3.5.0 P0-2: 是否被 max_ids=2000 截断 */
+  viewTruncated: { type: Boolean, default: false },
   selectedCount: { type: Number, required: true },
   statusLabel: { type: String, required: true },
   /** 父组件传入的 loading flag, 类型 'mark' | 'clear' | null */
@@ -118,6 +141,16 @@ async function onBatchMarkUnqualified() {
   margin: 0 2px;
 }
 .batch-bar__count--accent { color: #409eff; }
+.batch-bar__sep {
+  color: #909399;
+  margin: 0 1px;
+}
+.batch-bar__truncated {
+  color: #e6a23c;
+  font-size: 12px;
+  margin-left: 6px;
+  cursor: help;
+}
 .batch-bar__right { display: flex; align-items: center; gap: 4px; }
 .batch-bar :deep(.el-divider--vertical) { height: 18px; margin: 0 4px; }
 </style>

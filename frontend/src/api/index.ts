@@ -113,6 +113,18 @@ export const imageApi = {
     }),
   list: (datasetId: number, params?: ImageListParams & { exclude_id?: number; exclude_ids?: string }) =>
     http.get(`/images/list/${datasetId}`, { params }),
+  /**
+   * v3.5.0 新增: 轻量级 id 列表接口
+   * - 后端: GET /api/images/ids/{dataset_id}
+   * - 仅返回 image id 数组 + total, 解决标注工作台批量操作时 100 张上限问题
+   * - max_ids 默认 2000 (后端硬上限)
+   * - order: 'desc' (默认, 最新优先, 与 /list 一致) / 'asc' (最旧优先)
+   * - 返回字段: { items: number[], total: number, max_ids, order, truncated, status_filter }
+   */
+  listIds: (
+    datasetId: number,
+    params?: { status?: string; order?: 'asc' | 'desc'; max_ids?: number }
+  ) => http.get(`/images/ids/${datasetId}`, { params }),
   detail: (id: number) => http.get(`/images/${id}`),
   remove: (id: number) => http.delete(`/images/${id}`),
   batchRemove: (ids: number[]) => http.post('/images/batch-delete', ids),

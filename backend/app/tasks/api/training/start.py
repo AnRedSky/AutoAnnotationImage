@@ -312,23 +312,51 @@ async def start_existing_training_job(
         base_name = re.sub(r'_r\d+$', '', payload_model)  # 剥离末尾的 _r{timestamp}
         new_model_name = f"{base_name}{suffix}"
 
-    # ---- 增量训练 (再训练) 核心: 自动用当前激活的模型权重 ----
+    # ---- 增量训练 (再训练) 核心: 基于「当前所在行」的 ModelVersion ----
+    # 用户在 N 行点「再训练」, 不管该 MV 是否 is_active, 都基于它继续训练
+    # (语义对齐: "再训练" = 在该任务产出的模型基础上继续)
+    #
+    # 解析顺序:
+    #   1) job.model_version_id 非空 → 直接用该 MV (无论 is_active)
+    #   2) 否则查 dataset 下 is_active=True 的最新 MV (兼容老 job 训练失败没产 MV 的场景)
+    #   3) 都没有 → None (run_training 走 timm ImageNet 预训练)
     pretrained_model_path = None
     pretrained_source_mv_id = None
+    pretrained_source_label = "无 (从头微调)"
     if mode == "restart":
-        active_mv = (await db.execute(
-            select(ModelVersion)
-            .where(
-                ModelVersion.dataset_id == final_dataset_id,
-                ModelVersion.is_active == True,  # noqa: E712
-            )
-            .order_by(ModelVersion.id.desc())
-        )).scalars().first()
-        if active_mv and active_mv.file_path:
-            pth = Path(active_mv.file_path)
+        candidate_mv = None
+        # 1) 优先: 当前行关联的 ModelVersion
+        if job.model_version_id:
+            candidate_mv = await db.get(ModelVersion, job.model_version_id)
+            if candidate_mv:
+                pretrained_source_label = (
+                    f"当前行 ModelVersion #{candidate_mv.id} "
+                    f"(name={candidate_mv.name!r}, active={candidate_mv.is_active})"
+                )
+        # 2) 回退: 数据集下激活的最新 ModelVersion
+        if candidate_mv is None:
+            active_mv = (await db.execute(
+                select(ModelVersion)
+                .where(
+                    ModelVersion.dataset_id == final_dataset_id,
+                    ModelVersion.is_active == True,  # noqa: E712
+                )
+                .order_by(ModelVersion.id.desc())
+            )).scalars().first()
+            if active_mv:
+                candidate_mv = active_mv
+                pretrained_source_label = (
+                    f"激活 ModelVersion #{active_mv.id} (name={active_mv.name!r})"
+                )
+
+        # 取 .pth 路径, 文件存在才算有效
+        if candidate_mv and candidate_mv.file_path:
+            pth = Path(candidate_mv.file_path)
             if pth.exists():
                 pretrained_model_path = str(pth)
-                pretrained_source_mv_id = active_mv.id
+                pretrained_source_mv_id = candidate_mv.id
+            else:
+                pretrained_source_label += " [文件不存在, 改从头微调]"
 
     # ---- 预创建 TrainingJob 行 (mode=restart) ----
     new_job_id: int | None = None
@@ -401,8 +429,7 @@ async def start_existing_training_job(
             if mode == "resume"
             else (
                 f"New training task #{new_job_id} created (model_name={new_model_name}, "
-                f"原任务 #{job_id} 保持不变, "
-                f"{'增量训练: 基于 ModelVersion #' + str(pretrained_source_mv_id) if pretrained_source_mv_id else '从头微调 (无激活模型, 使用 ImageNet 预训练)'})"
+                f"原任务 #{job_id} 保持不变, 增量训练来源: {pretrained_source_label})"
             )
         ),
         task_id=task.id,

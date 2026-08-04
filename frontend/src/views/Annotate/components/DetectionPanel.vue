@@ -47,24 +47,22 @@
   <el-card class="op-card" title="检测操作面板">
     <!-- v3.5.0: AI 已标图片专用「确认修正 / 重新标注」操作区
          - 仅在 image.status === 'ai_labeled' 时显示
-         - 检测场景: AI 预测 bbox 已加载到 bboxList, 用户可一键确认或清空重画 -->
+         - 检测场景: AI 预测 bbox 已加载到 bboxList, 用户可一键确认或清空重画
+         - v3.6.0 升级: 弹窗显示「AI 预测类别统计 + 候选类别下拉」, 用户选主类别确认 -->
     <div v-if="image && image.status === 'ai_labeled'" class="ai-correction-bar">
       <el-alert
         type="info" :closable="false" show-icon
-        :title="`该图已由 AI 预标注 (${bboxList.length} 个 bbox), 请选择下一步:`"
+        :title="`该图已由 AI 预标注 (${bboxList.length} 个 bbox, 涉及类别: ${aiCategorySummary || '—'}), 请选择具体类别进行确认修正:`"
         style="margin-bottom: 8px;"
       />
       <div style="display: flex; gap: 8px;">
         <el-button
           type="success" size="default" :icon="Check"
           style="flex: 1;"
-          :disabled="!annotatorSaving === false && bboxList.length === 0"
-          @click="emit('confirm-correction')"
+          :disabled="annotatorSaving"
+          @click="openConfirmCorrectionDialog"
         >
           确认修正
-          <span v-if="bboxList.length > 0" class="ai-correction-bar__hint">
-            ({{ bboxList.length }} 个 bbox)
-          </span>
         </el-button>
         <el-button
           type="warning" size="default" plain :icon="Refresh"
@@ -304,13 +302,31 @@
         去数据集详情浏览全部图片
       </el-link>
     </div>
+
+    <!-- v3.6.0: AI 修正类别选择弹窗
+         - 检测场景: 顶部展示 AI 预测的「bbox 数量 + 涉及类别统计」+ 主类别建议
+         - 下方下拉让用户选「主类别」作为审计 log (实际 bbox 仍按当前画布内容保存)
+         - 父组件处理 confirm-correction 事件 (含 categoryId/labelName) -->
+    <AICorrectionCategoryDialog
+      v-model="correctionDialogVisible"
+      task-type="detection"
+      :ai-top1-label="aiTop1Label"
+      :ai-top1-confidence="null"
+      :ai-candidates="[]"
+      :categories="sortedCategories"
+      :default-category-id="aiTop1CategoryId"
+      :existing-summary="existingSummary"
+      @confirm="onDialogConfirm"
+    />
   </el-card>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { Check, Close, ArrowLeft, View, MagicStick, RefreshLeft, RefreshRight, Warning, ArrowRight, Refresh } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
+// v3.6.0: AI 修正类别选择弹窗 (与 Classification/Segmentation 共享)
+import AICorrectionCategoryDialog from '@/components/annotation-business/AICorrectionCategoryDialog.vue'
 
 interface Category { id: number; name: string }
 interface BBox {
@@ -370,7 +386,8 @@ const emit = defineEmits<{
   (e: 'mark-unqualified', reason: string, customText: string): void
   (e: 'unmark-unqualified'): void
   // v3.5.0: AI 已标图片「确认修正」/「重新标注」双路径
-  (e: 'confirm-correction'): void
+  // v3.6.0: confirm-correction 改为 (categoryId, labelName) 形式, 弹窗返回值
+  (e: 'confirm-correction', categoryId: number, labelName: string): void
   (e: 're-annotate'): void
 }>()
 
@@ -427,6 +444,58 @@ function onTargetCategoryChange(catId: number | null) {
  */
 function handleSaveClick() {
   emit('save')
+}
+
+// ============== v3.6.0: AI 修正类别选择弹窗 ==============
+// 检测场景: AI 已标图涉及多个 bbox, 弹窗顶部展示「AI 预测类别统计」(按类别聚合) + 下拉选「主类别」
+// 主类别仅用于审计 log 记录, 实际 bbox 仍按用户当前画布内容保存
+const correctionDialogVisible = ref(false)
+// 类别聚合: 统计 bboxList 中每个 category_id 出现的次数, 排序后取前 5 个
+const categoryCount = computed<Array<{ id: number; name: string; count: number }>>(() => {
+  const m = new Map<number, number>()
+  for (const b of props.bboxList) {
+    if (b.category_id == null) continue
+    m.set(Number(b.category_id), (m.get(Number(b.category_id)) || 0) + 1)
+  }
+  return Array.from(m.entries())
+    .map(([id, count]) => ({
+      id,
+      name: catName(id) || `cls_${id}`,
+      count,
+    }))
+    .sort((a, b) => b.count - a.count)
+})
+// AI 类别汇总 (e.g. "车辆×2, 行人×1"), 用于 alert 标题
+const aiCategorySummary = computed(() => {
+  if (categoryCount.value.length === 0) return ''
+  const parts = categoryCount.value
+    .slice(0, 5)
+    .map((c) => `${c.name}×${c.count}`)
+  return parts.join(', ')
+})
+// AI top1 类别: 取出现次数最多的 (用于弹窗顶部展示)
+const aiTop1Label = computed(() => {
+  if (categoryCount.value.length === 0) return null
+  return categoryCount.value[0].name
+})
+// AI top1 在项目类目里的 id
+const aiTop1CategoryId = computed<number | null>(() => {
+  if (categoryCount.value.length === 0) return null
+  return categoryCount.value[0].id
+})
+const existingSummary = computed(() => {
+  // 检测任务: 展示 bbox 总数 + 类别汇总
+  if (props.bboxList.length === 0) return '无 bbox'
+  return `共 ${props.bboxList.length} 个 bbox, 类别: ${aiCategorySummary.value}`
+})
+
+function openConfirmCorrectionDialog() {
+  correctionDialogVisible.value = true
+}
+function onDialogConfirm(categoryId: number, labelName: string) {
+  correctionDialogVisible.value = false
+  // 父组件收到 categoryId/labelName 后, 走 save 流程 + 把主类别记入 audit
+  emit('confirm-correction', categoryId, labelName)
 }
 
 // ============== v3.0.0: 不合格标记本地状态 ==============

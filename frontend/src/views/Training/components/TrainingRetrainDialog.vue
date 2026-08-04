@@ -120,11 +120,18 @@ const onSubmit = async () => {
   >
     <el-alert
       type="info" :closable="false" style="margin-bottom: 12px;"
-      title="可在此调整训练参数 (数据集/基础模型/版本名/轮次/批大小/学习率). 新 model_name 会自动加 _r{时间戳} 后缀, 避免覆盖旧 .pth."
+      :title="`可在此调整训练参数 (数据集/基础模型/版本名/轮次/批大小/学习率). 新 model_name 会自动加 _r{时间戳} 后缀, 避免覆盖旧 .pth.`"
     />
     <el-alert
       type="warning" :closable="false" style="margin-bottom: 12px;"
       :title="`原任务 #${form.id} 不会被修改, 此处参数仅用于创建新一轮训练任务. 提交后会立即在列表顶部出现新任务 (PENDING).`"
+    />
+    <el-alert
+      :type="row?.model_version_id ? 'success' : 'info'"
+      :closable="false" style="margin-bottom: 12px;"
+      :title="row?.model_version_id
+        ? `将基于当前行 ModelVersion #${row.model_version_id} 继续训练 (无论是否激活)`
+        : '当前行未关联 ModelVersion (训练失败或历史任务), 将从头微调 (ImageNet 预训练)'"
     />
     <TrainingParamsForm
       :form="form"

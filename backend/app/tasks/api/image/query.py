@@ -6,12 +6,24 @@ v3.0.0 Phase N 拆分: 从 image.py 抽离
 - 职责: 列表查询 (分页) + 单图详情
 - 包含 v2.5.17 修复: 批量补齐 detection/segmentation 的"实际标注数"
   (bbox_count / has_mask 字段供前端「去标」按钮使用)
+
+v3.5.0 新增: 轻量级 list_ids 接口
+- 解决标注工作台批量操作时被 100 张限制的问题
+- 仅返回 image id 数组 + total, 避免大量 join/序列化
+- 上限 max_ids (默认 2000) 防止极端数据集返回过大
+
+v3.6.1 修复: status 参数支持多状态 IN 查询
+- 背景: 标注工作台「已人工标注」状态卡聚合显示 human_confirmed + human_corrected
+- 旧实现只支持 Image.status == status 单值, 传 "human_confirmed,human_corrected" 永远不匹配
+- 新实现: status 含逗号时, 走 Image.status.in_([...])
+- 'unqualified' 仍走 quality_flag (正交维度), 不参与 IN
 """
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.database import get_db
 from app.tasks.model.image import Image
@@ -23,6 +35,39 @@ from app.middleware.http.auth import get_current_user
 
 # query 独立 router
 router = APIRouter()
+
+
+def _apply_status_filter(stmt: Select, status: Optional[str]) -> Select:
+    """根据 status 参数为 SQL 加上过滤条件
+
+    行为:
+    - 空/None: 不过滤
+    - 包含 'unqualified': 走 quality_flag 维度 (正交于 status)
+    - 单个值: Image.status == status, 同时排除不合格图
+    - 多个值 (逗号分隔): Image.status.in_([...]), 同时排除不合格图
+
+    v3.6.1 新增: 多状态 IN 查询, 支持前端 "已人工标注" = human_confirmed + human_corrected
+    """
+    if not status:
+        return stmt
+    parts = [s.strip() for s in status.split(",") if s.strip()]
+    if not parts:
+        return stmt
+    if "unqualified" in parts:
+        # quality_flag 是正交维度, 不能与其他 status 混用
+        # 若同时存在, 仅取第一个 unqualified, 其它忽略
+        return stmt.where(Image.quality_flag == "unqualified")
+    if len(parts) == 1:
+        stmt = stmt.where(Image.status == parts[0])
+    else:
+        stmt = stmt.where(Image.status.in_(parts))
+    # 排除不合格图 (与 list 语义保持一致, 避免 workbench 加载到不合格图)
+    stmt = stmt.where(Image.quality_flag.is_(None))
+    return stmt
+
+
+# v3.5.0: list_ids 接口的最大返回数量 (防止一次性返回过多 ID 导致前端渲染卡顿)
+LIST_IDS_MAX = 2000
 
 
 @router.get("/list/{dataset_id}")
@@ -66,11 +111,8 @@ async def list_images(
     # - 不合格图: quality_flag != null → 排除
     # - 人工确认/修正图: status 升级到 human_confirmed/corrected → 已被 status 过滤排除
     # - 这保证了"待标注队列"中每张图都是真正未处理过的, 防止重复标注
-    if status == "unqualified":
-        base = base.where(Image.quality_flag == "unqualified")
-    elif status:
-        base = base.where(Image.status == status)
-        base = base.where(Image.quality_flag.is_(None))
+    # v3.6.1: status 支持多状态 (e.g. "human_confirmed,human_corrected")
+    base = _apply_status_filter(base, status)
 
     # 合并 exclude_id + exclude_ids, 统一用 NOT IN
     exclude_set: set = set()
@@ -254,4 +296,74 @@ async def get_image_detail(
         "reject_reason": img.reject_reason,
         "rejected_by": img.rejected_by,
         "rejected_at": img.rejected_at.isoformat() if img.rejected_at else None,
+    }
+
+
+@router.get("/ids/{dataset_id}")
+async def list_image_ids(
+    dataset_id: int,
+    status: Optional[str] = Query(
+        default=None,
+        description="按 status 过滤 (与 /list 语义一致: 'unqualified' 走 quality_flag, 其它按 Image.status, 并排除不合格)",
+    ),
+    order: str = Query(
+        default="desc",
+        description="排序方向: 'asc' (id 升序, 最旧优先) / 'desc' (id 降序, 最新优先, 与 /list 默认一致)",
+    ),
+    max_ids: int = Query(
+        default=LIST_IDS_MAX,
+        ge=1,
+        le=LIST_IDS_MAX,
+        description=f"最多返回的 id 数量, 上限 {LIST_IDS_MAX}",
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    v3.5.0 新增: 轻量级 id 列表接口
+
+    背景:
+      - 旧 /list 接口 page_size 上限通常 100, 无法支撑批量操作
+      - 工作台批量操作 (全选 / 批量清除 / 批量标记不合格) 需要完整的 id 集合
+      - 完整字段 (filename/width/ai_prediction...) 对批量操作无价值, 仅 ID + total 即可
+
+    语义对齐 list_images:
+      - status='unqualified' → 查 quality_flag='unqualified'
+      - 其它 status 值 → 查 Image.status, 同时排除不合格图
+      - 排序默认 desc (最新优先), 与 /list 一致, 保持用户视觉习惯
+
+    性能优化:
+      - 仅 select(Image.id), 不查其他列, 避免 ORM 加载完整 Image 对象
+      - 一次返回 total, 前端可直接展示"共 N 张"标签
+      - max_ids 兜底, 防止极端数据集 (10w+ 图) 一次性返回过大导致前端卡顿
+    """
+    dataset = await db.get(Dataset, dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, dataset)
+
+    base = select(Image.id).where(Image.dataset_id == dataset_id)
+    # v3.6.1: 与 list_images 保持一致, 支持多状态 IN 查询
+    base = _apply_status_filter(base, status)
+
+    # total (在 limit 之前, 与 /list 语义一致: total 是真实总数, 不是被 max_ids 截断的数)
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    # 排序 + 截断
+    order_col = Image.id.desc() if order == "desc" else Image.id.asc()
+    stmt = base.order_by(order_col).limit(max_ids)
+    rows = (await db.execute(stmt)).scalars().all()
+    items = [int(x) for x in rows]
+    truncated = total > len(items)
+
+    return {
+        "items": items,
+        "total": total,
+        "max_ids": max_ids,
+        "order": order,
+        "truncated": truncated,
+        "status_filter": status,
     }

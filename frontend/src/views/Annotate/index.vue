@@ -20,7 +20,9 @@
  *   · useAnnotationStatusFilter (状态筛选, localStorage 持久化)
  *   · useAnnotationKeyboard (页面级快捷键: → / ← / Enter / u / h)
  * - 批量操作 → AnnotationBatchBar.vue + annotationApi.clear / batchMarkUnqualified
- * - AI 已标图片 → 「确认修正」/「重新标注」双路径 (ClassificationPanel)
+ * - AI 已标图片顶部提示 → 展示 AI 预标注类型 (ClassificationPanel alert)
+ *   · 类别确认由候选行「确认此标签」按钮
+ *   · 类别修正由「或选择其他类别」下拉
  * - 修正历史 → CorrectionHistoryDialog (从 /annotations/correction-history/{id} 拉数据)
  */
 import { ref, onMounted, onBeforeUnmount, watch, computed } from 'vue'
@@ -289,42 +291,19 @@ watch(taskTypeFilter, (newVal) => {
 })
 
 /**
- * v3.5.0: 状态筛选变化 → 重新拉取当前状态的图 + 清空选中
- * - 用户点击 AnnotationStatusCards 卡片切换状态时触发
- * - 后端 imageApi.list 已支持 status= 与多状态 CSV 过滤
- * - 重新拉列表 (用于批量操作 / 全选) + 自动跳到该状态第一张图
+ * v3.5.0 P1-1 优化: 状态切换后默认跳到该状态第一张
+ * - 旧: watch(statusFilter) → loadNext(), loadNext 用历史栈 exclude, 常跳到第 2/3 张
+ * - 新: watch(statusFilter) → refreshViewList() (拉全量 id 供批量) + loadFirstOfStatus() (跳第一张)
  * - 切换 dataset 时 statusFilter 不重置, 用户的筛选偏好跨 dataset 保留
+ * - selectedIds 在状态切换时清空, 与新状态的图不重叠
  */
 watch(statusFilter, async () => {
   selectedIds.value = []
   if (datasetId.value) {
     await refreshViewList()
-    loadNext()
+    await loadFirstOfStatus()
   }
 })
-
-/**
- * v3.5.0: 拉取当前 statusFilter 下的图片列表 (用于批量操作)
- * - 仅在用户切换状态筛选时调用, 不在每次 loadNext 调用 (避免冗余请求)
- * - 拉取时使用后端 page_size=100 (批量操作单次最多操作 100 张)
- * - 失败时静默, viewImageList 保持空数组 (批量操作按钮自动 disabled)
- */
-async function refreshViewList() {
-  if (!datasetId.value) {
-    viewImageList.value = []
-    return
-  }
-  try {
-    const resp: any = await imageApi.list(datasetId.value, {
-      status: apiStatusParam.value,
-      page: 1,
-      page_size: 100,
-    })
-    viewImageList.value = resp?.items || []
-  } catch {
-    viewImageList.value = []
-  }
-}
 
 watch(datasetId, async (v) => {
   if (!v) return
@@ -491,6 +470,16 @@ const allUnknown = computed(() => {
  * 不动 historyCursor, 由调用方控制
  */
 const fillImage = (item: any) => {
+  // v3.6.1: 支持 fillImage(null), 用于「该状态无图」时清空所有 image 派生状态
+  // - 调用方: useAnnotateNav.loadFirstOfStatus (无图分支)
+  // - 行为: 清 image / candidates / bboxList, 不触发 detection/segmentation 详情加载
+  if (!item) {
+    image.value = null
+    candidates.value = []
+    bboxList.value = []
+    revokeMaskUrl()
+    return
+  }
   image.value = item
   const aiPred = item.ai_prediction
   if (aiPred && Array.isArray(aiPred.top5)) {
@@ -516,7 +505,7 @@ const fillImage = (item: any) => {
 // - 之前位置 (在文件上方) 会触发 TS2448 "Block-scoped variable used before its declaration"
 const {
   historyIds, historyCursor, noMore, canGoPrev,
-  loadNext, loadPrev, loadSpecificImage, viewDataset,
+  loadNext, loadPrev, loadSpecificImage, loadFirstOfStatus, viewDataset,
   resetHistory, cleanup: navCleanup,
 } = useAnnotateNav({
   image, datasetId,
@@ -627,17 +616,18 @@ const submit = async (labelId: number, labelName: string, isConfirm: boolean, co
 }
 
 // ============== v3.5.0: 批量操作 + AI 修正事件 + 修正历史 (抽离到 useAnnotationBatch composable) ==============
-// 状态自管 (viewImageList / selectedIds / batchOperating / historyDialogVisible),
+// 状态自管 (viewImageList / viewTotal / viewTruncated / selectedIds / batchOperating / historyDialogVisible),
 // 父组件通过返回的 ref + 方法与子组件交互, 保持单向数据流
+// v3.5.0 P0-2: refreshViewList 改由 composable 内部调用 listIds, 不再从父组件传入
 const {
-  viewImageList, selectedIds, batchOperating, historyDialogVisible, statusLabel,
+  viewImageList, viewTotal, viewTruncated, selectedIds, batchOperating, historyDialogVisible, statusLabel,
+  refreshViewList,
   onBatchClear, onBatchMarkUnqualified,
   onSelectAll, onClearSelection,
-  onConfirmCorrection, onReAnnotate,
   openHistoryDialog, onRevertedFromHistory,
 } = useAnnotationBatch({
-  image, datasetId, statusFilter,
-  refreshStats, refreshViewList, loadNext, submit,
+  image, datasetId, statusFilter, apiStatusParam,
+  refreshStats, loadNext, submit,
 })
 
 // ============== v3.5.0: 页面级键盘快捷键 ==============
@@ -769,9 +759,12 @@ useAnnotationKeyboard({
       @status-filter-change="(v: any) => setStatusFilter(v)"
     />
 
-    <!-- v3.5.0: 批量操作条 (页面私有子组件, 仅在有图时显示) -->
+    <!-- v3.5.0: 批量操作条 (页面私有子组件, 仅在有图时显示)
+         v3.5.0 P0-2: 展示「已加载/总数」, 超过 2000 张时显示截断提示 -->
     <AnnotationBatchBar
       :total-in-view="viewImageList.length"
+      :view-total="viewTotal"
+      :view-truncated="viewTruncated"
       :selected-count="selectedIds.length"
       :status-label="STATUS_FILTER_LABEL[statusFilter]"
       :batch-operating="batchOperating"
@@ -868,8 +861,6 @@ useAnnotationKeyboard({
           @view-dataset="viewDataset"
           @mark-unqualified="onMarkUnqualified"
           @unmark-unqualified="onUnmarkUnqualified"
-          @confirm-correction="onConfirmCorrection"
-          @re-annotate="onReAnnotate"
         />
         <!-- v2.5.14: 移除 @undo, @redo, @clear-draft, @cancel 监听
              撤销、重做、清空 改为 DetectionPanel 直接调 detAnnotRef 子组件方法

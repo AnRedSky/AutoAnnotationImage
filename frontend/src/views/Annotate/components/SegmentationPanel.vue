@@ -34,11 +34,12 @@
   <el-card class="op-card" title="分割操作面板">
     <!-- v3.5.0: AI 已标图片专用「确认修正 / 重新标注」操作区
          - 仅在 image.status === 'ai_labeled' && initialMaskUrl 存在时显示
-         - 分割场景: AI 预测 mask 已加载到画布, 用户可一键确认或清空重画 -->
+         - 分割场景: AI 预测 mask 已加载到画布, 用户可一键确认或清空重画
+         - v3.6.0 升级: 弹窗显示「AI mask 类别 + 画笔类别」, 用户选具体类别确认 -->
     <div v-if="image && image.status === 'ai_labeled' && initialMaskUrl" class="ai-correction-bar">
       <el-alert
         type="info" :closable="false" show-icon
-        title="该图已由 AI 预标注 (mask 已加载), 请选择下一步:"
+        :title="`该图已由 AI 预标注 (mask 已加载${aiBrushCategoryLabel ? ', 类别: ' + aiBrushCategoryLabel : ''}), 请选择具体类别进行确认修正:`"
         style="margin-bottom: 8px;"
       />
       <div style="display: flex; gap: 8px;">
@@ -46,7 +47,7 @@
           type="success" size="default" :icon="Check"
           style="flex: 1;"
           :disabled="annotatorSaving"
-          @click="emit('confirm-correction')"
+          @click="openConfirmCorrectionDialog"
         >
           确认修正
         </el-button>
@@ -195,13 +196,31 @@
         去数据集详情浏览全部图片
       </el-link>
     </div>
+
+    <!-- v3.6.0: AI 修正类别选择弹窗
+         - 分割场景: 顶部展示 mask 类别 + 画笔当前类别
+         - 下方下拉选择最终 mask 类别 (单类分割)
+         - 父组件处理 confirm-correction 事件 (含 categoryId/labelName) -->
+    <AICorrectionCategoryDialog
+      v-model="correctionDialogVisible"
+      task-type="segmentation"
+      :ai-top1-label="aiTop1Label"
+      :ai-top1-confidence="null"
+      :ai-candidates="[]"
+      :categories="categories"
+      :default-category-id="aiBrushCategoryId"
+      :existing-summary="existingSummary"
+      @confirm="onDialogConfirm"
+    />
   </el-card>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight, Refresh } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
+// v3.6.0: AI 修正类别选择弹窗 (与 Classification/Detection 共享)
+import AICorrectionCategoryDialog from '@/components/annotation-business/AICorrectionCategoryDialog.vue'
 
 interface Category { id: number; name: string }
 interface Image {
@@ -243,7 +262,8 @@ const emit = defineEmits<{
   (e: 'mark-unqualified', reason: string, customText: string): void
   (e: 'unmark-unqualified'): void
   // v3.5.0: AI 已标图片「确认修正」/「重新标注」双路径
-  (e: 'confirm-correction'): void
+  // v3.6.0: confirm-correction 改为 (categoryId, labelName) 形式, 弹窗返回值
+  (e: 'confirm-correction', categoryId: number, labelName: string): void
   (e: 're-annotate'): void
 }>()
 
@@ -255,6 +275,41 @@ const DET_PALETTE = [
 function catColor(catId: number | null | undefined): string {
   if (catId == null) return '#909399'
   return DET_PALETTE[Math.abs(Number(catId)) % DET_PALETTE.length]
+}
+function catName(catId: number | null | undefined): string {
+  if (catId == null) return ''
+  const c = props.categories.find((x) => x.id === catId)
+  return c ? c.name : `cls_${catId}`
+}
+
+// ============== v3.6.0: AI 修正类别选择弹窗 ==============
+// 分割场景: AI 已标图加载了 mask, 弹窗顶部展示「画笔当前类别」, 下方下拉选最终 mask 类别
+// 注意: 分割任务没有「AI top1」语义 (单类 mask), aiTop1Label 借用画笔类别名作为推荐
+const correctionDialogVisible = ref(false)
+// 画笔当前选中的类别 id (子组件 segAnnotRef.brushCategoryId)
+const aiBrushCategoryId = computed<number | null>(() => {
+  return (props.segAnnotRef?.brushCategoryId ?? null) as number | null
+})
+// 画笔类别的可读名 (e.g. "道路")
+const aiBrushCategoryLabel = computed(() => {
+  const id = aiBrushCategoryId.value
+  if (id == null) return ''
+  return catName(id) || `cls_${id}`
+})
+const aiTop1Label = computed(() => aiBrushCategoryLabel.value || null)
+const existingSummary = computed(() => {
+  if (props.initialMaskUrl) {
+    return 'mask 已加载'
+  }
+  return ''
+})
+
+function openConfirmCorrectionDialog() {
+  correctionDialogVisible.value = true
+}
+function onDialogConfirm(categoryId: number, labelName: string) {
+  correctionDialogVisible.value = false
+  emit('confirm-correction', categoryId, labelName)
 }
 
 // ============== v3.0.0: 不合格标记本地状态 ==============

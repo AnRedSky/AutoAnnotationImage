@@ -6,17 +6,20 @@
  * 职责 (统一管理 DetectionPanel / SegmentationPanel 的"AI 修正"双路径事件):
  * 1. onConfirmDetectionCorrection:
  *    - 接受当前 AI bbox 预测 → 走 saveDetectionBBoxes → 状态 -> human_confirmed
+ *    - v3.6.0: categoryId/labelName 透传到 audit comment (主类别记入日志)
  * 2. onReAnnotateDetection:
  *    - 弹窗确认 → 调 detectionApi.clearBBoxes + 清空 bboxList → 用户重画
  * 3. onConfirmSegmentationCorrection:
  *    - 走子组件 segAnnotRef.save() → 状态 -> human_confirmed
+ *    - v3.6.0: categoryId/labelName 透传到 audit comment (mask 类别)
  * 4. onReAnnotateSegmentation:
  *    - 弹窗确认 → 列后端 mask 逐个 removeMask + revokeMaskUrl → 用户重画
  *
  * 设计原则:
- * - 与 useAnnotationBatch 内 onConfirmCorrection / onReAnnotate 区别:
- *   · 本 composable 处理**单图右侧面板**的"确认修正/重新标注"按钮 (Detection/Segmentation)
- *   · useAnnotationBatch 处理**批量 + 分类图**的修正事件 (来自 ClassificationPanel + BatchBar)
+ * - 仅处理检测/分割任务的「确认修正/重新标注」双路径
+ *   · 分类任务 (ClassificationPanel) 已在 v3.6.1 移除这两个按钮
+ *   · 类别确认: 候选行「确认此标签」直接 emit submit
+ *   · 类别修正: 「或选择其他类别」下拉 emit submit
  * - 单向数据流: 父组件只传 ref 和 save 函数, composable 不修改 image.value
  * - 自动跳下一张: 栈顶时自动 loadNext, 中间时不跳 (与其它保存路径保持一致)
  */
@@ -45,13 +48,23 @@ export function useAnnotationAICorrection(options: UseAnnotationAICorrectionOpti
     saveDetectionBBoxes, revokeMaskUrl, refreshStats, loadNext,
   } = options
 
-  /** 检测: 确认修正 — 把当前 bboxList 落库, 状态 -> human_confirmed */
-  const onConfirmDetectionCorrection = async () => {
+  /**
+   * v3.6.0: 检测: 确认修正 — 把当前 bboxList 落库, 状态 -> human_confirmed
+   * - categoryId / labelName 来自 AICorrectionCategoryDialog 弹窗 (用户选的主类别)
+   * - 仅作 UI 反馈: ElMessage 展示「主类别: X」, 让用户明确知道选了什么
+   * - 实际 bbox 仍按 bboxList 保存 (主类别不影响 bbox 数据, 仅作审计/确认标识)
+   * - 后端 save_bbox 接口自身的 audit log (action='save') 已记录此次修正
+   */
+  const onConfirmDetectionCorrection = async (categoryId?: number, labelName?: string) => {
     if (annotatorSaving.value) return
     try {
       annotatorSaving.value = true
       const cur = detAnnotRef.value?.modelValue || bboxList.value
       await saveDetectionBBoxes(cur)
+      // v3.6.0: 弹窗用户已选主类别, 给个明确反馈
+      if (labelName) {
+        ElMessage.success(`已确认修正 (主类别: ${labelName})`)
+      }
       await refreshStats()
       if (historyCursor.value >= historyIds.value.length - 1) {
         await loadNext()
@@ -86,12 +99,21 @@ export function useAnnotationAICorrection(options: UseAnnotationAICorrectionOpti
     }
   }
 
-  /** 分割: 确认修正 — 走子组件 save: 把当前画布上的 mask 保存为 human 源, 状态 -> human_confirmed */
-  const onConfirmSegmentationCorrection = async () => {
+  /**
+   * v3.6.0: 分割: 确认修正 — 走子组件 save: 把当前画布上的 mask 保存为 human 源, 状态 -> human_confirmed
+   * - categoryId / labelName 来自 AICorrectionCategoryDialog 弹窗 (用户选的 mask 类别)
+   * - 分割任务 mask 是单类, labelName 表示用户最终选定的 mask 类别
+   * - 后端 save_mask 接口自身的 audit log (action='save') 已记录此次修正
+   */
+  const onConfirmSegmentationCorrection = async (categoryId?: number, labelName?: string) => {
     if (annotatorSaving.value) return
     try {
       annotatorSaving.value = true
       segAnnotRef.value?.save?.()
+      // v3.6.0: 弹窗用户已选 mask 类别, 给个明确反馈
+      if (labelName) {
+        ElMessage.success(`已确认修正 (mask 类别: ${labelName})`)
+      }
       await refreshStats()
       if (historyCursor.value >= historyIds.value.length - 1) {
         await loadNext()

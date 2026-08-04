@@ -25,45 +25,28 @@
 -->
 <template>
   <el-card class="op-card" title="AI 候选标签（Top-5）">
-    <el-empty v-if="!image && candidates.length === 0" description="请选择数据集" :image-size="80" />
-    <el-empty v-else-if="candidates.length === 0" description="该图无 AI 预测, 请直接选择其他类别" :image-size="60" />
+    <!-- v3.6.1: 防御性守卫 - 无图时只显示空状态, 不渲染候选区
+         - 修复场景: 切到「已人工标注」但无图时, 旧逻辑因 candidates 非空而渲染 Top-K
+         - 此时 image=null, candidates 来自上一张缓存, 渲染没意义 -->
+    <el-empty v-if="!image" description="当前数据集该状态下没有图片, 请切换其他状态或数据集" :image-size="80" />
+    <template v-else>
+    <el-empty v-if="candidates.length === 0" description="该图无 AI 预测, 请直接选择其他类别" :image-size="60" />
     <!-- 关键简化: 基础模型 (ImageNet 预训练) 输出 = 全部 Top-5 都不在项目类目
          -> 整组归一为「未知」, 不再分 5 个候选 + 各自置信度 -->
     <div v-else-if="allUnknown" class="model-confidence-bar"
       style="text-align: center; padding: 24px 12px; border: 1px dashed #f56c6c; border-radius: 6px; background: #fef0f0;">
       <el-tag type="danger" size="large" effect="dark">未知</el-tag>
     </div>
-    <!-- v3.5.0: AI 已标图片专用「确认修正 / 重新标注」操作区
+    <!-- v3.6.1: AI 已标图片专用提示区
          - 仅在 image.status === 'ai_labeled' 时显示
-         - 提供更明确的双路径 UI, 与「强制采用」(已实现) 并行存在
-         - 「确认修正」: 接受 AI top1, 显式走 confirm 流 (带 audit comment)
-         - 「重新标注」: 清空 AI 预测, 把图回到 pending 状态 (即当作新图对待) -->
+         - 仅保留文本提示 (展示 AI top1 类别 + 置信度), 不再提供按钮
+         - 类别确认由下方候选行的「确认此标签」入口承担
+         - 修正入口由「或选择其他类别」下拉承担 -->
     <div v-if="image && image.status === 'ai_labeled' && !allUnknown" class="ai-correction-bar">
       <el-alert
         type="info" :closable="false" show-icon
-        title="该图已由 AI 预标注, 请选择下一步:"
-        style="margin-bottom: 8px;"
+        :title="aiCorrectionAlertTitle"
       />
-      <div style="display: flex; gap: 8px;">
-        <el-button
-          type="success" size="default" :icon="Check"
-          style="flex: 1;"
-          :disabled="!aiTop1Label || !findCategory(aiTop1Label)"
-          @click="onConfirmCorrection"
-        >
-          确认修正
-          <span v-if="aiTop1Label && findCategory(aiTop1Label)" class="ai-correction-bar__hint">
-            ({{ findCategory(aiTop1Label)!.name }})
-          </span>
-        </el-button>
-        <el-button
-          type="warning" size="default" plain :icon="Refresh"
-          style="flex: 1;"
-          @click="onReAnnotate"
-        >
-          重新标注
-        </el-button>
-      </div>
     </div>
 
     <div v-for="(c, idx) in candidates" v-show="!allUnknown" :key="`${c.label}-${idx}`" class="model-confidence-bar">
@@ -85,10 +68,6 @@
           <el-button size="small" type="primary" :icon="Check"
             @click="submitClick(findCategory(c.label)!.id, c.label, true)">
             确认此标签
-          </el-button>
-          <el-button size="small"
-            @click="submitClick(findCategory(c.label)!.id, c.label, false)">
-            强制采用
           </el-button>
         </template>
         <el-tag v-else type="danger" size="small">未知</el-tag>
@@ -178,12 +157,17 @@
         去数据集详情浏览全部图片
       </el-link>
     </div>
+
+    <!-- v3.6.1: 顶部仅保留 AI 预标注类型提示, 不再渲染弹窗
+         - 类别确认由下方候选行「确认此标签」承担
+         - 修正入口由「或选择其他类别」下拉承担 -->
+    </template>
   </el-card>
 </template>
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
-import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight, Refresh } from '@element-plus/icons-vue'
+import { Check, ArrowLeft, View, RefreshLeft, Warning, ArrowRight } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
 // v3.4.0: 人工修正方案 - 复用 common/annotation-business 公共组件
 import CorrectionDiffBadge from '@/components/common/CorrectionDiffBadge.vue'
@@ -215,9 +199,6 @@ const emit = defineEmits<{
   // v3.0.0: 不合格标记事件 (单向数据流, 由父组件处理 API 调用)
   (e: 'mark-unqualified', reason: string, customText: string): void
   (e: 'unmark-unqualified'): void
-  // v3.5.0: AI 已标图片「确认修正」/「重新标注」双路径操作
-  (e: 'confirm-correction', categoryId: number, label: string): void
-  (e: 're-annotate'): void
 }>()
 
 function findCategory(label: string): Category | undefined {
@@ -239,6 +220,16 @@ const aiTop1Label = computed(() => {
   // candidates 里第一个 label 即 AI top1
   return props.candidates?.[0]?.label || null
 })
+// v3.6.0: AI top1 置信度 (单独 computed, 供弹窗显示)
+const aiTop1Confidence = computed(() => {
+  return props.candidates?.[0]?.confidence ?? null
+})
+// v3.6.0: AI top1 在项目类目里的 id (可能为 null, 表示 top1 不在项目类目)
+const aiTop1CategoryId = computed<number | null>(() => {
+  if (!aiTop1Label.value) return null
+  const c = props.categories.find((x) => x.name === aiTop1Label.value)
+  return c ? c.id : null
+})
 const otherCategoryName = computed(() => {
   const c = props.categories.find((x) => x.id === otherCategoryId.value)
   return c?.name || null
@@ -255,20 +246,19 @@ function onCategoryChange(id: number) {
   }
 }
 
-// ============== v3.5.0: 「确认修正」/「重新标注」双路径操作 ==============
-// 「确认修正」: 接受 AI top1, 走 confirm 流 + audit comment, 与 click "确认此标签" 行为一致
-//  - 区别: emit('confirm-correction') 事件, 父组件会带上 "已审阅 AI 预测" 标识的 comment
-// 「重新标注」: 不修改 status, 只触发父组件跳到"选择其他类别"工作流 (实际由父组件自动选中下拉)
-function onConfirmCorrection() {
-  const top1 = props.candidates?.[0]?.label
-  if (!top1) return
-  const cat = findCategory(top1)
-  if (!cat) return
-  emit('confirm-correction', cat.id, cat.name)
-}
-function onReAnnotate() {
-  emit('re-annotate')
-}
+// ============== v3.6.1: AI 已标图片顶部提示 ==============
+// 仅显示当前 AI 预标注的 top1 类别 + 置信度
+// 类别确认由下方候选行的「确认此标签」承担
+// 修正入口由「或选择其他类别」下拉承担
+const aiCorrectionAlertTitle = computed(() => {
+  if (aiTop1Label.value) {
+    const confStr = aiTop1Confidence.value != null
+      ? ` ${(aiTop1Confidence.value * 100).toFixed(1)}%`
+      : ''
+    return `当前 AI 预标注: ${aiTop1Label.value}${confStr}`
+  }
+  return '当前图已由 AI 预标注'
+})
 
 // ============== v3.0.0: 不合格标记本地状态 ==============
 const localRejectReason = ref<string>('')
@@ -315,22 +305,13 @@ watch(() => props.image?.id, () => {
   color: #f56c6c;
 }
 
-/* v3.5.0: AI 已标图片「确认修正/重新标注」操作区
-   - 顶部蓝色提示条 + 双按钮主行动, 视觉权重高于单条候选
-   - 区别于「强制采用」单按钮: 这里明确告诉用户有 2 个路径 */
+/* v3.6.1: AI 已标图片顶部提示区
+   - 仅显示 AI 预标注的 top1 类别 + 置信度, 不再提供按钮
+   - 浅灰背景与下方候选列表做视觉分层 */
 .ai-correction-bar {
-  padding: 10px 0 8px;
-  border-bottom: 1px dashed #dcdfe6;
-  margin-bottom: 4px;
   background: #f5f7fa;
   border-radius: 4px;
-  padding: 10px 12px;
-  margin: 4px -8px 8px;
-}
-.ai-correction-bar__hint {
-  font-weight: 400;
-  font-size: 12px;
-  opacity: 0.9;
-  margin-left: 2px;
+  padding: 0;
+  margin: 0 -8px 8px;
 }
 </style>

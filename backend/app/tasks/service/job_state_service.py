@@ -36,6 +36,7 @@ v3.0.0 Phase 3 新增
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -231,6 +232,151 @@ class JobStateService:
             return await JobStateService.get_snapshot(
                 task_id, db, include_history=include_history
             )
+
+    # ============== 缓存层 (v3.5.0 Phase T6: 减少 SSE 1Hz DB 压力) ==============
+
+    # 缓存 TTL: 1.5s
+    # - 训练中 worker 每 epoch 结束才写库 (epoch 间隔通常 ≥ 1.5s), TTL=1.5s 命中率高
+    # - PENDING 状态 (worker 未启动) 5s 兜底轮询, 缓存命中后等于零 DB
+    # - 终态: SSE 推完即 break, 缓存 1.5s 后续请求仍可命中 (避免下次连接查 DB)
+    SNAPSHOT_CACHE_TTL_S = 1.5
+
+    @staticmethod
+    def _make_db_version(snap: JobStateSnapshot) -> str:
+        """生成 'DB 行指纹' (用于方案 3: 行 version 跳过推送)
+
+        由 (state, progress, current_epoch, history_len, message) 拼接
+        - 任一字段变化 → version 变化 → SSE 客户端需推送
+        - PENDING 空 message 与终态空 message 区分: 加 '|' 防碰撞
+        """
+        history_len = len(snap.history) if isinstance(snap.history, list) else 0
+        return (
+            f"{snap.state}|{round(snap.progress, 1)}|"
+            f"{snap.current_epoch}|{history_len}|{snap.message or ''}"
+        )
+
+    @staticmethod
+    def _snapshot_to_cache_dict(snap: JobStateSnapshot) -> dict:
+        """JobStateSnapshot → JSON 可序列化 dict"""
+        return {
+            "task_id": snap.task_id,
+            "state": snap.state,
+            "progress": snap.progress,
+            "message": snap.message,
+            "current_epoch": snap.current_epoch,
+            "total_epochs": snap.total_epochs,
+            "started_at": snap.started_at.isoformat() if snap.started_at else None,
+            "finished_at": snap.finished_at.isoformat() if snap.finished_at else None,
+            "error": snap.error,
+            "history": snap.history,
+            "source": snap.source,
+            "db_version": JobStateService._make_db_version(snap),
+        }
+
+    @staticmethod
+    def _snapshot_from_cache_dict(data: dict, task_id: str) -> JobStateSnapshot:
+        """JSON dict → JobStateSnapshot (+ 附加 _db_version 供 SSE 客户端使用)"""
+        started_at = None
+        if data.get("started_at"):
+            try:
+                started_at = datetime.fromisoformat(data["started_at"])
+            except (ValueError, TypeError):
+                started_at = None
+        finished_at = None
+        if data.get("finished_at"):
+            try:
+                finished_at = datetime.fromisoformat(data["finished_at"])
+            except (ValueError, TypeError):
+                finished_at = None
+        snap = JobStateSnapshot(
+            task_id=task_id,
+            state=data["state"],
+            progress=float(data["progress"]),
+            message=data.get("message") or "",
+            current_epoch=data.get("current_epoch"),
+            total_epochs=data.get("total_epochs"),
+            started_at=started_at,
+            finished_at=finished_at,
+            error=data.get("error"),
+            history=data.get("history"),
+            source=data.get("source", "cache"),
+        )
+        # 附加字段: SSE 客户端读取用于推送去重
+        # 不在 dataclass 字段中 (避免影响外部使用), 通过 setattr 动态绑定
+        snap._db_version = data.get("db_version", "")  # type: ignore[attr-defined]
+        return snap
+
+    @staticmethod
+    async def get_snapshot_with_cache(
+        task_id: str,
+        *,
+        include_history: bool = False,
+        cache_ttl_s: Optional[float] = None,
+    ) -> JobStateSnapshot:
+        """Redis 缓存的 snapshot 查询 (SSE 端点用, v3.5.0 新增)
+
+        流程:
+        1) 先查 Redis (key: job_state_snapshot:{task_id})
+        2) 命中 → 反序列化直接返回, 跳过 DB
+        3) 未命中 → 调 get_snapshot_with_fresh_db, 写回缓存
+        4) Redis 异常 → 降级到 get_snapshot_with_fresh_db (不影响主流程)
+
+        v3.5.0 Phase T6: 把 SSE 端点 1Hz 循环的 DB 压力从 1.0 QPS/task 降到
+        - 缓存命中时: 0 DB (纯 Redis 读)
+        - N 客户端订阅同一 taskId: 仍只查 1 次 DB (Redis 共享)
+        - 平均 QPS 收益: N→1 (按客户端数线性降低)
+
+        Args:
+            task_id: Celery task UUID
+            include_history: 是否包含 history 数组 (默认 False, history 在详情 dialog 才需要)
+            cache_ttl_s: 自定义 TTL, 默认 SNAPSHOT_CACHE_TTL_S=1.5s
+        """
+        ttl = cache_ttl_s if cache_ttl_s is not None else JobStateService.SNAPSHOT_CACHE_TTL_S
+        cache_key = f"job_state_snapshot:{task_id}"
+
+        # 1) 尝试读缓存 (Redis 是同步客户端, 放线程池避免阻塞 event loop)
+        try:
+            cached_raw = await asyncio.to_thread(redis_client.get, cache_key)
+            if cached_raw:
+                data = json.loads(cached_raw)
+                return JobStateService._snapshot_from_cache_dict(data, task_id)
+        except Exception:
+            # Redis 故障 / 解析失败 → 降级查 DB
+            pass
+
+        # 2) 缓存未命中 → 查 DB (开新 session, 与 SSE 长连接隔离)
+        snap = await JobStateService.get_snapshot_with_fresh_db(
+            task_id, include_history=include_history
+        )
+
+        # 3) 写回缓存 (best-effort, 失败不影响返回)
+        try:
+            payload = JobStateService._snapshot_to_cache_dict(snap)
+            await asyncio.to_thread(
+                redis_client.setex, cache_key, int(ttl),
+                json.dumps(payload, ensure_ascii=False, default=str),
+            )
+        except Exception:
+            pass
+
+        return snap
+
+    @staticmethod
+    async def invalidate_snapshot_cache(task_id: str) -> None:
+        """主动失效缓存 (worker 写库后调用, 避免 1.5s 内仍读旧值)
+
+        当前 worker 通过 transition_to_state 写库, 本方法为预留入口.
+        典型调用方: job_state_service.transition_to_state commit 后调一次.
+        """
+        if not task_id:
+            return
+        try:
+            await asyncio.to_thread(
+                redis_client.delete, f"job_state_snapshot:{task_id}"
+            )
+        except Exception:
+            pass
+
 
     # ============== 状态机转移 (统一入口) ==============
 

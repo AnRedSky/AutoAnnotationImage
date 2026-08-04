@@ -1,15 +1,26 @@
 /**
  * useAnnotationBatch.ts
  * ===================================================
- * 标注工作台 - 批量操作 + 修正历史 + AI 修正事件 composable (v3.5.0 新增)
+ * 标注工作台 - 批量操作 + 修正历史 composable (v3.5.0 新增, v3.6.1 精简)
  *
  * 职责:
  * 1. 封装批量操作: 批量清除标注 / 批量标记不合格 / 全选 / 清空选择
  * 2. 封装修正历史弹窗: 打开/关闭/恢复 AI 预测
- * 3. 封装 AI 已标图片「确认修正」/「重新标注」事件
+ *
+ * v3.5.0 P0-2 修复: refreshViewList 改用 listIds 轻量接口
+ *   - 旧: imageApi.list(... page_size=100), 100 张上限, 超出 100 无法全选
+ *   - 新: imageApi.listIds(... max_ids=2000), 一次拿到该 status 下完整 id 列表
+ *   - viewImageList 改造为 { id } 对象数组 (只装 id, 不装其他字段, 节省内存)
+ *   - 实际总数由 viewTotal 单独维护, 供顶部"共 N 张"展示
+ *   - 极端数据集 (总 > 2000) 走 truncated=true 兜底, UI 可提示"超过 2000 张, 仅取前 2000"
+ *
+ * v3.6.1 精简:
+ *   - 移除 onConfirmCorrection / onReAnnotate (分类任务顶部按钮已取消)
+ *   - 类别确认由 ClassificationPanel 候选行「确认此标签」直接 emit submit
+ *   - 类别修正由 ClassificationPanel 「或选择其他类别」下拉 emit submit
  *
  * 设计原则:
- * - 单一职责: 只管批量/历史/AI 修正事件, 不管切图/标注保存
+ * - 单一职责: 只管批量/历史, 不管切图/标注保存
  * - 状态在 composable 内自管, 父组件只通过返回的 ref/方法交互
  * - 复用现有 annotationApi (clear / batchMarkUnqualified / correctionHistory / revertToAi)
  *
@@ -17,37 +28,40 @@
  *   - image: 当前图 ref
  *   - datasetId: 当前 datasetId ref
  *   - statusFilter: 当前状态筛选 ref
- *   - categories: 当前类目 ref
  *   - refreshStats: 父组件的 stats 刷新函数
- *   - refreshViewList: 父组件的列表刷新函数
- *   - loadNext: 父组件的下一张图函数
- *   - submit: 父组件的标注保存函数 (供 onConfirmCorrection 复用)
- *   - imageApi: api 实例 (供重新拉详情)
+ *   - submit: 父组件的标注保存函数
+ *   - apiStatusParam: ComputedRef (父组件 useAnnotationStatusFilter 提供的 API 参数)
  */
-import { ref, computed } from 'vue'
+import { ref, computed, type Ref, type ComputedRef } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { annotationApi, imageApi } from '@/api'
-import type { Ref } from 'vue'
 import { STATUS_FILTER_LABEL, type StatusFilterValue } from './useAnnotationStatusFilter'
 
 export interface UseAnnotationBatchOptions {
   image: Ref<any>
   datasetId: Ref<number | null>
   statusFilter: Ref<StatusFilterValue>
+  apiStatusParam: ComputedRef<string | undefined>
   refreshStats: () => Promise<void>
-  refreshViewList: () => Promise<void>
   loadNext: () => Promise<void>
   submit: (labelId: number, labelName: string, isConfirm: boolean, comment?: string) => Promise<void>
 }
 
 export function useAnnotationBatch(options: UseAnnotationBatchOptions) {
   const {
-    image, datasetId, statusFilter,
-    refreshStats, refreshViewList, loadNext, submit,
+    image, datasetId, statusFilter, apiStatusParam,
+    refreshStats, loadNext, submit,
   } = options
 
   // ============== 选中与批量操作 state ==============
-  const viewImageList = ref<any[]>([])
+  // v3.5.0 P0-2 改造: viewImageList 仅装 { id }, 不再装完整 image 字段
+  // - 旧实现: imageApi.list 返回完整 image 对象, 100 张上限
+  // - 新实现: imageApi.listIds 返回 id 数组, 2000 张上限, 内存占用降一个量级
+  const viewImageList = ref<Array<{ id: number }>>([])
+  // 后端返回的真实总数 (可能 > viewImageList.length, 例如 total=5230 / items=2000)
+  const viewTotal = ref(0)
+  // 是否被 max_ids 截断 (true 时 UI 应提示用户)
+  const viewTruncated = ref(false)
   const selectedIds = ref<number[]>([])
   const batchOperating = ref<'mark' | 'clear' | null>(null)
 
@@ -56,6 +70,42 @@ export function useAnnotationBatch(options: UseAnnotationBatchOptions) {
 
   // ============== 派生: 状态中文标签 ==============
   const statusLabel = computed(() => STATUS_FILTER_LABEL[statusFilter.value])
+
+  // ============== v3.5.0 P0-2: 拉取当前 statusFilter 下的全量 id 列表 (供批量操作) ==============
+  // 改用 listIds 轻量接口, 单次最多 2000 张 (后端硬上限)
+  // 失败时静默, viewImageList / viewTotal 保持空, 批量按钮自动 disabled
+  // viewTotal 与 viewImageList.length 可能不同 (截断时), UI 可用 viewTotal 展示"共 N 张"
+  async function refreshViewList(): Promise<void> {
+    if (!datasetId.value) {
+      viewImageList.value = []
+      viewTotal.value = 0
+      viewTruncated.value = false
+      return
+    }
+    try {
+      const resp: any = await imageApi.listIds(datasetId.value, {
+        status: apiStatusParam.value,
+        order: 'desc',
+        max_ids: 2000,
+      })
+      const items: number[] = resp?.items || []
+      viewImageList.value = items.map((id) => ({ id }))
+      viewTotal.value = Number(resp?.total || 0)
+      viewTruncated.value = !!resp?.truncated
+      if (viewTruncated.value) {
+        // 不弹强提示, 仅静默标记, 顶部 batch-bar 可按需展示
+        console.warn(
+          `[useAnnotationBatch] 该 status 共 ${viewTotal.value} 张, 已超过 listIds 上限 2000, 批量操作仅覆盖前 ${viewImageList.value.length} 张`,
+        )
+      }
+    } catch (e: any) {
+      // 失败时清空, 避免脏数据
+      viewImageList.value = []
+      viewTotal.value = 0
+      viewTruncated.value = false
+      console.error('[useAnnotationBatch] refreshViewList 失败:', e)
+    }
+  }
 
   // ============== 批量操作 ==============
   async function onBatchClear(): Promise<void> {
@@ -111,20 +161,10 @@ export function useAnnotationBatch(options: UseAnnotationBatchOptions) {
   }
 
   function onSelectAll(): void {
-    selectedIds.value = viewImageList.value.map((it: any) => it.id)
+    selectedIds.value = viewImageList.value.map((it) => it.id)
   }
   function onClearSelection(): void {
     selectedIds.value = []
-  }
-
-  // ============== AI 已标图片「确认修正」/「重新标注」 ==============
-  function onConfirmCorrection(labelId: number, labelName: string): void {
-    // 走与 submit 一样的 save 路径, 仅 comment 不同 (用于审计区分)
-    submit(labelId, labelName, true, '[AI修正-确认] 已审阅 AI 预测, 确认采纳 (top1)')
-  }
-
-  function onReAnnotate(): void {
-    ElMessage.info('请从下方「或选择其他类别」下拉中选择正确类别, 系统会自动记录与 AI 预测的差异')
   }
 
   // ============== 修正历史弹窗 ==============
@@ -150,18 +190,18 @@ export function useAnnotationBatch(options: UseAnnotationBatchOptions) {
   return {
     // state
     viewImageList,
+    viewTotal,
+    viewTruncated,
     selectedIds,
     batchOperating,
     historyDialogVisible,
     statusLabel,
     // 批量操作
+    refreshViewList,
     onBatchClear,
     onBatchMarkUnqualified,
     onSelectAll,
     onClearSelection,
-    // AI 修正事件
-    onConfirmCorrection,
-    onReAnnotate,
     // 历史
     openHistoryDialog,
     onRevertedFromHistory,
