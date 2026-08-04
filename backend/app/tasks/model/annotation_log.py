@@ -25,6 +25,9 @@ class AnnotationLog(Base):
             "ai_predict", "confirm", "correct", "reject",
             "auto_annotate_pretrained", "auto_annotate_finetuned",
             "mark_unqualified", "unmark_unqualified",
+            # 人工修正方案 (v3.4.0) 扩展: payload JSON 记录 diff / comment
+            # - revert_to_ai: 用户撤销人工修正, 状态回 ai_labeled (保留 ai_prediction)
+            "revert_to_ai",
             name="annotation_action",
         ),
         nullable=False
