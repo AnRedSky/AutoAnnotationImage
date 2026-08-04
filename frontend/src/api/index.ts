@@ -195,6 +195,24 @@ export const annotationApi = {
     reason: string
     custom_text?: string
   }) => http.post('/annotations/batch-mark-unqualified', data),
+  // v3.4.0: 人工修正方案 - comment 字段 (扩展 /save 端点, 选填)
+  // - 后端: payload.comment 写入 AnnotationLog.payload
+  saveWithComment: (data: {
+    image_id: number
+    label_id: number
+    time_spent_ms: number
+    is_confirm: boolean
+    comment?: string
+  }) => http.post('/annotations/save', data),
+  // v3.4.0: 单图完整修正历史 (含 diff)
+  correctionHistory: (imageId: number) =>
+    http.get(`/annotations/correction-history/${imageId}`),
+  // v3.4.0: 恢复 AI 预测 (撤销人工修正, 状态回 ai_labeled)
+  revertToAi: (imageId: number) =>
+    http.post(`/annotations/revert-to-ai/${imageId}`),
+  // v3.4.0: 数据集级修正统计 (修正率 / 热门修正方向 / 修正原因分布)
+  correctionStats: (datasetId: number) =>
+    http.get(`/annotations/correction-stats/${datasetId}`),
 }
 
 // ============== AI 自动标注 ==============
