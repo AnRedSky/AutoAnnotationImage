@@ -64,12 +64,23 @@
     <el-divider v-if="categories.length > 0">或选择其他类别</el-divider>
     <el-select
       v-if="categories.length > 0"
+      v-model="otherCategoryId"
       placeholder="选择其他类别（修正）" style="width: 100%;"
       filterable
       @change="onCategoryChange"
     >
       <el-option v-for="c in sortedCategories" :key="c.id" :label="c.name" :value="c.id" />
     </el-select>
+    <!-- v3.4.0: AI vs 当前 diff 徽章 + 修正原因 (仅在选择「其他类别」即修正场景下显示) -->
+    <div v-if="otherCategoryId && correctionMode" style="margin-top: 8px;">
+      <CorrectionDiffBadge
+        :ai-top1="aiTop1Label"
+        :current-label-name="otherCategoryName"
+      />
+      <div style="margin-top: 6px;">
+        <CorrectionCommentInput v-model="commentText" />
+      </div>
+    </div>
     <div style="margin-top: 8px; display: flex; gap: 8px;">
       <el-button
         style="flex: 1;"
@@ -138,9 +149,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { Check, Close, ArrowLeft, View, RefreshLeft, Warning, ArrowRight } from '@element-plus/icons-vue'
 import { REJECT_REASON_OPTIONS, getRejectReasonLabel } from '@/utils/rejectReason'
+// v3.4.0: 人工修正方案 - 复用 common/annotation-business 公共组件
+import CorrectionDiffBadge from '@/components/common/CorrectionDiffBadge.vue'
+import CorrectionCommentInput from '@/components/annotation-business/CorrectionCommentInput.vue'
 
 interface Category { id: number; name: string }
 interface Candidate { label: string; confidence: number }
@@ -160,7 +174,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'submit', categoryId: number, label: string, isFromAI: boolean): void
+  // v3.4.0: 扩展 submit 事件, 透传 comment (供后端 payload.comment 写入)
+  (e: 'submit', categoryId: number, label: string, isFromAI: boolean, comment?: string): void
   (e: 'prev'): void
   (e: 'next'): void
   (e: 'view-dataset'): void
@@ -175,12 +190,33 @@ function findCategory(label: string): Category | undefined {
 }
 
 function submitClick(categoryId: number, label: string, isFromAI: boolean) {
-  emit('submit', categoryId, label, isFromAI)
+  // AI 候选的"确认" / "强制采用"按钮, 不带 comment
+  emit('submit', categoryId, label, isFromAI, undefined)
 }
+
+// ============== v3.4.0: 「其他类别」修正模式 ==============
+// 用户从下拉选非 AI top1 类别时, 弹 diff 徽章 + 修正原因输入
+const otherCategoryId = ref<number | null>(null)
+const commentText = ref<string>('')
+const correctionMode = computed(() => !!otherCategoryId.value)
+const aiTop1Label = computed(() => {
+  // candidates 里第一个 label 即 AI top1
+  return props.candidates?.[0]?.label || null
+})
+const otherCategoryName = computed(() => {
+  const c = props.categories.find((x) => x.id === otherCategoryId.value)
+  return c?.name || null
+})
 
 function onCategoryChange(id: number) {
   const cat = props.categories.find((c) => c.id === id)
-  if (cat) emit('submit', cat.id, cat.name, false)
+  if (cat) {
+    // v3.4.0: 修正模式, 把 comment 一并透传给父
+    emit('submit', cat.id, cat.name, false, commentText.value || undefined)
+    // 提交后清空本地状态
+    otherCategoryId.value = null
+    commentText.value = ''
+  }
 }
 
 // ============== v3.0.0: 不合格标记本地状态 ==============

@@ -704,16 +704,18 @@ const {
 /**
  * 分类任务提交标注 (确认 / 修正)
  * v3.0.0: 标注保存后端会清空不合格标记, 前端需同步更新本地 image.value
+ * v3.4.0: 支持 comment 透传 (选填), 后端写入 AnnotationLog.payload.comment
  */
-const submit = async (labelId: number, labelName: string, isConfirm: boolean) => {
+const submit = async (labelId: number, labelName: string, isConfirm: boolean, comment?: string) => {
   if (!image.value) return
   const cost = Date.now() - startTs.value
   try {
-    const r: any = await annotationApi.save({
+    const r: any = await annotationApi.saveWithComment({
       image_id: image.value.id,
       label_id: labelId,
       time_spent_ms: cost,
-      is_confirm: isConfirm
+      is_confirm: isConfirm,
+      comment: comment || undefined,
     })
     ElMessage.success(
       `${isConfirm ? '确认' : '修正'}「${labelName}」成功, 耗时 ${cost}ms`
