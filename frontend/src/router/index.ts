@@ -22,8 +22,10 @@ const router = createRouter({
         { path: 'annotate/:datasetId', name: 'AnnotateWithDs', component: () => import('@/views/Annotate/index.vue'), meta: { title: '人工标注' } },
         { path: 'training', name: 'Training', component: () => import('@/views/Training/index.vue'), meta: { title: '模型训练' } },
         { path: 'models', name: 'Models', component: () => import('@/views/Models/index.vue'), meta: { title: '模型管理' } },
-        // v3.3.0: 团队管理 (全部用户可见)
-        { path: 'teams', name: 'Teams', component: () => import('@/views/Admin/Teams.vue'), meta: { title: '团队管理', subtitle: '团队管理' } },
+        // v3.3.0+: 团队管理 (全部用户可见)
+        // v3.3.1: 切换到 components 拆分的主页面 (Teams/index.vue)
+        // 旧文件 views/Admin/Teams.vue 保留 1 周作为 fallback, 1 周后可删除
+        { path: 'teams', name: 'Teams', component: () => import('@/views/Admin/Teams/index.vue'), meta: { title: '团队管理', subtitle: '团队管理' } },
         // v3.3.0: 个人中心 (全部用户可见)
         { path: 'profile', name: 'Profile', component: () => import('@/views/Profile/index.vue'), meta: { title: '个人中心', subtitle: '个人中心' } },
         // v3.3.0: 管理员功能页面 (仅 admin 可见)

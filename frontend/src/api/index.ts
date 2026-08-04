@@ -600,20 +600,64 @@ export const exportApiV2 = {
     withToken(`${http.defaults.baseURL}/export/coco-seg/${datasetId}?include_pending=${includePending}`),
 }
 
-// ============== 团队管理 (v3.3.0) ==============
+// ============== 团队管理 (v3.3.0 + v3.3.1 增强) ==============
+export interface TeamMemberItem {
+  user_id: number
+  username: string
+  email: string | null
+  role: string
+  joined_at: string | null
+}
+
+export interface TeamItem {
+  id: number
+  name: string
+  slug: string
+  description: string | null
+  owner_id: number
+  max_members: number
+  my_role: string
+  created_at: string | null
+}
+
+export interface TeamDatasetItem {
+  id: number
+  name: string
+  description: string | null
+  task_type: string
+  image_count: number
+  annotated_count: number
+  category_count: number
+  status: string
+  owner_id: number
+  owner_name: string
+  my_access: string
+}
+
 export const teamApi = {
-  list: () => http.get('/teams'),
+  list: () => http.get<{ items: TeamItem[] }>('/teams'),
   create: (data: { name: string; slug: string; description?: string; max_members?: number }) =>
     http.post('/teams', data),
   get: (id: number) => http.get(`/teams/${id}`),
+  // v3.3.1: PATCH 编辑
+  update: (id: number, data: { name?: string; description?: string; max_members?: number }) =>
+    http.patch(`/teams/${id}`, data),
   remove: (id: number) => http.delete(`/teams/${id}`),
-  listMembers: (id: number) => http.get(`/teams/${id}/members`),
+  // v3.3.1: 团队级数据集列表
+  listDatasets: (id: number) => http.get<{ items: TeamDatasetItem[] }>(`/teams/${id}/datasets`),
+  listMembers: (id: number) => http.get<{ items: TeamMemberItem[] }>(`/teams/${id}/members`),
   inviteMember: (id: number, data: { user_id: number; role?: string }) =>
     http.post(`/teams/${id}/members`, data),
   updateMemberRole: (id: number, userId: number, role: string) =>
     http.put(`/teams/${id}/members/${userId}`, { role }),
   removeMember: (id: number, userId: number) =>
     http.delete(`/teams/${id}/members/${userId}`),
+  // v3.3.1: 主动退队
+  leaveTeam: (id: number) => http.delete(`/teams/${id}/members/me`),
+  // v3.3.1: 转让所有权
+  transferOwnership: (id: number, newOwnerId: number, confirm: boolean) =>
+    http.post(`/teams/${id}/transfer`, { new_owner_id: newOwnerId, confirm }),
+  // 数据集共享
   shareDataset: (datasetId: number, teamId: number) =>
     http.post(`/teams/datasets/${datasetId}/share`, null, { params: { team_id: teamId } }),
   unshareDataset: (datasetId: number) =>

@@ -3,6 +3,10 @@ AnnotationLog ORM Model (审计) — app/tasks/model/
 ================================================
 
 **v3.0.0 Stage 2.3 迁移**: 从 app/model/annotation_log.py 迁入 tasks 应用
+
+**v3.3.1 增强**:
+  - team_id (nullable, FK→team.id) 团队级统计 (Phase L2 团队统计用)
+    写入路径: 标注/确认/修正时, 反查 image → dataset.team_id 填入
 """
 from datetime import datetime
 from sqlalchemy import String, Integer, DateTime, Enum, ForeignKey, JSON
@@ -37,6 +41,11 @@ class AnnotationLog(Base):
     time_spent_ms: Mapped[int] = mapped_column(Integer, default=0)
     payload: Mapped[dict] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # v3.3.1: 团队级统计 (ON DELETE SET NULL: 团队删除不影响审计)
+    team_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("team.id", ondelete="SET NULL"),
+        nullable=True, default=None, index=True,
+    )
 
     # Relationships
     user = relationship("User", back_populates="annotations")

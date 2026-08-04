@@ -1,11 +1,14 @@
 """
-TeamMember ORM Model — 团队成员 (v3.3.0)
-=========================================
+TeamMember ORM Model — 团队成员 (v3.3.0, v3.3.1 增强)
+=====================================================
 
 per-team 角色:
   - manager (可管理): 管理成员 + 配置数据集权限 + 编辑标注
   - editor (可编辑): 可对共享数据集进行标注
   - viewer (仅阅读): 只读
+
+v3.3.1 增强:
+  - invited_by_id  邀请溯源 (谁邀请了该成员)
 """
 from datetime import datetime
 
@@ -40,10 +43,15 @@ class TeamMember(Base):
         default="editor", nullable=False,
     )
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    # v3.3.1: 邀请溯源 (NULL = 创建者自动加入 或 旧数据)
+    invited_by_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("user.id"), nullable=True, default=None, index=True,
+    )
 
     # Relationships
     team = relationship("Team", back_populates="members")
     user = relationship("User", foreign_keys=[user_id])
+    inviter = relationship("User", foreign_keys=[invited_by_id])
 
     def can_manage(self) -> bool:
         """是否可管理 (manager)"""
