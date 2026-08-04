@@ -106,6 +106,19 @@ class TrainingJobOut(_Base):
     num_classes: Optional[int] = None
     class_names: Optional[List[str]] = None
 
+    # ---- 训练模式 (v3.0.0 新增): 详情页追溯"这个任务是基于什么权重起点训练" ----
+    # - from_scratch: 微调 (基于 timm ImageNet 预训练权重, 不依赖业务 MV; 展示为「微调」)
+    # - incremental:  增量训练 / 再训练 (基于某个已有 ModelVersion 继续; 展示为「增量」)
+    # - resume:       继续训练 (继续暂停的同 job, 复用 model_name; 展示为「继续训练」)
+    # - NULL:         历史任务 (v3.0.0 迁移前创建, 前端 fallback 展示为「微调」)
+    pretrain_mode: Optional[str] = None
+    # 来源 ModelVersion ID (仅 pretrain_mode=incremental 时有值)
+    # 记录"这个训练是基于哪个 MV 继续的", 用于详情页追溯
+    pretrain_source_mv_id: Optional[int] = None
+    # 来源 ModelVersion 名称 (后端 list/detail 接口 join ModelVersion 取名)
+    # 增量训练时显示完整名称, 避免前端只有 ID 还要再去查表
+    pretrain_source_mv_name: Optional[str] = None
+
 
 class TrainingJobList(_Base):
     """分页列表响应 - 前端 el-pagination 直接对接"""

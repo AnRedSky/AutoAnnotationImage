@@ -88,10 +88,50 @@ class TrainingService:
             raise HTTPException(404, f"Dataset id={dataset_id} not found")
         task_type = (ds.task_type or "classification").lower()
 
-        # model_name 兜底
-        if not model_name or not model_name.strip():
-            ts = int(datetime.utcnow().timestamp()) % 10000000000
-            model_name = f"{base_model}_v1_{ts}"
+        # model_name 兜底 + 长度保护
+        # v3.0.0 改版:
+        #   1) 用户没传 → 自动按 `{base_model}_{ts}` 生成 (去掉旧 `_v1_` 中缀)
+        #   2) 用户传了 → 尊重用户输入, 但仍截断到 128 字符
+        #   3) 查重: 自动生成时, 若 dataset 下同名已存在, 追加 3 位随机数字 (e.g. _847)
+        from app.tasks.api.training.start import (
+            _default_model_name,
+            _resolve_unique_model_name_async,
+            _safe_truncate_model_name,
+        )
+        from sqlalchemy import and_ as _and, exists as _sa_exists, select as _sa_select
+        from app.tasks.model.training_job import TrainingJob as TJ
+
+        user_provided = bool(model_name and model_name.strip())
+        if not user_provided:
+            # 1) 自动生成默认名
+            candidate = _default_model_name(base_model, retrain=False)
+            # 2) 查重 (同一 dataset 下重名时, 自动加 3 位随机后缀)
+            async def _exists(name: str) -> bool:
+                stmt = _sa_select(_sa_exists().where(
+                    _and(
+                        TJ.dataset_id == dataset_id,
+                        TJ.model_name == name,
+                    )
+                ))
+                return bool((await db.execute(stmt)).scalar())
+            model_name = await _resolve_unique_model_name_async(candidate, _exists)
+        else:
+            # 用户输入: 截断兜底, 不做查重 (用户主动选择同名, 视为合法)
+            model_name = model_name.strip()
+            model_name = _safe_truncate_model_name(model_name)
+
+        # v3.0.0: 决定 pretrain_mode
+        # - 用户手动传了 .pth (pretrained_model_path 非空): incremental, 但不关联业务 MV
+        #   (这是用户私有 .pth, 不在我们的 ModelVersion 体系内, source_mv_id 留空)
+        # - 否则: from_scratch (基于 timm ImageNet 预训练权重)
+        from app.tasks.model.training_job import (
+            PRETRAIN_MODE_FROM_SCRATCH,
+            PRETRAIN_MODE_INCREMENTAL,
+        )
+        pretrain_mode = (
+            PRETRAIN_MODE_INCREMENTAL if (pretrained_model_path and pretrained_model_path.strip())
+            else PRETRAIN_MODE_FROM_SCRATCH
+        )
 
         # ---- 2) broker 健康检查 ----
         broker_host = settings.REDIS_HOST
@@ -117,6 +157,8 @@ class TrainingService:
             epochs=epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
+            pretrain_mode=pretrain_mode,
+            pretrain_source_mv_id=None,  # 全新训练入口无业务 MV 关联
         )
 
         # ---- 4) 投递 Celery 任务 ----
@@ -176,11 +218,17 @@ class TrainingService:
         epochs: int,
         batch_size: int,
         learning_rate: float,
+        pretrain_mode: Optional[str] = None,
+        pretrain_source_mv_id: Optional[int] = None,
     ) -> int:
         """预创建 TrainingJob 行 (state=PENDING)
 
         必须在独立 session 中执行, 避免与 caller 的 db 事务冲突.
         返回新行的 id.
+
+        v3.0.0: 新增 pretrain_mode + pretrain_source_mv_id, 用于详情页追溯
+        "这个任务是基于 timm ImageNet 权重, 还是基于某条业务 MV 增量训练".
+        start_training 显式传, start_existing 走 _create_pending_restart_job 另一份.
         """
         from sqlalchemy.dialects.mysql import insert as mysql_insert
         from app.database import AsyncSessionLocal
@@ -197,6 +245,8 @@ class TrainingService:
                     epochs=epochs,
                     batch_size=batch_size,
                     learning_rate=learning_rate,
+                    pretrain_mode=pretrain_mode,
+                    pretrain_source_mv_id=pretrain_source_mv_id,
                     state="PENDING",
                     progress=0.0,
                     message="等待 worker 启动...",

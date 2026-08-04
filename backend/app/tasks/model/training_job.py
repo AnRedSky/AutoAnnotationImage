@@ -27,6 +27,25 @@ TRAIN_STATE_VALUES = (
 # 终态 (不可再转移)
 TRAIN_TERMINAL_STATES = frozenset((TRAIN_STATE_SUCCESS, TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED))
 
+# 预训练模式 (v3.0.0 新增, 记录任务是基于哪个 MV 训练, 用于追溯)
+# - from_scratch: 微调 (基于 timm ImageNet 预训练权重, 不依赖业务 MV; 沿用旧名便于 DB 兼容)
+# - incremental:  增量训练 / 再训练 (基于某个已有 ModelVersion 继续)
+# - resume:       继续训练 (继续暂停的同 job, 复用 model_name)
+#
+# 注意: DB 存的值仍是 from_scratch/incremental/resume (英文枚举, 跨语言稳定);
+#       中文 label 在 PRETRAIN_MODE_LABELS 中维护, 业务侧"微调/增量/继续"按需调整.
+PRETRAIN_MODE_FROM_SCRATCH = "from_scratch"
+PRETRAIN_MODE_INCREMENTAL = "incremental"
+PRETRAIN_MODE_RESUME = "resume"
+PRETRAIN_MODE_VALUES = (PRETRAIN_MODE_FROM_SCRATCH, PRETRAIN_MODE_INCREMENTAL, PRETRAIN_MODE_RESUME)
+# 前端展示的中文 label (UI 文案; 后端不依赖这些 label 做业务判断)
+# - v3.0.0 改版: from_scratch 展示为「微调」, 业务侧不再用「从头训练」表述
+PRETRAIN_MODE_LABELS = {
+    PRETRAIN_MODE_FROM_SCRATCH: "微调",
+    PRETRAIN_MODE_INCREMENTAL: "增量",
+    PRETRAIN_MODE_RESUME: "继续训练",
+}
+
 
 class TrainingJob(Base):
     """训练任务历史表"""
@@ -59,6 +78,12 @@ class TrainingJob(Base):
     duration_seconds = Column(Float, nullable=True)
 
     model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=True)
+    # 预训练模式 (v3.0.0 新增): from_scratch / incremental / resume
+    # NULL = 历史任务 (迁移前创建), 前端显示「未知」
+    pretrain_mode = Column(String(16), nullable=True, index=True)
+    # 来源 ModelVersion ID (仅 pretrain_mode=incremental 时有值)
+    # 记录"这个训练是基于哪个 MV 继续的", 用于详情页追溯
+    pretrain_source_mv_id = Column(Integer, ForeignKey("model_version.id"), nullable=True)
     history = Column(JSON, nullable=True)
     log = Column(JSON, nullable=True)
 

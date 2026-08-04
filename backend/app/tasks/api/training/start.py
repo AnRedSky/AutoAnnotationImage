@@ -18,6 +18,8 @@ training.start 模块 — 训练任务启动 (新建 + 复用旧任务)
 """
 from datetime import datetime
 from pathlib import Path
+import random
+import re
 from typing import Optional
 from uuid import uuid4
 
@@ -43,6 +45,176 @@ router = APIRouter()
 
 
 # ============== 共享工具 ==============
+
+# model_name 字段最大长度 (与 TrainingJob.model_name / ModelVersion.name 字段定义一致)
+MODEL_NAME_MAX_LEN = 128
+# 再训练 _r_{timestamp} 后缀长度: "_r_" (3) + 10位秒级时间戳 (10) = 13
+RETRAIN_SUFFIX_LEN = 13
+# 查重时的随机后缀长度: "_" (1) + 3位随机字符 (3) = 4
+UNIQUE_RANDOM_SUFFIX_LEN = 4
+# 查重最大尝试次数 (避免极端情况死循环)
+UNIQUE_RANDOM_MAX_TRY = 16
+# 查重时使用的随机字符集 (数字 0-9, 排除易混淆字母)
+UNIQUE_RANDOM_CHARS = "0123456789"
+
+
+def _strip_retrain_suffix(name: str) -> str:
+    """剥离末尾的 _r_{10位数字} 后缀 (再训练时反复加, 避免 name 无限增长)
+
+    兼容旧版 _r{10位数字} (无下划线分隔) + 新版 _r_{10位数字} (有下划线分隔),
+    严格按 _r_?{digits}$ 匹配, 避免误伤业务字段里的 _r (如 'resnet_r2.0')
+    """
+    return re.sub(r"_r_?\d+$", "", name)
+
+
+def _default_model_name(base_model: str, *, retrain: bool = False) -> str:
+    """生成默认 model_name (新建/再训练统一入口)
+
+    规则 (v3.0.0 Phase 升级):
+      - 新建任务: `{base_model}_{timestamp}` (e.g. resnet50_1701234567)
+      - 再训练任务: `{base_model}_r_{timestamp}` (e.g. resnet50_r_1701234567)
+      - 时间戳: 10位秒级 (避免 13位毫秒太长, 也保证一年内不重复)
+
+    Args:
+        base_model: 基础模型名 (e.g. resnet50)
+        retrain: True 表示再训练, False 表示新建
+
+    Returns:
+        不带查重的默认名称 (调用方应再调 _resolve_unique_model_name 兜底)
+    """
+    ts = int(datetime.utcnow().timestamp()) % 10000000000
+    suffix = f"_r_{ts}" if retrain else f"_{ts}"
+    return f"{base_model}{suffix}"
+
+
+def _make_random_suffix() -> str:
+    """生成 3 位数字随机后缀 (用于名称查重时拼接)
+
+    Returns:
+        形如 '_847' 的随机后缀 (含前导下划线)
+    """
+    return f"_{''.join(random.choices(UNIQUE_RANDOM_CHARS, k=3))}"
+
+
+def _resolve_unique_model_name(
+    candidate: str,
+    exists_check,
+    *,
+    max_len: int = MODEL_NAME_MAX_LEN,
+    max_try: int = UNIQUE_RANDOM_MAX_TRY,
+) -> str:
+    """解决 model_name 重复 (在候选名基础上加随机三位数后缀)
+
+    策略:
+      1) 检查 candidate 是否已存在
+      2) 不存在 → 返回 candidate
+      3) 存在 → 在末尾追加 3 位数字 (e.g. _847), 再次检查
+      4) 最多尝试 max_try 次 (默认 16), 仍冲突 → 强制返回 (带 3 位随机)
+         实际场景中 base_model + ts 已经几乎唯一, 3-4 次内必收敛
+
+    Args:
+        candidate: 候选名 (e.g. resnet50_1701234567)
+        exists_check: 同步回调, 输入 name 返回 bool (True=已存在)
+        max_len: 字段最大长度 (默认 128)
+        max_try: 最大尝试次数 (默认 16)
+
+    Returns:
+        唯一名 (若超长会先截断 base, 保留后缀)
+    """
+    if not candidate or not exists_check(candidate):
+        return candidate
+    # 截断 base 部分, 给随机后缀留位 (4 字符)
+    base_max = max_len - UNIQUE_RANDOM_SUFFIX_LEN
+    base = candidate[:base_max] if len(candidate) > base_max else candidate
+    for _ in range(max_try):
+        rand = _make_random_suffix()
+        cand = f"{base}{rand}"
+        if not exists_check(cand):
+            return cand
+    # 兜底: 仍冲突, 直接返回最后一次 (极端情况, 用户应手动改名)
+    return f"{base}{_make_random_suffix()}"
+
+
+async def _resolve_unique_model_name_async(
+    candidate: str,
+    exists_check,
+    *,
+    max_len: int = MODEL_NAME_MAX_LEN,
+    max_try: int = UNIQUE_RANDOM_MAX_TRY,
+) -> str:
+    """异步版 _resolve_unique_model_name (适配 AsyncSession 场景)
+
+    Args:
+        candidate: 候选名 (e.g. resnet50_1701234567)
+        exists_check: 异步回调, 输入 name 返回 bool (True=已存在)
+        max_len: 字段最大长度 (默认 128)
+        max_try: 最大尝试次数 (默认 16)
+
+    Returns:
+        唯一名 (若超长会先截断 base, 保留后缀)
+    """
+    if not candidate or not await exists_check(candidate):
+        return candidate
+    # 截断 base 部分, 给随机后缀留位 (4 字符)
+    base_max = max_len - UNIQUE_RANDOM_SUFFIX_LEN
+    base = candidate[:base_max] if len(candidate) > base_max else candidate
+    for _ in range(max_try):
+        rand = _make_random_suffix()
+        cand = f"{base}{rand}"
+        if not await exists_check(cand):
+            return cand
+    # 兜底: 仍冲突, 直接返回最后一次 (极端情况, 用户应手动改名)
+    return f"{base}{_make_random_suffix()}"
+
+
+def _safe_truncate_model_name(name: str, max_len: int = MODEL_NAME_MAX_LEN) -> str:
+    """保证 model_name 长度不超过 max_len, 保护 DB 写库不报 DataError
+
+    - 已超长: 从左侧截断到 max_len (会破坏 _r{ts} 后缀的, 单独处理)
+    - 对于再训练场景, 保留 _r{ts} 后缀的语义, 应该用 _build_retrain_model_name
+    - 纯输入截断 (无后缀追加), 用于 start_training 路径
+
+    Args:
+        name: 原始 model_name
+        max_len: 字段最大长度 (默认 128)
+
+    Returns:
+        截断后的 model_name (不超过 max_len)
+    """
+    if not name:
+        return name
+    if len(name) <= max_len:
+        return name
+    return name[:max_len]
+
+
+def _build_retrain_model_name(
+    src_name: str,
+    max_len: int = MODEL_NAME_MAX_LEN,
+    suffix: str = "",
+) -> str:
+    """构造再训练后的 model_name, 始终保留 _r{ts} 后缀保证 .pth 文件名唯一
+
+    策略:
+      1) 剥离 src_name 末尾的 _r{digits} 后缀 (避免重复)
+      2) 计算 base_name 可用空间 = max_len - len(suffix)
+      3) 从左侧截断 base_name 到可用空间
+      4) 拼接 = base_name + suffix
+
+    Args:
+        src_name: 原 model_name (可能已经带 _r{ts} 后缀)
+        max_len: 字段最大长度 (默认 128)
+        suffix: 要追加的 _r{ts} 后缀 (如 '_r1701234567'), 默认空
+
+    Returns:
+        不超 max_len 的新 model_name
+    """
+    base = _strip_retrain_suffix(src_name)
+    available = max_len - len(suffix)
+    if len(base) > available:
+        base = base[:available]
+    return f"{base}{suffix}"
+
 
 def _build_task_kwargs(
     task_type: str,
@@ -128,12 +300,16 @@ async def _create_pending_restart_job(
     epochs: int,
     batch_size: int,
     learning_rate: float,
+    pretrain_mode: str,
+    pretrain_source_mv_id: Optional[int] = None,
 ) -> int | None:
     """预创建 PENDING 行 (mode=restart)
     - 与 start_training 不同: 显式传 started_at=None, 避免 SQLAlchemy 自动填
       default=datetime.utcnow (这会让 PENDING 阶段就显示"已开始")
     - 容错: 如果 inserted_primary_key 拿不到 (极端情况), 返回 None
     - 重试: aiomysql 偶发 MySQLServerHasGoneAway 时, 一次重试, 仍失败则抛
+    - v3.0.0: 写入 pretrain_mode + pretrain_source_mv_id, 用于详情页追溯
+      (restart 场景下, 这两个值由 start_existing_training_job 在创建前解析出来)
 
     注意: 必须写成 async def, 直接 await _do().
     早期写成 def + _run_async(_do()) 在 async 上下文里会触发
@@ -152,6 +328,8 @@ async def _create_pending_restart_job(
                     epochs=epochs,
                     batch_size=batch_size,
                     learning_rate=learning_rate,
+                    pretrain_mode=pretrain_mode,
+                    pretrain_source_mv_id=pretrain_source_mv_id,
                     state="PENDING",
                     progress=0.0,
                     message="等待 worker 启动...",
@@ -303,14 +481,28 @@ async def start_existing_training_job(
         final_batch_size = overrides.get("batch_size", job.batch_size)
         final_learning_rate = overrides.get("learning_rate", job.learning_rate)
         final_task_type = (job.task_type or "classification").lower()
-        # model_name: 强制加后缀 (即使 payload 改了 model_name, 也再加一层时间戳)
-        # v3.0.0 修复: 先剥离已有的 _r{digits} 后缀, 避免多次再训练后名称无限增长
-        # (之前: resnet50_v1_r123_r456_r789... → 超过列长度 64 报 DataError)
-        import re
-        suffix = f"_r{int(datetime.utcnow().timestamp())}"
-        payload_model = overrides.get("model_name", job.model_name)
-        base_name = re.sub(r'_r\d+$', '', payload_model)  # 剥离末尾的 _r{timestamp}
-        new_model_name = f"{base_name}{suffix}"
+        # model_name: 强制使用 `{base_model}_r_{ts}` 规则 (忽略 payload 的 model_name)
+        # v3.0.0 重构: 不再复用 payload 里的 model_name, 一律重置为
+        #   `{base_model}_r_{10位秒级ts}`
+        # 原因: 旧版会出现以下两个问题
+        #   1) 后缀重复累加: resnet50_v1_r123_r456 → 越来越长
+        #   2) 后缀与 base_model 混淆: 改名时容易拼出非法字符
+        # 查重: 同一 dataset 下重名时, 自动加 3 位随机数字后缀 (e.g. _847)
+        from sqlalchemy import and_ as _and, exists as _sa_exists
+        async def _exists(name: str) -> bool:
+            # 异步查询: 该 name 在 dataset 下是否已存在 (含已删除/历史的所有 job)
+            stmt = select(_sa_exists().where(
+                _and(
+                    TrainingJob.dataset_id == final_dataset_id,
+                    TrainingJob.model_name == name,
+                )
+            ))
+            return bool((await db.execute(stmt)).scalar())
+
+        candidate = _default_model_name(final_base_model, retrain=True)
+        new_model_name = await _resolve_unique_model_name_async(
+            candidate, _exists
+        )
 
     # ---- 增量训练 (再训练) 核心: 基于「当前所在行」的 ModelVersion ----
     # 用户在 N 行点「再训练」, 不管该 MV 是否 is_active, 都基于它继续训练
@@ -364,6 +556,11 @@ async def start_existing_training_job(
 
     if mode == "restart":
         celery_task_id_to_use = uuid4().hex
+        # 决定 pretrain_mode: 有有效来源 MV → incremental, 否则 from_scratch
+        # (有 .pth 但文件被删, 也归 from_scratch: 实际训练是随机的)
+        restart_pretrain_mode = (
+            "incremental" if pretrained_source_mv_id else "from_scratch"
+        )
         new_job_id = await _create_pending_restart_job(
             celery_task_id=celery_task_id_to_use,
             user_id=current_user.id,
@@ -374,6 +571,8 @@ async def start_existing_training_job(
             epochs=final_epochs,
             batch_size=final_batch_size,
             learning_rate=final_learning_rate,
+            pretrain_mode=restart_pretrain_mode,
+            pretrain_source_mv_id=pretrained_source_mv_id,
         )
         if new_job_id is None:
             # 防御性兜底: 预创建返回 None, 直接 500
@@ -416,6 +615,10 @@ async def start_existing_training_job(
         # job.started_at 维持原值, 因为语义上是"任务整体首次开始"的时间
         job.finished_at = None
         job.error = None
+        # v3.0.0: resume 模式标记 pretrain_mode, 用于详情页追溯
+        # (同一 job 重新执行, 模型起点不变, 模式仍是 "resume", 避免被识别为新的 incremental)
+        if not job.pretrain_mode:
+            job.pretrain_mode = "resume"
         await db.commit()
         await db.refresh(job)
 

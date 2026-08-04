@@ -27,6 +27,7 @@ from app.database.redis import redis_client
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.model.training_job import TrainingJob
+from app.tasks.model.model_version import ModelVersion
 from app.schemas.training import (
     TrainingJobList,
     TrainingJobOut,
@@ -35,6 +36,35 @@ from app.schemas.training import (
 )
 
 router = APIRouter()
+
+
+# ============== 工具: 补 pretrain_source_mv_name 字段 ==============
+
+async def _batch_fill_source_mv_names(
+    db: AsyncSession, jobs: list[TrainingJob]
+) -> None:
+    """批量补全 TrainingJob 列表的 pretrain_source_mv_name
+
+    - 收集所有非空 pretrain_source_mv_id, 一次性 SELECT ModelVersion
+    - 避免 N+1 查询 (列表场景, 一页 10 条不要 10 次 fetch)
+    - 找不到 (MV 被删) 时置 None, 不影响 pretrain_source_mv_id 的展示
+    - 直接给 ORM 对象挂属性 (Pydantic from_attributes 模式能读到)
+
+    v3.0.0: 新增 pretrain_mode + pretrain_source_mv_id 后, 详情页需要展示
+    "基于哪个 MV 继续训练" 的可读名称, 不只是 ID.
+    """
+    mv_ids = sorted({
+        j.pretrain_source_mv_id for j in jobs if j.pretrain_source_mv_id
+    })
+    if not mv_ids:
+        return
+    rows = (await db.execute(
+        select(ModelVersion.id, ModelVersion.name).where(ModelVersion.id.in_(mv_ids))
+    )).all()
+    name_map = {r.id: r.name for r in rows}
+    for j in jobs:
+        if j.pretrain_source_mv_id:
+            j.pretrain_source_mv_name = name_map.get(j.pretrain_source_mv_id)
 
 
 # ============== 任务查询 ==============
@@ -105,6 +135,8 @@ async def list_training_jobs(
     offset = (page - 1) * page_size
     stmt = base.order_by(TrainingJob.id.desc()).offset(offset).limit(page_size)
     rows = (await db.execute(stmt)).scalars().all()
+    # v3.0.0: 补 pretrain_source_mv_name (增量训练时显示"基于哪个 MV 继续")
+    await _batch_fill_source_mv_names(db, rows)
     return TrainingJobList(total=total, items=rows, page=page, page_size=page_size)
 
 
@@ -121,6 +153,8 @@ async def get_training_job(
     # 权限校验: admin 看全部, 否则只能看自己的
     if not current_user.is_admin() and job.user_id != current_user.id:
         raise HTTPException(403, "无权限查看此训练任务")
+    # v3.0.0: 补 pretrain_source_mv_name (单条直接走单查询, 不走批量)
+    await _batch_fill_source_mv_names(db, [job])
     return job
 
 
