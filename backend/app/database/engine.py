@@ -25,13 +25,33 @@ v3.5.1 修复: 多线程跨 event loop 错误
   - 主线程 (FastAPI / sync code) 仍然用 process-level engine (沿用旧行为)
   - `engine` / `AsyncSessionLocal` 名称保留, 向后兼容
 
+v3.5.2 修复: thread-local engine 缓存命中 stale 引擎
+==================================================
+**问题**: v3.5.1 用 `threading.get_ident()` (OS tid) 作 dict key, 但 Celery
+  `threads` 池 + `worker_max_tasks_per_child=10` 会重启 worker 线程.
+  OS 复用 tid 给新线程, 但 Python 给的是全新 `Thread` 对象.
+  新线程第一次 DB 调用命中老缓存, 拿到绑在旧线程已关闭 loop 上的 stale engine
+  → `await db.execute()` 触发 asyncio 跨 loop 保护 → 抛错.
+
+**修复方案**: 合并 3 个并行 dict 为 `_thread_entries: dict[int, _ThreadEngineEntry]`,
+  每条 entry 绑定 (engine, session_factory, 创建线程, loop). 每次
+  `get_thread_engine()` 前做 3 条 stale 规则校验:
+    1. `entry.thread is threading.current_thread()`  — 抓 OS tid 复用
+    2. `entry.thread.is_alive()`                    — 防御性
+    3. `entry.loop is current_loop and not closed()` — 抓 loop 替换/关闭
+  不满足任一则驱逐旧 entry 并重建. 驱逐用 `engine.sync_engine.dispose()` (同步),
+  不依赖运行中的 loop.
+
 性能开销:
   - 首次创建 engine ~200ms (TCP 握手 + aiomysql 初始化)
   - 后续借连接 O(1) (本地 thread-local dict 查询)
+  - Stale 校验 ~100ns (2 个 `is` + 1 个 `is_alive()`)
   - Celery worker 启动慢 200ms, 但训练任务吞吐无影响
 """
+import asyncio
 import logging
 import threading
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker, AsyncEngine
@@ -82,11 +102,41 @@ _main_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 
 # ============== thread-local engine (Celery worker 线程用) ==============
-# 用 threading.local 隔离每个 thread 的 engine, 避免 aiomysql 跨 loop 错误
-_engine_lock = threading.Lock()
-_thread_engines: dict[int, AsyncEngine] = {}        # thread_ident -> engine
-_thread_session_factories: dict[int, async_sessionmaker[AsyncSession]] = {}
-_thread_engine_init_locks: dict[int, threading.Lock] = {}  # 避免同一 thread 内并发初始化
+# v3.5.2: 合并 3 个并行 dict 为单一 _thread_entries, 每条 entry 绑定
+# (engine, session_factory, 创建线程, loop) 作为原子单元, 缓存命中前
+# 做 stale 校验. Celery threads 池 worker_max_tasks_per_child 重启后
+# OS 复用 tid, 老 entry 必须被驱逐并重建, 否则会拿到绑到 closed loop
+# 的 stale engine 触发跨 loop 错误.
+#
+# 锁策略:
+# - `_entries_lock` 保护写入 (创建/驱逐), 读路径 lock-free
+# - 同一 thread 内单步完成 entry 创建, 不需要 per-tid init_lock
+#   (GIL 保证单 thread 内代码原子性; 不同 thread 间靠 _entries_lock 串行化)
+
+_entries_lock = threading.Lock()
+_thread_entries: dict[int, "_ThreadEngineEntry"] = {}
+
+
+@dataclass
+class _ThreadEngineEntry:
+    """Per-thread engine 缓存条目 (v3.5.2).
+
+    Attributes:
+        engine: 该 thread 专属的 AsyncEngine (含 connection pool)
+        session_factory: 对应的 async_sessionmaker (复用 engine)
+        thread: 创建该 entry 时的 threading.Thread 对象.
+            强引用 (非 weakref), 理由:
+              - Celery thread 数受并发数限制 (默认 2), 内存可忽略
+              - 强引用让 `is_alive()` 校验更稳
+              - 防止 Thread 被 GC 后 weakref 校验误报
+        loop: 创建时绑定的 event loop. 用于 stale 校验的规则 3
+            (entry.loop 关闭或被替换时判定 stale). None 表示未经过
+            `_get_worker_loop` priming (例如: 直接 test 调用).
+    """
+    engine: AsyncEngine
+    session_factory: async_sessionmaker
+    thread: threading.Thread
+    loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _build_thread_engine_kwargs() -> dict:
@@ -106,11 +156,112 @@ def _build_thread_engine_kwargs() -> dict:
     return base
 
 
-def get_thread_engine() -> AsyncEngine:
-    """获取当前 thread 专属的 async engine (懒创建)
+def _try_get_current_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """懒导入 async_helpers._thread_local.loop, 避免循环引用.
 
-    - 主线程: 返回 _main_engine (复用, 无创建开销)
-    - 其他 thread: 第一次调用时创建该 thread 专属 engine
+    Returns:
+        当前 thread 的 event loop (来自 app.utils.async_helpers 的
+        thread-local), 若模块未导入或 thread 未经过 `_get_worker_loop`
+        priming 则返回 None. 校验失败/异常一律吞掉 (entry.loop is None
+        时规则 3 不触发, 不会误报 stale).
+    """
+    try:
+        from app.utils import async_helpers  # noqa: PLC0415
+        return getattr(async_helpers._thread_local, "loop", None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_entry_stale(entry: "_ThreadEngineEntry") -> bool:
+    """判定缓存条目是否 stale (v3.5.2).
+
+    3 条规则任一不满足即视为 stale:
+        1. `entry.thread is threading.current_thread()` — 抓 OS tid 复用
+            (Celery worker 线程被重启后, 新的 Thread 对象与缓存中的不同)
+        2. `entry.thread.is_alive()` — 防御性, 防止异常情况下命中死线程
+        3. 若 entry.loop 不为 None, 与当前 thread 的 loop 比对
+            (entry.loop 关闭或被替换时判定 stale, 兜底 dispose_worker_loop 路径)
+
+    O(1) 开销: 2 个 `is` 比较 + 1 个 `is_alive()` 调用. lazy loop 查找
+    失败时规则 3 不触发, 不会误报 stale.
+    """
+    current = threading.current_thread()
+    # 规则 1: 线程身份 (抓 OS tid 复用)
+    if entry.thread is not current:
+        return True
+    # 规则 2: 线程存活 (防御性)
+    if not entry.thread.is_alive():
+        return True
+    # 规则 3: loop 比对 (仅当 entry 有 loop 时)
+    if entry.loop is not None:
+        cur_loop = _try_get_current_loop()
+        if cur_loop is not None:
+            if cur_loop is not entry.loop:
+                return True
+            if cur_loop.is_closed():
+                return True
+    return False
+
+
+def _evict_stale_entry_locked(tid: int) -> None:
+    """驱逐 + 同步 dispose stale entry (调用方必须持 _entries_lock).
+
+    用 `engine.sync_engine.dispose()` (同步) 而非 `await engine.dispose()`,
+    理由: 检测 stale 的调用方 (Celery worker 线程) 此时可能没有运行中的
+    event loop, 同步 dispose 关闭连接池即可, 不依赖 loop.
+    """
+    entry = _thread_entries.pop(tid, None)
+    if entry is None:
+        return
+    try:
+        # 同步 dispose: 关闭连接池, 释放连接资源
+        entry.engine.sync_engine.dispose()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[engine] stale entry dispose failed (tid=%s): %s", tid, e,
+        )
+    logger.warning(
+        "[engine] evicted stale thread-local engine "
+        "(tid=%s, old=%r, new=%r)",
+        tid, entry.thread.name, threading.current_thread().name,
+    )
+
+
+def _create_thread_engine() -> AsyncEngine:
+    """构造 thread-local AsyncEngine, 抽离原 get_thread_engine 内部逻辑.
+
+    与 v3.5.1 实现完全一致:
+      - MySQL: pool_size 上限 5, max_overflow 上限 3
+      - SQLite :memory: 走 StaticPool (避免 :memory: 数据库丢失)
+      - 创建后绑定慢 SQL 监控
+    """
+    kwargs = _build_thread_engine_kwargs()
+    # SQLite 测试场景: 同一 engine 实例, 避免 :memory: 数据库丢失
+    if "sqlite" in settings.EFFECTIVE_DATABASE_URL and "memory" in settings.EFFECTIVE_DATABASE_URL:
+        from sqlalchemy.pool import StaticPool  # noqa: PLC0415
+        kwargs["poolclass"] = StaticPool
+    engine = create_async_engine(
+        settings.EFFECTIVE_DATABASE_URL,
+        echo=settings.APP_DEBUG,
+        **kwargs,
+    )
+    # 给 thread-local engine 也绑定慢 SQL 监控 (主 engine 已在 module 加载时绑定)
+    try:
+        from app.database.slow_sql import setup_slow_sql_monitor  # noqa: PLC0415
+        setup_slow_sql_monitor(engine)
+    except Exception:  # noqa: BLE001
+        pass
+    return engine
+
+
+def get_thread_engine() -> AsyncEngine:
+    """获取当前 thread 专属的 async engine (v3.5.2 懒创建 + stale 检测).
+
+    - 主线程: 始终返回 ``_main_engine`` (FastAPI / sync code 走主 loop).
+    - 其他 thread: 第一次调用时懒创建; 后续命中前做 stale 检测.
+      Celery threads 池在 ``worker_max_tasks_per_child=10`` 后会重启
+      worker 线程, OS 复用 tid 但新 Thread 是不同对象 — 老 entry 必须
+      被驱逐并重建, 否则会拿到绑定到 closed loop 的 stale engine.
 
     用法:
         from app.database.engine import get_thread_engine
@@ -119,73 +270,73 @@ def get_thread_engine() -> AsyncEngine:
     tid = threading.get_ident()
     if tid == _main_thread_ident:
         return _main_engine
-    # thread-local cache hit
-    engine = _thread_engines.get(tid)
-    if engine is not None:
-        return engine
-    # 懒创建 (双 check 避免重复创建)
-    with _engine_lock:
-        init_lock = _thread_engine_init_locks.get(tid)
-        if init_lock is None:
-            init_lock = threading.Lock()
-            _thread_engine_init_locks[tid] = init_lock
-    with init_lock:
-        engine = _thread_engines.get(tid)
-        if engine is not None:
-            return engine
-        kwargs = _build_thread_engine_kwargs()
-        # SQLite 测试场景: 同一 engine 实例, 避免 :memory: 数据库丢失
-        if "sqlite" in settings.EFFECTIVE_DATABASE_URL and "memory" in settings.EFFECTIVE_DATABASE_URL:
-            # 测试场景下 :memory: 共享一个 engine (主线程创建那个), 多 thread 也用它
-            from sqlalchemy.pool import StaticPool
-            kwargs["poolclass"] = StaticPool
-        engine = create_async_engine(
-            settings.EFFECTIVE_DATABASE_URL,
-            echo=settings.APP_DEBUG,
-            **kwargs,
+
+    # ---- Fast path: lock-free 读 + stale 检测 ----
+    entry = _thread_entries.get(tid)
+    if entry is not None:
+        if not _is_entry_stale(entry):
+            return entry.engine
+        # Stale: 持锁驱逐
+        with _entries_lock:
+            _evict_stale_entry_locked(tid)
+
+    # ---- Slow path: 持锁创建 ----
+    with _entries_lock:
+        # 双 check: 持锁后可能其他线程已创建
+        entry = _thread_entries.get(tid)
+        if entry is not None and not _is_entry_stale(entry):
+            return entry.engine
+        if entry is not None:
+            _evict_stale_entry_locked(tid)
+
+        engine = _create_thread_engine()
+        factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False,
         )
-        # 给 thread-local engine 也绑定慢 SQL 监控 (主 engine 已在 module 加载时绑定)
-        try:
-            from app.database.slow_sql import setup_slow_sql_monitor
-            setup_slow_sql_monitor(engine)
-        except Exception:  # noqa: BLE001
-            pass
-        _thread_engines[tid] = engine
+        entry = _ThreadEngineEntry(
+            engine=engine,
+            session_factory=factory,
+            thread=threading.current_thread(),
+            loop=_try_get_current_loop(),
+        )
+        _thread_entries[tid] = entry
         logger.info(
-            "[engine] 创建 thread-local engine (tid=%s, url=%s, pool_size=%s)",
-            tid, settings.EFFECTIVE_DATABASE_URL.split("@")[-1], kwargs.get("pool_size"),
+            "[engine] created thread-local engine "
+            "(tid=%s, url=%s, pool_size=%s)",
+            tid,
+            settings.EFFECTIVE_DATABASE_URL.split("@")[-1],
+            _build_thread_engine_kwargs().get("pool_size"),
         )
         return engine
 
 
 def get_thread_session_factory() -> async_sessionmaker[AsyncSession]:
-    """获取当前 thread 专属的 AsyncSessionLocal (懒创建)"""
+    """获取当前 thread 专属的 AsyncSessionLocal (v3.5.2 懒创建 + stale 检测).
+
+    - 主线程: 始终返回 ``_main_session_factory``.
+    - 其他 thread: 走 ``get_thread_engine()`` 拿到 (或重建) entry,
+      再返回 entry.session_factory.
+    """
     tid = threading.get_ident()
     if tid == _main_thread_ident:
         return _main_session_factory
-    factory = _thread_session_factories.get(tid)
-    if factory is not None:
-        return factory
-    with _engine_lock:
-        init_lock = _thread_engine_init_locks.get(tid)
-        if init_lock is None:
-            init_lock = threading.Lock()
-            _thread_engine_init_locks[tid] = init_lock
-    with init_lock:
-        factory = _thread_session_factories.get(tid)
-        if factory is not None:
-            return factory
-        engine = get_thread_engine()
-        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        _thread_session_factories[tid] = factory
-        return factory
+
+    # Fast path: 命中且非 stale
+    entry = _thread_entries.get(tid)
+    if entry is not None and not _is_entry_stale(entry):
+        return entry.session_factory
+
+    # Slow path: 调 get_thread_engine (会处理 stale + 创建)
+    get_thread_engine()
+    return _thread_entries[tid].session_factory
 
 
 async def dispose_thread_engine(tid: Optional[int] = None) -> None:
-    """释放指定 thread (默认当前 thread) 的 engine + connection pool
+    """释放指定 thread (默认当前 thread) 的 engine + connection pool (v3.5.2).
 
     用途:
-    1. Worker 线程优雅退出 (start_workers.py shutdown hook)
+    1. Worker 线程优雅退出 (start_workers.py shutdown hook, 当前仍为
+       dead code; v3.5.2 cache-level stale 校验会兜底)
     2. 测试场景: 清理 thread-local engine 避免 fixture 切换 engine 后脏连接
 
     Args:
@@ -193,16 +344,18 @@ async def dispose_thread_engine(tid: Optional[int] = None) -> None:
     """
     if tid is None:
         tid = threading.get_ident()
-    with _engine_lock:
-        engine = _thread_engines.pop(tid, None)
-        _thread_session_factories.pop(tid, None)
-        _thread_engine_init_locks.pop(tid, None)
-    if engine is not None:
-        try:
-            await engine.dispose()
-            logger.info("[engine] dispose thread-local engine (tid=%s)", tid)
-        except Exception as e:
-            logger.warning("[engine] dispose thread-local engine failed (tid=%s): %s", tid, e)
+    with _entries_lock:
+        entry = _thread_entries.pop(tid, None)
+    if entry is None:
+        return
+    try:
+        await entry.engine.dispose()
+        logger.info("[engine] dispose thread-local engine (tid=%s)", tid)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[engine] dispose thread-local engine failed (tid=%s): %s",
+            tid, e,
+        )
 
 
 # ============== 向后兼容: process-level 别名 ==============
