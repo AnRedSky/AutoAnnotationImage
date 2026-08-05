@@ -286,12 +286,24 @@ async def share_dataset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """共享 dataset 给指定用户 (owner/admin)."""
+    """共享 dataset 给指定用户 (v3.3.6 严格最小权限: 仅 owner 可共享).
+
+    v3.3.6 修复 (admin 越权):
+      - 旧逻辑: is_admin() 可共享任何 dataset, 包括别人的 (横向越权)
+      - 新逻辑: 仅 owner 可共享 (与 team.py 保持一致, 严格最小权限)
+      - super_admin 不再具备「代管共享」权限 (与 team.unshare_dataset 一致)
+
+    业务背景:
+      - 数据集 owner 是数据责任人, 共享决定权应归 owner
+      - regular admin 通过此端点可破坏别人协作关系 (横向越权)
+      - 业务上"代管"场景由 owner 主动 + super_admin 通过迁移脚本处理
+    """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限共享此数据集")
+    # v3.3.6: 严格最小权限 — 仅 owner 可共享
+    if dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限共享此数据集: 仅数据集 owner 可操作")
 
     if body.role not in DATASET_SHARE_ROLES:
         raise HTTPException(400, f"Invalid role: {body.role}")
@@ -333,12 +345,18 @@ async def unshare_dataset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """取消共享 dataset (owner/admin)."""
+    """取消共享 dataset (v3.3.6 严格最小权限: 仅 owner 可取消).
+
+    v3.3.6 修复 (admin 越权):
+      - 旧逻辑: is_admin() 可取消任何 dataset 的共享 (横向越权)
+      - 新逻辑: 仅 owner 可取消 (与 team.unshare_dataset 策略保持一致)
+    """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限取消共享此数据集")
+    # v3.3.6: 严格最小权限 — 仅 owner 可取消共享
+    if dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限取消共享: 仅数据集 owner 可操作")
 
     result = await db.execute(
         select(DatasetMembership).where(

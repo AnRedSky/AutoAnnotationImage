@@ -9,6 +9,14 @@ StatsService — 统计业务服务 (app/admin/service/)
 **v3.0.0 Stage 2.4 迁移**: 从 app/services/stats_service.py 迁入 admin 应用
 **依赖说明**: StatsService 跨应用读 tasks 域的 ORM (Dataset/Image/TrainingJob),
 这是允许的 (读访问), 写访问必须通过 service 层.
+
+**v3.3.6-STATS-ISOLATION 关键变更**:
+- global_overview() 标记为已废弃 (DEPRECATED)
+  - 原行为: 返回全平台聚合 (datasets/images/users/training_jobs 总数)
+  - 越权风险: 任何调用方都可获得全平台业务数据, 严重隐私泄露
+  - 新行为: 任何统计接口均需按当前用户可见数据集过滤 (owner + team_member)
+  - 替代方案: /api/stats/overview (按用户隔离) / /api/teams/{id} (按团队隔离)
+  - 仅 admin only 的纯平台管理统计 (如用户总数) 由 /api/users (admin only) 提供
 """
 from __future__ import annotations
 
@@ -31,7 +39,33 @@ class StatsService:
 
     @staticmethod
     async def global_overview(db: AsyncSession) -> Dict[str, Any]:
-        """全局概览 (前端仪表盘用)"""
+        """全局概览 — v3.3.6-STATS-ISOLATION 已废弃 (DEPRECATED)
+
+        ⚠️ 此方法返回全平台聚合数据 (datasets/images/users/training_jobs 总数),
+        调用方如未做用户隔离会泄露他人业务数据, 严重越权.
+
+        v3.3.6 起已不再被任何 API 端点调用:
+          - /api/stats/overview 重写为按当前用户可见数据集过滤
+          - 平台级统计请使用 /api/users (admin only, 含用户/团队/审计)
+          - 团队级统计请使用 /api/teams/{id}/stats (团队成员视角)
+
+        仅供迁移期内部调试, 不应在业务代码中调用.
+
+        Returns:
+            全平台聚合 (仅 admin 视角, 严禁对外)
+        """
+        import warnings
+        warnings.warn(
+            "StatsService.global_overview is deprecated since v3.3.6, "
+            "use per-user /api/stats/overview or per-team /api/teams/{id}/stats instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        logger.warning(
+            "[stats_service] global_overview() is deprecated (v3.3.6). "
+            "Use per-user /api/stats/overview instead."
+        )
+
         # Datasets
         ds_total = (await db.execute(select(func.count(Dataset.id)))).scalar_one() or 0
         ds_by_status_rows = (await db.execute(

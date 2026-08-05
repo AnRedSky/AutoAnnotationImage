@@ -52,12 +52,22 @@ async def list_audit_logs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """审计日志分页查询 (仅 admin).
+    """审计日志分页查询 (仅 super_admin).
 
     v3.3.1 L4: 支持多维度过滤 + 时间范围 + 排序 (created_at DESC).
+
+    v3.3.6-STATS-ISOLATION 收紧 (严格最小权限):
+      - 旧逻辑: is_admin() (含 regular admin) 可访问所有审计日志
+      - 新逻辑: 仅 super_admin 可访问
+      - 原因: 审计日志含 user_id + resource_id + ip_address 等敏感信息,
+              regular admin 越权查看他人审计数据会泄露:
+                1. 他人操作时间规律 (社会工程攻击)
+                2. 系统级资源 ID 分布 (推算业务规模)
+                3. 越权尝试的 IP + user_id (横向越权情报)
+      - 业务场景: regular admin 仅需关注自己团队的审计 (走 /api/teams/{id}/activities)
     """
-    if not current_user.is_admin():
-        raise HTTPException(403, "无权限: 仅系统管理员可查看审计日志")
+    if not current_user.is_super_admin():
+        raise HTTPException(403, "无权限: 仅超级管理员可查看全平台审计日志")
 
     # 1. 基础条件
     conditions = []

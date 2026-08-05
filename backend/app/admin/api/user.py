@@ -68,23 +68,33 @@ async def list_users(
     """用户列表
 
     v3.3.0 P0 修复: 严格按角色过滤敏感信息
-    - admin: 看完整信息 (含 email, role, is_active 等)
+    - super_admin: 看完整信息 (含 email, role, is_active 等), 用于平台级管理
+    - regular admin: 仅看 id + username (不可见 email/role/is_active),
+      防止 regular admin 通过此端点枚举其他用户敏感信息
     - 普通用户: 仅看 id + username (供团队邀请成员时下拉选择用户名)
       不暴露 email / role / is_active, 避免隐私泄露
+
+    v3.3.6-STATS-ISOLATION 收紧 (严格最小权限):
+      - 旧逻辑: is_admin() (含 regular admin) 可看完整信息
+      - 新逻辑: 仅 super_admin 可看完整信息, regular admin 收紧为 username-only
+      - 原因: regular admin 看不到其他用户的业务数据 (按团队隔离),
+              但可看完整 email/role/is_active 形成「信息孤岛漏洞」,
+              容易被利用做社会工程或横向越权攻击
     """
     users = await UserService.list_active(db, skip=0, limit=1000)
-    is_admin = current_user.is_admin()
+    # v3.3.6: 仅 super_admin 可看完整信息, regular admin 收紧
+    is_super_admin = current_user.is_super_admin()
     return {
         "items": [
             {
                 "id": u.id,
                 "username": u.username,
-                # 敏感字段: 仅 admin 可见
-                "email": u.email if is_admin else None,
-                "role": u.role if is_admin else None,
-                "is_active": u.is_active if is_admin else None,
-                "created_at": _iso_utc(u.created_at) if is_admin else None,
-                "last_login_at": _iso_utc(u.last_login_at) if is_admin else None,
+                # v3.3.6: 完整信息仅 super_admin 可见
+                "email": u.email if is_super_admin else None,
+                "role": u.role if is_super_admin else None,
+                "is_active": u.is_active if is_super_admin else None,
+                "created_at": _iso_utc(u.created_at) if is_super_admin else None,
+                "last_login_at": _iso_utc(u.last_login_at) if is_super_admin else None,
             }
             for u in users
         ],

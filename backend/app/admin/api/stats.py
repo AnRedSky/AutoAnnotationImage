@@ -19,6 +19,13 @@ v3.3.1 L2 新增: 团队级统计
 - /team/{team_id} 仅团队成员可访问
 - 聚合该团队下所有共享数据集的统计数据
 - 含: 数据集/图片概览、状态分布、贡献者排名、每日趋势、AI 节省时间
+
+v3.3.6-STATS-ISOLATION (3 层权限模型 + 严格最小权限):
+  - /overview: 移除 admin 旁路, 任何角色 (含 super_admin) 仅看到可见数据集相关统计
+  - /annotator-efficiency: 移除 admin 旁路, 任何角色仅看到自己参与的标注,
+    防止通过此端点枚举全平台用户的标注量 (严重隐私泄露)
+  - 修复点: admin 分支的 model_versions 之前直接全平台 func.count() → 收紧为按可见数据集统计
+  - 业务影响: 平台运营管理员失去全平台数据视角, 需通过 /api/users (admin only) + 各 team 统计聚合
 """
 from datetime import datetime, timedelta
 from typing import Optional
@@ -38,7 +45,7 @@ from app.tasks.model.team_member import TeamMember
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.admin.service.stats_service import StatsService
-from app.tasks.service.permission_service import assert_can_access_dataset
+from app.tasks.service.permission_service import assert_can_access_dataset, log_permission_denied
 
 router = APIRouter()
 
@@ -59,32 +66,23 @@ async def stats_overview(
     - admin: 看全系统数据 (保留原行为, 用于运营监控)
     - 普通用户: 只统计自己有权限访问的数据集 (owner + team_member)
     - 标注数 / 模型版本 / 训练任务: 均按 user 维度过滤
-    """
-    if current_user.is_admin():
-        # 管理员: 保留全局视角
-        overview = await StatsService.global_overview(db)
-        return {
-            "datasets": overview["datasets"]["total"],
-            "images": overview["images"]["total"],
-            "labeled_images": sum(
-                v for k, v in overview["images"]["by_status"].items()
-                if k in ("human_confirmed", "human_corrected", "trained")
-            ),
-            "model_versions": (
-                await db.execute(select(func.count(ModelVersion.id)))
-            ).scalar() or 0,
-            "training_jobs": overview["training_jobs"]["total"],
-        }
 
-    # ---- 非 admin: 仅自己有权限的数据集 ----
+    v3.3.6-STATS-ISOLATION 收紧 (严格最小权限):
+    - 移除 admin / super_admin 旁路, 任何角色 (含 super_admin) 均按 owner/team 过滤
+    - 原因: /overview 包含 datasets/images/model_versions/training_jobs 4 个
+            业务指标的总量, admin 视角会泄露别人创建的数据集数量等敏感信息
+    - 平台级监控请使用 /api/users (admin only) + /api/teams/{id}/stats 自行聚合
+    """
     # 1) 收集可见的 dataset_id 列表 (owner 或 team_member)
-    from app.tasks.model.team_member import TeamMember
+    # v3.3.6: 移除 admin/super_admin 旁路, 任何角色均按可见数据集过滤
     own_ds_ids_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
     team_ds_ids_subq = select(Dataset.id).join(
         TeamMember, TeamMember.team_id == Dataset.team_id
     ).where(TeamMember.user_id == current_user.id)
-    # UNION
-    visible_ds_ids_stmt = own_ds_ids_subq.union_all(team_ds_ids_subq)
+    # v3.3.6-STATS-ISOLATION: 用 union (去重) 替代 union_all
+    # 原因: owner 同时是 team member 时, 自己的 dataset 会在两个子查询中重复,
+    # union_all 不会去重, 导致 datasets/images/model_versions 计数翻倍
+    visible_ds_ids_stmt = own_ds_ids_subq.union(team_ds_ids_subq)
     visible_ds_ids = [r[0] for r in (await db.execute(visible_ds_ids_stmt)).all()]
 
     if not visible_ds_ids:
@@ -112,14 +110,16 @@ async def stats_overview(
         )
     )).scalar() or 0
 
-    # 4) 模型版本数 (限定到可见数据集)
+    # 4) 模型版本数 (限定到可见数据集, 排除孤儿 model)
+    # v3.3.6: 原 admin 分支直接 func.count(ModelVersion.id) 全平台统计, 越权
     mv_count = (await db.execute(
         select(func.count(ModelVersion.id)).where(
-            ModelVersion.dataset_id.in_(visible_ds_ids)
+            ModelVersion.dataset_id.in_(visible_ds_ids),
+            ModelVersion.dataset_id.isnot(None),
         )
     )).scalar() or 0
 
-    # 5) 训练任务数 (限定到当前 user)
+    # 5) 训练任务数 (限定到当前 user 创建的)
     job_count = (await db.execute(
         select(func.count(TrainingJob.id)).where(TrainingJob.user_id == current_user.id)
     )).scalar() or 0
@@ -328,43 +328,16 @@ async def annotator_efficiency(
     - admin: 仍可看全系统排行 (运营视角)
     - 普通用户: 仅返回自己参与的标注统计, 单条 (self only)
       (原本会泄露全公司所有用户的标注量 + 用户名, 严重隐私问题)
-    """
-    if current_user.is_admin():
-        # 管理员: 保留全局视角
-        stmt = (
-            select(
-                AnnotationLog.user_id,
-                User.username,
-                func.count(AnnotationLog.id).label("annos"),
-                func.coalesce(func.sum(AnnotationLog.time_spent_ms), 0).label("total_ms"),
-            )
-            .join(User, User.id == AnnotationLog.user_id)
-        )
-        if task_type:
-            # v2.5.x: 仪表盘按任务类型筛选, 通过 Image -> Dataset.task_type 过滤
-            stmt = stmt.join(Image, Image.id == AnnotationLog.image_id).join(
-                Dataset, Dataset.id == Image.dataset_id
-            ).where(Dataset.task_type == task_type)
-        stmt = (
-            stmt.group_by(AnnotationLog.user_id, User.username)
-            .order_by(func.count(AnnotationLog.id).desc())
-            .limit(10)
-        )
-        rows = (await db.execute(stmt)).all()
-        items = []
-        for r in rows:
-            total_ms = float(r[3] or 0)
-            annos = int(r[2] or 0)
-            items.append({
-                "user_id": int(r[0]),
-                "username": r[1],
-                "annotation_count": annos,
-                "total_seconds": round(total_ms / 1000.0, 2),
-                "avg_seconds": round((total_ms / 1000.0) / max(annos, 1), 2),
-            })
-        return {"items": items}
 
-    # ---- 非 admin: 只返回当前用户自己的统计 ----
+    v3.3.6-STATS-ISOLATION 收紧 (严格最小权限):
+    - 移除 admin / super_admin 旁路
+    - 任何角色 (含 super_admin) 仅返回自己参与的标注统计
+    - 原因: 此端点返回 username + 标注量, admin 视角会泄露全平台
+            用户的活跃度 (竞品可推算团队规模/活跃度), 是严重隐私泄露
+    - 平台运营请通过 /api/users (admin only) 配合各 team 统计聚合
+    """
+    # v3.3.6: 任何角色 (含 super_admin) 均按 self only 返回
+    # 防止通过此端点枚举全平台用户的标注量 (严重隐私泄露)
     stmt = (
         select(
             func.count(AnnotationLog.id).label("annos"),
@@ -431,12 +404,25 @@ async def team_stats(
       - AI 节省时间估算
 
     权限: 仅团队成员可访问 (含 owner, manager, editor, viewer)
+           非成员不可访问 (包括 admin, 严格数据隔离)
+
+    v3.3.6-STATS-ISOLATION 增强:
+      - 添加 _assert_team_active(team) 校验
+      - 已归档团队的统计数据对非 super_admin 用户不可访问 (业务停止)
+      - super_admin 可访问归档团队数据 (审计/恢复场景)
+      - 原因: 团队归档意味着业务已停, 统计接口不应再泄露历史业务数据
     """
     # 1. 团队存在性 + 成员校验
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     await _assert_team_member_or_403(db, team_id, current_user.id)
+
+    # v3.3.6-STATS-ISOLATION: 归档校验 (与 team.py 其他端点对齐)
+    # 业务规则: 团队归档后, 业务数据访问应停止 (防止泄露历史协作数据)
+    # 平台代管场景: super_admin 可绕过 (用于审计/恢复)
+    if team.archived_at is not None and not current_user.is_super_admin():
+        raise HTTPException(410, "团队已归档, 统计数据不可访问")
 
     # 2. 团队下的 dataset_id 列表 (该团队共享的所有数据集)
     ds_rows = (await db.execute(

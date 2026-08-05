@@ -208,7 +208,7 @@ async def list_my_teams(
         regex="^(id_desc|id_asc|name_asc|name_desc|member_count_desc|created_desc|created_asc)$",
         description="排序方式",
     ),
-    include_archived: bool = Query(default=False, description="是否包含已归档团队 (仅 admin)"),
+    include_archived: bool = Query(default=False, description="是否包含已归档团队 (仅 super_admin)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -216,10 +216,15 @@ async def list_my_teams(
 
     v3.3.1 L3 增强:
       - 默认过滤 archived_at IS NULL (隐藏已归档)
-      - include_archived=true 仅 admin 可用, 显示全部
+      - include_archived=true 仅 super_admin 可用, 显示全部
       - 分页: page / page_size (默认 20, 最大 100)
       - 搜索: search 参数模糊匹配 name / description / slug (大小写不敏感)
       - 排序: sort 参数支持 7 种 (id 默认 desc, name, member_count, created_at)
+
+    v3.3.6-STATS-ISOLATION 收紧:
+      - include_archived 参数仅 super_admin 可生效
+      - regular admin 传入 true 时被忽略, 走默认过滤 (与普通用户一致)
+      - 原因: 归档团队仅 super_admin 运维场景需要查看
     """
     from sqlalchemy import or_
     from app.tasks.model.team_member import TeamMember as _TM
@@ -240,7 +245,7 @@ async def list_my_teams(
         .join(member_count_subq, member_count_subq.c.team_id == Team.id)
         .where(_TM.user_id == current_user.id)
     )
-    if not include_archived or not current_user.is_admin():
+    if not include_archived or not current_user.is_super_admin():
         base = base.where(Team.archived_at.is_(None))
 
     # 2. 搜索 (name / description / slug 模糊)
@@ -1152,16 +1157,26 @@ async def unshare_dataset(
 
     业务规则 (与用户新需求 §4「共享权限控制」一致):
       - 仅数据集的原始共享者 (owner) 可取消共享
-      - admin 可绕过 (运维场景)
+      - 仅 super_admin 可绕过 (平台级运维场景, 用于 owner 失联时的代管)
+      - regular admin 不再具备取消他人共享的权限 (越权风险)
       - 与团队角色无关 (即使 manager 也不能替 owner 取消)
+
+    v3.3.6-STATS-ISOLATION 收紧:
+      - 移除 is_admin() 旁路 → 收紧为 is_super_admin() 旁路
+      - 原因: regular admin 通过取消共享可破坏别人的协作关系 (横向越权),
+              仅保留 super_admin 作为平台代管
     """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
 
-    # v3.3.2: 严格校验 — 仅 owner / admin 可取消
-    if not current_user.is_admin() and dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限取消共享: 仅数据集原始共享者可操作")
+    # v3.3.6: 严格校验 — 仅 owner / super_admin 可取消
+    # regular admin 不再具备该权限 (避免横向越权破坏协作)
+    if (
+        not current_user.is_super_admin()
+        and dataset.owner_id != current_user.id
+    ):
+        raise HTTPException(403, "无权限取消共享: 仅数据集原始共享者或超级管理员可操作")
 
     old_team_id = dataset.team_id
     dataset.team_id = None
@@ -1510,9 +1525,15 @@ async def get_cache_stats(
 ):
     """v3.3.1 L4: 缓存统计 (hit/miss 计数 + 命中率).
 
-    权限: 仅 admin (运维监控)
+    权限: 仅 super_admin (运维监控)
     用途: 前端管理后台「缓存监控」卡片展示 hit_rate_percent + 趋势.
+
+    v3.3.6-STATS-ISOLATION 收紧:
+      - 旧逻辑: is_admin() (含 regular admin) 可查看
+      - 新逻辑: 仅 super_admin 可查看
+      - 原因: 缓存统计数据虽不直接泄露业务数据, 但含全局 hit/miss,
+              regular admin 不应掌握全平台运行指标 (信息隔离)
     """
-    if not current_user.is_admin():
-        raise HTTPException(403, "无权限: 仅系统管理员可查看缓存统计")
+    if not current_user.is_super_admin():
+        raise HTTPException(403, "无权限: 仅超级管理员可查看缓存统计")
     return cache.get_stats()
