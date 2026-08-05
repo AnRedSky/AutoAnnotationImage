@@ -102,6 +102,19 @@ async def preview_detection(
         except Exception as e:
             raise HTTPException(500, f"Detection inference failed: {str(e)[:200]}")
 
+        # v3.5.0 Phase T7 #2 优化: 预训练 names 字典提到循环外
+        # 原代码在 for b in boxes: 循环内反复 YOLO(weights_path).names
+        # 每张图每个 bbox 都重新实例化 YOLO (mmap + yaml + settings 重读)
+        # 100 张 × 20 bbox = 2000 次冗余加载, 预览从 < 1s 膨胀到数秒
+        # 修复: 进入循环前只取一次, 循环内复用
+        pretrained_names: dict = {}
+        if not used_finetune:
+            from ultralytics import YOLO
+            try:
+                pretrained_names = YOLO(weights_path).names
+            except Exception:
+                pretrained_names = {}
+
         items: list = []
         would_label = 0
         need_human = 0
@@ -128,13 +141,9 @@ async def preview_detection(
                     else:
                         cls_name = f"class_{b.class_index}"
                 else:
+                    # v3.5.0 Phase T7 #2: 复用预训练 names 字典 (循环外已取 1 次)
                     # YOLO.names 是 dict[int, str], class_index 是 COCO 索引
-                    from ultralytics import YOLO
-                    try:
-                        names = YOLO(weights_path).names
-                        cls_name = names.get(b.class_index, f"class_{b.class_index}")
-                    except Exception:
-                        cls_name = f"class_{b.class_index}"
+                    cls_name = pretrained_names.get(b.class_index, f"class_{b.class_index}")
                 in_proj = cls_name.lower() in cat_name_set
                 if in_proj:
                     in_categories_count += 1
