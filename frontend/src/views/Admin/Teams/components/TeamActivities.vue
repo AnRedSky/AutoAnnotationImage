@@ -1,15 +1,20 @@
 <script setup lang="ts">
 /**
- * 团队动态 Tab (v3.3.1 L4)
- * =========================
+ * 团队动态 Tab (v3.3.1 L4 + v3.3.3 中文增强)
+ * =======================================
  * 展示团队相关 audit_log, 调用 GET /api/teams/{id}/activities.
+ *
+ * v3.3.3 增强 (用户新需求 §4):
+ *   - 优先展示后端返回的 detail_message 字段 (中文自然语言描述)
+ *   - 去除「详情」按钮的 JSON 展开
+ *   - 描述以「人 + 动作 + 资源」三段式呈现, 通俗易懂
  *
  * 架构: 纯展示组件, 接收 teamId 作为 prop, 内部发起请求 (顶层页面允许).
  * 展示规则:
  *   - 时间倒序
- *   - 事件类型语义化标签
- *   - 详情 JSON 折叠展示
- *   - 操作人 + 时间 + 资源
+ *   - 事件类型语义化标签 (event_label)
+ *   - 中文自然语言描述 (detail_message) 作为主内容
+ *   - 操作人 + 时间
  */
 import { ref, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -21,6 +26,8 @@ interface ActivityItem {
   username: string
   event_type: string
   event_label: string
+  // v3.3.3: 中文自然语言描述
+  detail_message?: string
   resource_type: string | null
   resource_id: number | null
   detail: any
@@ -36,7 +43,6 @@ const activities = ref<ActivityItem[]>([])
 const total = ref(0)
 const loading = ref(false)
 const filterType = ref<string>('')
-const expandedRows = ref<number[]>([])
 
 const eventTypeOptions = [
   { value: '', label: '全部动态' },
@@ -85,21 +91,6 @@ const onFilterChange = () => {
   loadActivities()
 }
 
-const onToggleExpand = (id: number) => {
-  const idx = expandedRows.value.indexOf(id)
-  if (idx >= 0) expandedRows.value.splice(idx, 1)
-  else expandedRows.value.push(id)
-}
-
-const isExpanded = (id: number) => expandedRows.value.includes(id)
-
-const formatDetail = (detail: any): string => {
-  if (!detail || typeof detail !== 'object') return String(detail || '-')
-  return Object.entries(detail)
-    .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
-    .join(' | ')
-}
-
 watch(() => props.teamId, () => {
   loadActivities()
 })
@@ -136,12 +127,15 @@ onMounted(loadActivities)
       <el-empty description="暂无团队动态" />
     </div>
 
+    <!-- v3.3.3: 时间线, 每条动态 = 事件类型标签 + 中文描述 + 时间 + 操作人 -->
     <el-timeline v-else class="activity-timeline">
       <el-timeline-item
         v-for="item in activities"
         :key="item.id"
         :timestamp="fmtDate(item.created_at)"
         placement="top"
+        :hollow="false"
+        size="normal"
       >
         <el-card shadow="never" class="activity-card">
           <div class="activity-head">
@@ -149,23 +143,11 @@ onMounted(loadActivities)
               <el-tag :type="eventTypeTag(item.event_type)" size="small">
                 {{ item.event_label }}
               </el-tag>
-              <span class="username">{{ item.username }}</span>
-              <span v-if="item.resource_type" class="resource">
-                {{ item.resource_type }}#{{ item.resource_id }}
-              </span>
             </div>
-            <el-button
-              v-if="item.detail"
-              link
-              type="primary"
-              size="small"
-              @click="onToggleExpand(item.id)"
-            >
-              {{ isExpanded(item.id) ? '收起' : '详情' }}
-            </el-button>
           </div>
-          <div v-if="isExpanded(item.id) && item.detail" class="activity-detail">
-            <code>{{ formatDetail(item.detail) }}</code>
+          <!-- v3.3.3: 中文自然语言描述, 替代原 detail JSON 展开 -->
+          <div class="activity-message">
+            {{ item.detail_message || `${item.username} ${item.event_label}` }}
           </div>
         </el-card>
       </el-timeline-item>
@@ -202,6 +184,7 @@ onMounted(loadActivities)
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  margin-bottom: 6px;
 }
 .activity-meta {
   display: flex;
@@ -210,27 +193,12 @@ onMounted(loadActivities)
   flex: 1;
   min-width: 0;
 }
-.username {
-  font-weight: 500;
+/* v3.3.3: 中文描述主区域 */
+.activity-message {
+  font-size: 13.5px;
   color: var(--text-primary, #303133);
-  font-size: 13px;
-}
-.resource {
-  font-size: 12px;
-  color: var(--text-secondary, #909399);
-  background: #f5f7fa;
-  padding: 2px 6px;
-  border-radius: 3px;
-}
-.activity-detail {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: #fafbfc;
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--text-secondary, #606266);
-  word-break: break-all;
-  line-height: 1.6;
+  line-height: 1.7;
+  word-break: break-word;
 }
 .empty {
   padding: 32px 0;

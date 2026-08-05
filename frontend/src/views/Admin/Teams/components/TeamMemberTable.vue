@@ -1,7 +1,11 @@
 <script setup lang="ts">
 /**
- * 团队成员表格 (v3.3.1)
+ * 团队成员表格 (v3.3.1 + v3.3.3)
  * ======================
+ *
+ * v3.3.3 增强 (用户新需求 §3):
+ *   - 团队创建者 (所有者) 在「角色」列额外标注「（所有者）」字样
+ *   - 后端 list_members 返回 is_owner 字段, 前端按该字段显示双标签
  *
  * Props:
  *  - members: TeamMemberItem[]
@@ -88,11 +92,23 @@ const onRemove = async (m: TeamMemberItem) => {
           {{ row.email || '-' }}
         </template>
       </el-table-column>
-      <el-table-column label="角色" width="120">
+      <!-- v3.3.3: 角色列 — 团队创建者额外标注「（所有者）」 -->
+      <el-table-column label="角色" width="160">
         <template #default="{ row }">
-          <el-tag :type="roleTagType(row.role)" size="small">
-            {{ roleLabel(row.role) }}
-          </el-tag>
+          <div class="role-cell">
+            <el-tag :type="roleTagType(row.role)" size="small">
+              {{ roleLabel(row.role) }}
+            </el-tag>
+            <el-tag
+              v-if="row.is_owner"
+              type="danger"
+              size="small"
+              effect="dark"
+              class="owner-badge"
+            >
+              （所有者）
+            </el-tag>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="加入时间" width="170">
@@ -132,5 +148,19 @@ const onRemove = async (m: TeamMemberItem) => {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-secondary);
+}
+/* v3.3.3: 角色单元格 — 主标签 + 所有者徽章 */
+.role-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.owner-badge {
+  font-size: 11px;
+  padding: 0 6px;
+  height: 20px;
+  line-height: 18px;
+  letter-spacing: 0.5px;
 }
 </style>

@@ -424,6 +424,7 @@ watch(view, (v) => {
             :datasets="teamDatasets"
             :loading="datasetLoading"
             :can-manage="isManager"
+            :current-user-id="currentUserId"
             @view-dataset="onViewDataset"
             @unshare="onUnshareDataset"
             @share-dataset="onShareDatasetClick"

@@ -677,6 +677,9 @@ export interface TeamMemberItem {
   email: string | null
   role: string
   joined_at: string | null
+  // v3.3.3: 是否为团队创建者 (所有者)
+  // — 后端 list_members 返回, 前端按该字段在「角色」列额外标注「（所有者）」
+  is_owner?: boolean
 }
 
 export interface TeamItem {

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /**
- * 团队级数据集列表 (v3.3.1 + v3.3.2)
- * =================================
+ * 团队级数据集列表 (v3.3.1 + v3.3.2 + v3.3.3)
+ * ===========================================
  *
  * Props:
  *  - datasets: TeamDatasetItem[]
  *  - loading:  boolean
- *  - canManage: boolean   是否能取消共享 + 共享新数据集 (manager 角色以上)
+ *  - canManage: boolean       是否能取消共享 + 共享新数据集 (manager 角色以上)
+ *  - currentUserId: number    v3.3.3: 当前登录用户 id, 用于「仅 owner 可取消共享」判断
  *
  * Emits:
  *  - view-dataset   点击跳转到 DatasetDetail
@@ -17,10 +18,11 @@ import { DataLine, Share } from '@element-plus/icons-vue'
 import type { TeamDatasetItem } from '@/api'
 import { useRouter } from 'vue-router'
 
-defineProps<{
+const props = defineProps<{
   datasets: TeamDatasetItem[]
   loading: boolean
   canManage: boolean
+  currentUserId?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -77,6 +79,12 @@ const myAccessLabel = (role: string) => {
     viewer: '可阅读',
   }
   return m[role] || role
+}
+
+/** v3.3.3: 判断当前用户是否为该 dataset 的原始共享者 (owner) */
+const isDatasetOwner = (row: TeamDatasetItem) => {
+  if (props.currentUserId == null) return false
+  return row.owner_id === props.currentUserId
 }
 </script>
 
@@ -154,8 +162,18 @@ const myAccessLabel = (role: string) => {
           <el-button size="small" type="primary" plain @click="onView(row)">
             查看
           </el-button>
+          <!-- v3.3.3: 取消共享按钮仅 owner 可见 (用户新需求 §2) -->
+          <el-tooltip
+            v-if="!isDatasetOwner(row)"
+            content="仅数据集原始共享者可取消共享"
+            placement="top"
+          >
+            <el-button size="small" type="danger" plain disabled>
+              取消共享
+            </el-button>
+          </el-tooltip>
           <el-button
-            v-if="canManage"
+            v-else
             size="small"
             type="danger"
             plain

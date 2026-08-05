@@ -80,7 +80,7 @@ async def list_datasets(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """v3.3.2: 数据集列表 (个人所有 + 团队共享).
+    """v3.3.3: 数据集列表 (个人所有 + 团队共享, owner 视角优化).
 
     业务规则 (与用户新需求 §2「团队共享数据集可见性」对齐):
       1. admin 看全部
@@ -88,10 +88,23 @@ async def list_datasets(
 
     返回字段新增 (v3.3.2):
       - source:       "personal" | "team_shared"
-        (按 team_id 是否非空判断, 与 owner_id 解耦)
-      - team_id:      当 source=team_shared 时返回团队 id, 否则 null
-      - team_name:    当 source=team_shared 时返回团队名, 否则 null
-      - shared_by:    当 source=team_shared 时返回共享者用户名, 否则 null
+        (v3.3.3: 按「当前用户视角」计算, owner 自己看自己 dataset 永远 personal)
+
+    v3.3.3 增强 (用户新需求 §1):
+      - 当当前用户为 dataset 的 owner (原始创建者) 时,
+        即使 dataset.team_id 非空 (已分享给团队),
+        仍按「个人所有」展示, 不显示团队信息
+        — 这是因为 owner 视角下, dataset 仍首先是「我创建的」,
+          团队共享是衍生行为, 不应让 owner 看到「别人的团队共享」
+      - 个人计数 personal_count / team_shared_count 同样按「当前用户视角」计算
+      - admin 视角下, 非自己创建的 dataset 仍按团队共享处理
+
+    返回字段 (v3.3.3):
+      - source:       "personal" | "team_shared"
+                      (owner 看自己: personal; 其他人看: team_shared)
+      - team_id:      仅 source=team_shared 时返回团队 id, 否则 null
+      - team_name:    仅 source=team_shared 时返回团队名, 否则 null
+      - shared_by:    仅 source=team_shared 时返回共享者用户名, 否则 null
       - my_access:    在该数据集上的有效角色
                       ("owner" | "manager" | "editor" | "viewer" | "admin")
 
@@ -132,12 +145,14 @@ async def list_datasets(
         result = await db.execute(all_stmt)
         all_datasets = result.scalars().all()
 
-    # 按 source 分桶
-    personal_datasets = [d for d in all_datasets if d.team_id is None]
-    team_datasets = [d for d in all_datasets if d.team_id is not None]
-
     # ============== 2. 准备团队名 + 共享者映射 ==============
-    team_ids = {d.team_id for d in team_datasets if d.team_id is not None}
+    # v3.3.3: 仅收集「非 owner 视角下」为 team_shared 的 dataset 的 team_id
+    # — owner 自己看的 dataset 即使挂在 team 下, 也不需要 team 名/共享者
+    team_ids = {
+        d.team_id
+        for d in all_datasets
+        if d.team_id is not None and d.owner_id != current_user.id
+    }
     team_name_map: dict[int, str] = {}
     if team_ids:
         team_name_result = await db.execute(
@@ -146,8 +161,12 @@ async def list_datasets(
         for tid, tname in team_name_result.all():
             team_name_map[tid] = tname
 
-    # 共享者用户名
-    shared_by_user_ids = {d.owner_id for d in team_datasets}
+    # 共享者用户名 (同上, 仅对非 owner 视角的团队共享 dataset)
+    shared_by_user_ids = {
+        d.owner_id
+        for d in all_datasets
+        if d.team_id is not None and d.owner_id != current_user.id
+    }
     shared_by_map: dict[int, str] = {}
     if shared_by_user_ids:
         from app.admin.model.user import User as _User
@@ -173,25 +192,35 @@ async def list_datasets(
     def _build(d: Dataset) -> dict:
         is_owner = d.owner_id == current_user.id
         if d.team_id is None:
-            # 个人数据集
+            # 个人数据集 (未共享给任何团队)
             source = "personal"
             team_id = None
             team_name = None
             shared_by = None
             my_access = "owner" if is_owner else ("admin" if current_user.is_admin() else "viewer")
         else:
-            # 团队共享数据集
-            source = "team_shared"
-            team_id = d.team_id
-            team_name = team_name_map.get(d.team_id)
-            shared_by = shared_by_map.get(d.owner_id)
+            # team_id 非空 — 区分 owner 视角 vs 其他人视角
+            # v3.3.3 用户新需求 §1:
+            #   owner 自己看自己的 dataset → 「个人所有」 (即使挂在团队下)
+            #   其他人看 → 「团队共享」
             if is_owner:
+                # v3.3.3: owner 视角 — 视为「个人所有」
+                source = "personal"
+                team_id = None
+                team_name = None
+                shared_by = None
                 my_access = "owner"
-            elif current_user.is_admin():
-                my_access = "admin"
             else:
-                role = my_role_map.get(d.team_id)
-                my_access = role or "viewer"
+                # 其他人视角 — 视为「团队共享」
+                source = "team_shared"
+                team_id = d.team_id
+                team_name = team_name_map.get(d.team_id)
+                shared_by = shared_by_map.get(d.owner_id)
+                if current_user.is_admin():
+                    my_access = "admin"
+                else:
+                    role = my_role_map.get(d.team_id)
+                    my_access = role or "viewer"
         return {
             "id": d.id,
             "name": d.name,
@@ -203,7 +232,7 @@ async def list_datasets(
             "status": d.status,
             "owner_id": d.owner_id,
             "created_at": d.created_at.isoformat() if d.created_at else None,
-            # v3.3.2 新增字段
+            # v3.3.2/v3.3.3 字段
             "source": source,
             "team_id": team_id,
             "team_name": team_name,
@@ -211,10 +240,23 @@ async def list_datasets(
             "my_access": my_access,
         }
 
+    # v3.3.3: 按「owner 视角下的 source」分桶
+    # — owner 看自己: 进 personal_datasets
+    # — 非 owner 看团队共享: 进 team_datasets
+    personal_datasets = [
+        d for d in all_datasets
+        if d.team_id is None or d.owner_id == current_user.id
+    ]
+    team_datasets = [
+        d for d in all_datasets
+        if d.team_id is not None and d.owner_id != current_user.id
+    ]
+
     items = [_build(d) for d in personal_datasets] + [_build(d) for d in team_datasets]
     return {
         "items": items,
         "total": len(items),
+        # v3.3.3: 计数也按「当前用户视角」计算
         "personal_count": len(personal_datasets),
         "team_shared_count": len(team_datasets),
     }

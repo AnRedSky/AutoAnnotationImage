@@ -311,14 +311,25 @@ const closeUpload = async () => {
           <span class="page-title__count text-faint">· {{ data.length }} 个</span>
           <!-- v3.3.2: 数据来源统计 (个人/团队共享) -->
           <span class="page-title__source">
-            <el-tag size="small" type="primary" effect="plain" class="source-tag">
-              <el-icon><UserFilled /></el-icon>
-              个人 {{ personalTotal }}
-            </el-tag>
-            <el-tag size="small" type="success" effect="plain" class="source-tag">
-              <el-icon><Share /></el-icon>
-              团队共享 {{ teamSharedTotal }}
-            </el-tag>
+            <!-- v3.3.3: 数据来源统计 (owner 视角: 含自己已分享给团队的 dataset) -->
+            <el-tooltip
+              content="包括未共享给团队的数据集, 以及您已分享给团队但仍归您所有的数据集"
+              placement="top"
+            >
+              <el-tag size="small" type="primary" effect="plain" class="source-tag">
+                <el-icon><UserFilled /></el-icon>
+                个人 {{ personalTotal }}
+              </el-tag>
+            </el-tooltip>
+            <el-tooltip
+              content="其他成员共享给团队, 您作为团队成员可访问的数据集"
+              placement="top"
+            >
+              <el-tag size="small" type="success" effect="plain" class="source-tag">
+                <el-icon><Share /></el-icon>
+                团队共享 {{ teamSharedTotal }}
+              </el-tag>
+            </el-tooltip>
           </span>
         </h2>
         <p class="page-desc text-soft">

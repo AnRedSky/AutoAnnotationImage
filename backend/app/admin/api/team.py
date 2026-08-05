@@ -609,7 +609,13 @@ async def list_members(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """团队成员列表 (仅成员可见, 数据隔离)."""
+    """团队成员列表 (仅成员可见, 数据隔离).
+
+    v3.3.3 增强 (用户新需求 §3):
+      - 返回每条 member 的 is_owner 字段
+        (与 team.owner_id 相等时为 True)
+      - 团队所有者 (创建者) 在前端显示「可管理（所有者）」标签
+    """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -634,6 +640,9 @@ async def list_members(
                 "email": r[1].email,
                 "role": r[0].role,
                 "joined_at": r[0].joined_at.isoformat() if r[0].joined_at else None,
+                # v3.3.3: 是否为团队创建者 (所有者)
+                # — 用于前端在「角色」列额外标注「（所有者）」
+                "is_owner": r[1].id == team.owner_id,
             }
             for r in rows
         ]
@@ -1178,7 +1187,7 @@ async def unshare_dataset(
     return {"success": True, "dataset_id": dataset_id, "team_id": None}
 
 
-# ============== 团队活动 Feed (v3.3.1 L4) ==============
+# ============== 团队活动 Feed (v3.3.1 L4 + v3.3.3 中文增强) ==============
 
 # 活动事件类型语义化映射 (前端可直接显示)
 _TEAM_ACTIVITY_LABELS = {
@@ -1194,6 +1203,163 @@ _TEAM_ACTIVITY_LABELS = {
     "dataset_shared_to_team": "共享数据集",
     "dataset_unshared_from_team": "取消共享数据集",
 }
+
+
+def _build_activity_message(
+    log: AuditLog,
+    actor_name: str,
+    role_label_map: dict[int, str],
+    user_name_map: dict[int, str],
+    team_name_map: dict[int, str],
+    dataset_name_map: dict[int, str],
+) -> str:
+    """v3.3.3: 生成团队动态的中文自然语言描述.
+
+    业务规则 (与用户新需求 §4「团队动态记录规范」对齐):
+      - 统一使用通俗易懂的规范中文表述
+      - 避免直接使用代码变量名、技术术语、英文表述
+      - 优先以「人 + 动作 + 资源」三段式表达
+      - detail 中能解析的字段全部翻译为自然语言
+
+    Args:
+        log: 审计日志记录
+        actor_name: 触发人用户名 (如 "alice")
+        role_label_map: user_id -> 中文角色标签 (如 {1: "可管理", 2: "可编辑"})
+        user_name_map: user_id -> 用户名 (用于转让/邀请/移除等场景)
+        team_name_map: team_id -> 团队名 (备用, 实际 event 中通常一致)
+        dataset_name_map: dataset_id -> 数据集名 (用于共享/取消共享场景)
+
+    Returns:
+        自然语言描述, 如:
+          "alice 创建了团队「标注组A」"
+          "bob 邀请了 carol 加入团队, 角色为「可编辑」"
+          "alice 把数据集「猫狗分类」共享给了团队「标注组A」"
+    """
+    detail = log.detail or {}
+    et = log.event_type
+    res_type = log.resource_type
+    res_id = log.resource_id
+
+    if et == "team_created":
+        name = detail.get("name", f"团队{log.team_id}")
+        return f"{actor_name} 创建了团队「{name}」"
+
+    if et == "team_updated":
+        changes = detail.get("changes") or {}
+        if not changes:
+            return f"{actor_name} 更新了团队信息"
+        # 字段 → 中文标签
+        field_map = {
+            "name": "名称",
+            "description": "描述",
+            "max_members": "成员上限",
+            "slug": "标识",
+        }
+        parts = []
+        for field, ch in changes.items():
+            label = field_map.get(field, field)
+            old = ch.get("old")
+            new = ch.get("new")
+            if field == "max_members":
+                parts.append(f"{label}从 {old} 调整为 {new}")
+            else:
+                parts.append(f"{label}修改为「{new}」")
+        return f"{actor_name} 更新了团队: " + "; ".join(parts)
+
+    if et == "team_deleted":
+        member_count = detail.get("member_count", 0)
+        return f"{actor_name} 归档了团队 (含 {member_count} 名成员)"
+
+    if et == "team_restored":
+        return f"{actor_name} 恢复了已归档的团队"
+
+    if et == "team_ownership_transferred":
+        old_id = detail.get("old_owner")
+        new_id = detail.get("new_owner")
+        new_name = user_name_map.get(new_id, f"用户{new_id}") if new_id else ""
+        return f"{actor_name} 将团队所有权转让给了「{new_name}」"
+
+    if et == "team_left":
+        old_role = detail.get("old_role", "")
+        role_cn = role_label_map.get(-1, "")  # 兜底
+        # 优先用 detail.old_role 解析
+        try:
+            from app.tasks.model.team_member import ROLE_LABELS as _RL
+            role_cn = _RL.get(old_role, old_role or "")
+        except Exception:
+            pass
+        return f"{actor_name} 退出了团队 (原角色: {role_cn or '成员'})"
+
+    if et == "team_member_invited":
+        invitee = detail.get("invitee_username", f"用户{detail.get('invitee_id', '')}")
+        role = detail.get("role", "")
+        try:
+            from app.tasks.model.team_member import ROLE_LABELS as _RL
+            role_cn = _RL.get(role, role or "成员")
+        except Exception:
+            role_cn = role or "成员"
+        return f"{actor_name} 邀请了「{invitee}」加入团队, 角色为「{role_cn}」"
+
+    if et == "team_member_role_changed":
+        old_role = detail.get("old_role", "")
+        new_role = detail.get("new_role", "")
+        target_id = res_id or detail.get("user_id")
+        target_name = user_name_map.get(target_id, f"用户{target_id}") if target_id else "成员"
+        try:
+            from app.tasks.model.team_member import ROLE_LABELS as _RL
+            old_cn = _RL.get(old_role, old_role or "未知")
+            new_cn = _RL.get(new_role, new_role or "未知")
+        except Exception:
+            old_cn = old_role or "未知"
+            new_cn = new_role or "未知"
+        return (
+            f"{actor_name} 将「{target_name}」的角色从「{old_cn}」"
+            f"调整为「{new_cn}」"
+        )
+
+    if et == "team_member_removed":
+        removed_id = detail.get("removed_id") or res_id
+        target_name = (
+            user_name_map.get(removed_id, f"用户{removed_id}")
+            if removed_id else "成员"
+        )
+        old_role = detail.get("old_role", "")
+        try:
+            from app.tasks.model.team_member import ROLE_LABELS as _RL
+            role_cn = _RL.get(old_role, old_role or "成员")
+        except Exception:
+            role_cn = old_role or "成员"
+        return f"{actor_name} 将「{target_name}」从团队中移除 (原角色: {role_cn})"
+
+    if et == "dataset_shared_to_team":
+        ds_id = res_id or detail.get("dataset_id")
+        ds_name = (
+            dataset_name_map.get(ds_id) or detail.get("dataset_name")
+            or f"数据集{ds_id}"
+        )
+        team_id = log.team_id or detail.get("team_id")
+        team_name = team_name_map.get(team_id) if team_id else None
+        if team_name:
+            return f"{actor_name} 把数据集「{ds_name}」共享给了团队「{team_name}」"
+        return f"{actor_name} 把数据集「{ds_name}」共享到了团队"
+
+    if et == "dataset_unshared_from_team":
+        ds_id = res_id or detail.get("dataset_id")
+        ds_name = (
+            dataset_name_map.get(ds_id) or detail.get("dataset_name")
+            or f"数据集{ds_id}"
+        )
+        team_id = log.team_id or detail.get("team_id")
+        team_name = team_name_map.get(team_id) if team_id else None
+        is_auto = detail.get("auto_replaced", False)
+        suffix = " (由新共享自动覆盖)" if is_auto else ""
+        if team_name:
+            return f"{actor_name} 取消了在团队「{team_name}」的数据集「{ds_name}」共享{suffix}"
+        return f"{actor_name} 取消了数据集「{ds_name}」的团队共享{suffix}"
+
+    # 兜底: 未知事件类型
+    label = _TEAM_ACTIVITY_LABELS.get(et, et)
+    return f"{actor_name} {label}"
 
 
 @router.get("/{team_id}/activities")
@@ -1215,9 +1381,13 @@ async def list_team_activities(
       - 按 created_at DESC 排序 (最新在前)
       - event_type 可选过滤
 
+    v3.3.3 增强 (用户新需求 §4):
+      - 新增 detail_message 字段, 基于 event_type + detail 生成中文自然语言描述
+      - 前端优先展示 detail_message, 避免直接显示英文 key / JSON
+
     响应字段:
-      - items: [{id, user_id, username, event_type, event_label, resource_type,
-                 resource_id, detail, created_at}]
+      - items: [{id, user_id, username, event_type, event_label, detail_message,
+                 resource_type, resource_id, detail, created_at}]
       - total: 符合条件的总条数
     """
     # 1. 权限与归档校验
@@ -1249,6 +1419,55 @@ async def list_team_activities(
     result = await db.execute(stmt)
     rows = result.all()
 
+    # ============== v3.3.3: 准备中文描述所需映射 ==============
+    # 收集涉及的 user_id (含 detail.invitee_id / removed_id / new_owner / old_owner 等)
+    user_ids: set[int] = set()
+    dataset_ids: set[int] = set()
+    for log, _username in rows:
+        user_ids.add(log.user_id)
+        detail = log.detail or {}
+        for k in (
+            "invitee_id", "removed_id", "old_owner", "new_owner",
+            "user_id",
+        ):
+            v = detail.get(k)
+            if isinstance(v, int):
+                user_ids.add(v)
+        # v3.3.3: team_member resource_id 是被操作成员的 user_id
+        # (role_changed / removed 等事件), 需一并收集以构建中文描述
+        if log.resource_type == "team_member" and log.resource_id:
+            user_ids.add(log.resource_id)
+        if log.resource_type == "dataset" and log.resource_id:
+            dataset_ids.add(log.resource_id)
+        if log.event_type in ("dataset_shared_to_team", "dataset_unshared_from_team"):
+            v = detail.get("dataset_id")
+            if isinstance(v, int):
+                dataset_ids.add(v)
+
+    # 批量查用户名 (触发人以外)
+    user_name_map: dict[int, str] = {}
+    if user_ids:
+        names_q = await db.execute(
+            select(User.id, User.username).where(User.id.in_(user_ids))
+        )
+        for uid, uname in names_q.all():
+            user_name_map[uid] = uname
+
+    # 批量查数据集名
+    dataset_name_map: dict[int, str] = {}
+    if dataset_ids:
+        ds_q = await db.execute(
+            select(Dataset.id, Dataset.name).where(Dataset.id.in_(dataset_ids))
+        )
+        for did, dname in ds_q.all():
+            dataset_name_map[did] = dname
+
+    # 团队名映射 (本端点通常都在同一 team 下, 简单构造)
+    team_name_map: dict[int, str] = {team_id: team.name}
+
+    # 角色标签映射 (供 detail 中的 old_role / new_role 翻译)
+    role_label_map: dict[int, str] = {}
+
     return {
         "items": [
             {
@@ -1257,6 +1476,15 @@ async def list_team_activities(
                 "username": username,
                 "event_type": log.event_type,
                 "event_label": _TEAM_ACTIVITY_LABELS.get(log.event_type, log.event_type),
+                # v3.3.3: 中文自然语言描述 (前端优先展示)
+                "detail_message": _build_activity_message(
+                    log,
+                    actor_name=username,
+                    role_label_map=role_label_map,
+                    user_name_map=user_name_map,
+                    team_name_map=team_name_map,
+                    dataset_name_map=dataset_name_map,
+                ),
                 "resource_type": log.resource_type,
                 "resource_id": log.resource_id,
                 "detail": log.detail,
