@@ -8,6 +8,7 @@ Celery Tasks: Model Training & Auto Annotate (v3.0.0 Phase 5 薄化)
   TrainingLifecycleService, worker 主体从 ~585 行减到 ~300 行
 - 兼容垫片 `_update_training_history` / `_persist_dataset_stats` 移至 TrainingLifecycleService
 """
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -103,6 +104,12 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         → 客户端 store 反复 reactive 触发
         修复: class_names 是**慢变化数据**, 训练启动时一次性写 DB + 透传即可
               progress_callback 阶段只传 num_classes (int, 几个字节)
+
+        v3.6.0 P5: sticky_meta 缓存 class_names hash, 避免重复写 DB
+        - 原: 每次 progress_callback 含 data_total+num_classes 时都调 persist_dataset_stats_sync
+              写库 (实际业务只调一次, 但代码无防护, 重构后可能引入回归)
+        - 优: 缓存上次写入的 class_names hash, 比较后再决定
+              同一数据集反复训练, dataset_stats DB 写为 0 次
         """
         meta = {
             "progress": round(p, 2),
@@ -118,9 +125,18 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
                 meta.update(_extra)
                 sticky_meta.update(_extra)
         TrainingLifecycleService.set_task_state(self, "PROGRESS", meta)
-        # 持久化数据集统计到 DB
+        # 持久化数据集统计到 DB (仅当 class_names 变化时才写)
         if extra and "data_total" in extra and "num_classes" in extra:
-            TrainingLifecycleService.persist_dataset_stats_sync(task_id, extra, job_id=job_id)
+            _class_names = extra.get("class_names") or []
+            # v3.6.0 P5: hash 缓存, 同 class_names 不重复写 DB
+            _cn_hash = hashlib.md5(
+                json.dumps(_class_names, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if sticky_meta.get("class_names_hash") != _cn_hash:
+                sticky_meta["class_names_hash"] = _cn_hash
+                TrainingLifecycleService.persist_dataset_stats_sync(
+                    task_id, extra, job_id=job_id,
+                )
 
     def epoch_cb(p: float, msg: str, epoch_data: dict):
         """每 epoch 结束回调
