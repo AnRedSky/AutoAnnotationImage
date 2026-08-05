@@ -32,12 +32,23 @@ def _get_worker_loop() -> asyncio.AbstractEventLoop:
     - 首次调用: new_event_loop + set_event_loop, 返回新 loop
     - 后续调用: 复用已有 loop (is_closed() 时重建)
     - loop 生命周期 = 线程生命周期, 连接池绑定到该 loop
+
+    v3.5.1 修复: 首次创建 loop 时**主动触发 thread-local engine 懒创建**,
+    确保该 thread 后续所有 DB 调用都用专属 engine (避免 aiomysql 跨 loop).
+    否则首次 DB 调用才会冷启动 engine, 第一次 ping 仍可能跨 loop.
     """
     loop = getattr(_thread_local, "loop", None)
     if loop is None or loop.is_closed():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _thread_local.loop = loop
+        # v3.5.1: 显式触发 thread-local engine 懒创建
+        # 在 worker 启动时就建好 engine, 避免首次 DB 调用冷启动时的跨 loop 风险
+        try:
+            from app.database.engine import get_thread_engine
+            get_thread_engine()
+        except Exception:
+            pass  # 懒加载失败时, 下次调用仍可重试
     else:
         asyncio.set_event_loop(loop)
     return loop
@@ -79,6 +90,9 @@ def dispose_worker_loop() -> None:
 
     仅在 worker 优雅关闭时调用 (start_workers.py 的 shutdown hook).
     正常任务执行期间不应调用 — 会让后续 DB 查询重建连接。
+
+    v3.5.1 修复: 同步 dispose thread-local engine (如果该 thread 创建过),
+    否则连接池在 worker 退出时不会主动释放, 可能导致 MySQL 端连接泄漏.
     """
     global _thread_local
     loop = getattr(_thread_local, "loop", None)
@@ -89,6 +103,12 @@ def dispose_worker_loop() -> None:
         loop.run_until_complete(engine.dispose())
     except Exception:  # noqa: BLE001
         logger.debug("dispose_worker_loop: engine.dispose skipped", exc_info=True)
+    # v3.5.1: 同时 dispose thread-local engine (如果存在)
+    try:
+        from app.database.engine import dispose_thread_engine
+        loop.run_until_complete(dispose_thread_engine())
+    except Exception:  # noqa: BLE001
+        logger.debug("dispose_worker_loop: dispose_thread_engine skipped", exc_info=True)
     try:
         loop.close()
     except Exception:  # noqa: BLE001
