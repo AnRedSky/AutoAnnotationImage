@@ -26,6 +26,8 @@ from torch.utils.data import DataLoader
 # 顶层 import 以确保类型注解 + 异常类在训练循环里可用
 from app.tasks.workers.control_signals import SignalAction, TaskCanceled  # noqa: E402
 from app.tasks.ml.classification import TrainingPaused  # noqa: E402
+# v3.6.0 P4: 复用 classification 的 DataLoader 配置常量 (settings.DATALOADER_WORKERS)
+from app.core.config import settings
 
 
 ProgressCallback = Optional[Callable[[str, int, int, str], None]]
@@ -128,9 +130,23 @@ def train_segmentation(
     if len(ds) == 0:
         raise ValueError("数据集为空, 无可训练样本")
 
+    # v3.6.0 P4: 与 classification 同步启用 DataLoader 加速配置
+    # - num_workers 从 settings 读 (默认 4, GPU 训练推荐 2-4)
+    # - pin_memory: 仅在 num_workers>0 且 CUDA 可用时启用
+    # - persistent_workers + prefetch_factor: 仅在 num_workers>0 时启用
+    # 注: seg_train 主要场景是 CPU 训练 (注释里写"缺省 CPU 训练"), 但 GPU 部署
+    # 也能享受同样加速. 与 classification 配置完全一致, 避免成为新瓶颈.
+    _dl_kwargs: Dict[str, Any] = {
+        "num_workers": settings.DATALOADER_WORKERS,
+        "pin_memory": settings.DATALOADER_WORKERS > 0 and torch.cuda.is_available(),
+    }
+    if settings.DATALOADER_WORKERS > 0:
+        _dl_kwargs["persistent_workers"] = True
+        _dl_kwargs["prefetch_factor"] = 2
+
     loader = DataLoader(
         ds, batch_size=min(batch_size, len(ds)),
-        shuffle=True, num_workers=0,
+        shuffle=True, **_dl_kwargs,
     )
 
     model = _build_model(backbone, num_classes)
@@ -162,19 +178,24 @@ def train_segmentation(
             if action == SignalAction.PAUSE:
                 raise TrainingPaused(epoch=epoch, total_epochs=epochs)
 
-        epoch_loss = 0.0
+        epoch_loss_t = torch.zeros((), device=device)
         n_batches = 0
         for batch_idx, (imgs, tgts) in enumerate(loader, start=1):
-            imgs = imgs.to(device)
-            tgts = tgts.to(device)
-            optimizer.zero_grad()
+            # v3.6.0 P4: non_blocking 与 pin_memory 配合, host->device 异步传输
+            imgs = imgs.to(device, non_blocking=True)
+            tgts = tgts.to(device, non_blocking=True)
+            # v3.6.0 P4: set_to_none 减少内存分配 (PyTorch 1.7+ 推荐)
+            optimizer.zero_grad(set_to_none=True)
             out = model(imgs)["out"]  # (B, C, H, W)
             loss = loss_fn(out, tgts)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            # v3.6.0 P4: tensor 累积, 消除每 batch loss.item 调用同步
+            # 旧版 epoch_loss 累加 loss.item 每个 batch 强制 GPU->CPU 同步
+            epoch_loss_t += loss.detach()
             n_batches += 1
-        avg_loss = epoch_loss / max(1, n_batches)
+        # epoch 末再同步一次, 拿到标量
+        avg_loss = (epoch_loss_t / max(n_batches, 1)).item()
 
         # 评估 (复用最后一 batch logits, 简化)
         model.eval()
