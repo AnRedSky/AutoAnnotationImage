@@ -94,12 +94,20 @@ async def run_auto_annotate(
 @router.get("/status/{task_id}")
 async def get_task_status(
     task_id: str,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     查询异步预标注任务进度 (v3.0.0 Phase 4: thin wrapper, 业务下沉到 AutoAnnotateService)
+
+    v3.3.6-STATS-ISOLATION 修复 (P0-越权):
+      - 之前: 任何登录用户可查询任意 task_id 进度 (含他人数据集)
+      - 现在: 校验 task meta 中的 user_id/dataset_id, 仅 owner / team_member 可查询
+      - 严格最小权限: super_admin 也不旁路
     """
-    return AutoAnnotateService.get_async_status(task_id)
+    return await AutoAnnotateService.get_async_status(
+        task_id, current_user=current_user, db=db
+    )
 
 
 @router.get("/models")

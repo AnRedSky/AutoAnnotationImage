@@ -83,9 +83,10 @@ async def start_detection_train(
             f"Dataset id={payload.dataset_id} task_type="
             f"{ds.task_type!r}, expected 'detection'",
         )
-    # 权限: 仅 owner 可训练 (v1.0.0 已有约定)
-    if ds.owner_id and ds.owner_id != current_user.id:
-        raise HTTPException(403, "仅数据集 owner 可启动训练")
+    # 权限: 必须对该 dataset 有写权限 (v3.3.6-STATS-ISOLATION 统一走 assert_can_access_dataset)
+    # 旧逻辑仅校验 owner, 团队成员无法启动训练 (横向越权修复)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     # 2) model_alias 兜底
     model_alias = payload.model_name.strip() or f"{payload.base_model}_run"
@@ -143,6 +144,9 @@ async def start_auto_annotate(
         raise HTTPException(
             400, f"ModelVersion task_type={mv.task_type!r}, expected 'detection'",
         )
+    # v3.3.6-STATS-ISOLATION: 校验 dataset 写权限 (含 team_member 共享, 修旧版越权)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     from app.tasks.workers.detection import auto_annotate_detection_task
     try:
@@ -200,6 +204,9 @@ async def start_auto_annotate_pretrained(
         raise HTTPException(404, f"Dataset id={dataset_id} not found")
     if ds.task_type != TaskType.DETECTION.value:
         raise HTTPException(400, f"非 detection 数据集: {ds.task_type}")
+    # v3.3.6-STATS-ISOLATION: 校验 dataset 写权限 (旧版无校验, 任何用户可启动)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     # 校验数据集类目与 COCO 80 类的交集, 提示用户可能无命中
     coco_class_names = _get_coco_class_names()

@@ -738,11 +738,15 @@ async def recent_annotations(
       - 移除 super_admin 全局视角旁路
       - 任何角色 (含 super_admin) 均按个人+团队共享过滤
       - 严格遵循最小权限原则
+
+    v3.3.6-STATS-ISOLATION 加固:
+      - union_all → union 去重, 避免 owner 同时是 team member 时
+        AnnotationLog 出现双计 (导致活动流重复显示同一记录)
+      - 注释: union_all 不去重, union 自动 distinct dataset id
     """
     from app.admin.model.user import User as UserModel
     from app.tasks.model.dataset import Dataset
     from app.tasks.model.team_member import TeamMember
-    from sqlalchemy import union_all
 
     # v3.3.5: 移除 super_admin 全局视角, 任何角色均按可见 dataset 过滤
     own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
@@ -751,7 +755,13 @@ async def recent_annotations(
         .join(TeamMember, TeamMember.team_id == Dataset.team_id)
         .where(TeamMember.user_id == current_user.id)
     )
-    visible_ds_subq = own_ds_subq.union_all(team_ds_subq)
+    # v3.3.6-STATS-ISOLATION: union 去重, 避免 owner+team member 双计同一 dataset
+    # 原因: 当 current_user 既是 owner 又是 team member 时, 自己创建的 dataset
+    # 会在 own_ds_subq 和 team_ds_subq 两个子查询中各出现一次; union_all 不去重,
+    # 导致 IN 子句对该 dataset_id 重复匹配, 实际不会双计 AnnotationLog 行 (因为
+    # 条件是 Image.dataset_id in (subq), IN 本身去重, 但 IN 子查询的 dataset_id
+    # 重复仍会降低查询效率且容易在后续 JOIN 中误用). 改用 union 去重更稳妥.
+    visible_ds_subq = own_ds_subq.union(team_ds_subq)
     stmt = (
         select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
         .join(Image, Image.id == AnnotationLog.image_id)

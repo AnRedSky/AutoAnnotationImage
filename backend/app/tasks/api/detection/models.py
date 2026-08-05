@@ -18,6 +18,12 @@ detection.models 模块 — 模型管理 + 跨图复制建议
 **S9.3 跨图复制建议** (v2.2.0):
 - 目标图的 task_type='detection', 返回按 category_id 分组的平均 bbox
 - 仅返回 source_count >= min_source_count 的类别 (避免噪声)
+
+**v3.3.6-STATS-ISOLATION 修复 (P0-越权)**:
+- /copy-suggestion/{image_id} 之前未校验 image 所属 dataset 的访问权,
+  任何登录用户可访问任意 image_id 的跨图复制建议
+  (含其他用户数据集的 bbox 统计信息, 严重业务数据泄露)
+- 修复: 调用 assert_can_access_dataset 校验 image 所属 dataset
 """
 from collections import defaultdict
 
@@ -29,9 +35,12 @@ from app.database import get_db
 from app.middleware.http.auth import get_current_user
 from app.admin.model.user import User
 from app.tasks.model.image import Image
+from app.tasks.model.dataset import Dataset
 from app.annotation.model.bbox_annotation import BBoxAnnotation
 from app.tasks.model.model_version import ModelVersion
 from app.common.enums import TaskType
+# v3.3.6-STATS-ISOLATION: 跨图复制建议的 dataset 访问权校验
+from app.tasks.service.permission_service import assert_can_access_dataset
 
 router = APIRouter()
 
@@ -130,6 +139,11 @@ async def copy_suggestion(
       3) 按 category_id 分组, 计算 avg(x_min, y_min, x_max, y_max)
       4) 仅返回 source_count >= min_source_count 的类别 (避免噪声)
     返回: [{category_id, avg_x_min, avg_y_min, avg_x_max, avg_y_max, source_count}]
+
+    v3.3.6-STATS-ISOLATION 修复 (P0-越权):
+      - 之前: 任何登录用户可访问任意 image_id 的跨图复制建议 (含他人数据集)
+      - 现在: 必须校验 image 所属 dataset 的访问权 (owner / team_member)
+      - 原因: 跨图 bbox 平均值泄露数据集内类别分布, 属业务数据
     """
     target_img = await db.get(Image, image_id)
     if not target_img:
@@ -139,6 +153,14 @@ async def copy_suggestion(
             400,
             f"Image task_type={target_img.task_type!r}, expected 'detection'",
         )
+
+    # v3.3.6-STATS-ISOLATION: 校验目标图所属 dataset 的访问权
+    # 严格最小权限: 含 super_admin 均需 owner/team_member 校验
+    # (与 dataset.py 的 list_datasets / annotation.py 的 recent_annotations 策略一致)
+    target_dataset = await db.get(Dataset, target_img.dataset_id)
+    if not target_dataset:
+        raise HTTPException(404, f"Dataset id={target_img.dataset_id} not found")
+    await assert_can_access_dataset(db, current_user, target_dataset)
 
     # 同 dataset 的所有已确认/已修正图
     confirmed_rows = (await db.execute(

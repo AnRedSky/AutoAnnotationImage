@@ -162,7 +162,6 @@ async def list_active_models(
       - 严格遵循最小权限原则
     """
     from app.tasks.model.team_member import TeamMember
-    from sqlalchemy import union_all
 
     items: list[dict] = []
 
@@ -173,7 +172,8 @@ async def list_active_models(
         .join(TeamMember, TeamMember.team_id == Dataset.team_id)
         .where(TeamMember.user_id == current_user.id)
     )
-    visible_ds_subq = own_ds_subq.union_all(team_ds_subq)
+    # v3.3.6-STATS-ISOLATION: union 去重, 避免 owner+team member 双计同一 dataset
+    visible_ds_subq = own_ds_subq.union(team_ds_subq)
 
     if dataset_id is not None:
         # 校验该 dataset 可见

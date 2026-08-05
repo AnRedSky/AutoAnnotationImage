@@ -62,8 +62,10 @@ async def start_segmentation_train(
             400,
             f"Dataset task_type={ds.task_type!r}, expected 'segmentation'",
         )
-    if ds.owner_id and ds.owner_id != current_user.id:
-        raise HTTPException(403, "仅数据集 owner 可启动训练")
+    # v3.3.6-STATS-ISOLATION: 统一走 assert_can_access_dataset (含 team_member 共享)
+    # 旧逻辑仅校验 owner, 团队成员无法启动训练 (横向越权修复)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     backbone = (payload.get("backbone") or "deeplabv3_resnet50").strip()
     model_alias = (payload.get("model_name") or "").strip() or f"{backbone}_run"
@@ -119,6 +121,9 @@ async def start_segmentation_auto_annotate(
         raise HTTPException(
             400, f"ModelVersion task_type={mv.task_type!r}, expected 'segmentation'",
         )
+    # v3.3.6-STATS-ISOLATION: 校验 dataset 写权限 (含 team_member 共享)
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    await assert_can_access_dataset(db, current_user, ds, require_write=True)
 
     from app.tasks.workers.segmentation import auto_annotate_segmentation_task
     try:
