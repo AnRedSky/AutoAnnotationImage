@@ -62,8 +62,8 @@ const load = async () => {
   if (!props.teamId) return
   loading.value = true
   try {
-    const res = await statsApi.team(props.teamId, props.days)
-    stats.value = res
+    const res: any = await statsApi.team(props.teamId, props.days)
+    stats.value = res as TeamStats
     await nextTick()
     renderAllCharts()
   } catch (e: any) {

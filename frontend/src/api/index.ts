@@ -660,7 +660,9 @@ export interface TeamItem {
   owner_id: number
   max_members: number
   my_role: string
+  member_count?: number  // v3.3.1 L3: 仅 list 端点返回
   created_at: string | null
+  archived_at?: string | null  // v3.3.1 L3
 }
 
 export interface TeamDatasetItem {
@@ -678,7 +680,23 @@ export interface TeamDatasetItem {
 }
 
 export const teamApi = {
-  list: () => http.get<{ items: TeamItem[] }>('/teams'),
+  // v3.3.1 L3: 支持分页 + 搜索 + 排序
+  list: (params?: {
+    page?: number
+    page_size?: number
+    search?: string
+    sort?: 'id_desc' | 'id_asc' | 'name_asc' | 'name_desc'
+      | 'member_count_desc' | 'created_asc' | 'created_desc'
+    include_archived?: boolean
+  }) => http.get<{
+    items: TeamItem[]
+    page: number
+    page_size: number
+    total: number
+    total_pages: number
+    sort: string
+    search: string
+  }>('/teams', { params }),
   create: (data: { name: string; slug: string; description?: string; max_members?: number }) =>
     http.post('/teams', data),
   get: (id: number) => http.get(`/teams/${id}`),
@@ -686,6 +704,8 @@ export const teamApi = {
   update: (id: number, data: { name?: string; description?: string; max_members?: number }) =>
     http.patch(`/teams/${id}`, data),
   remove: (id: number) => http.delete(`/teams/${id}`),
+  // v3.3.1 L3: 恢复已归档团队
+  restore: (id: number) => http.post(`/teams/${id}/restore`),
   // v3.3.1: 团队级数据集列表
   listDatasets: (id: number) => http.get<{ items: TeamDatasetItem[] }>(`/teams/${id}/datasets`),
   listMembers: (id: number) => http.get<{ items: TeamMemberItem[] }>(`/teams/${id}/members`),

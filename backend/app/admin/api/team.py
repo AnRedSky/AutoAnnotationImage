@@ -7,7 +7,8 @@ Team Management API (v3.3.0 + v3.3.1 增强)
   - POST   /api/teams                       创建团队 (任何已登录用户)
   - GET    /api/teams/{id}                  团队详情 (仅成员可见)
   - PATCH  /api/teams/{id}                  编辑团队 (v3.3.1, manager/owner)
-  - DELETE /api/teams/{id}                  删除团队 (仅创建者)
+  - DELETE /api/teams/{id}                  软删除团队 (v3.3.1 L3, 仅创建者)
+  - POST   /api/teams/{id}/restore          恢复已归档团队 (v3.3.1 L3, 仅 admin)
   - GET    /api/teams/{id}/datasets         团队级数据集列表 (v3.3.1, 任意成员)
   - GET    /api/teams/{id}/members          团队成员列表 (仅成员可见)
   - POST   /api/teams/{id}/members          邀请成员 (仅 manager/owner)
@@ -34,9 +35,17 @@ v3.3.1 增强:
   - 主动退队端点
   - 团队级数据集列表端点
   - 11 个写操作全部加审计日志 (log_audit)
-  - 团队删除时 (Phase L1 仍是硬删), 数据集 team_id 清空
+  - L3 软删除: archived_at + 列表过滤 + 管理员恢复
+
+软删除行为 (v3.3.1 L3):
+  - DELETE 设置 archived_at = utcnow(), 记录审计
+  - 列表/详情自动过滤 (include_archived 仅 admin 可用)
+  - 数据集 team_id 字段被清空 (避免悬挂引用)
+  - 团队成员保留, 但无法访问
+  - admin 可调用 POST /restore 恢复
 """
 import re
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -51,8 +60,25 @@ from app.tasks.model.team_member import TeamMember, TEAM_ROLES, WRITE_ROLES
 from app.tasks.model.dataset import Dataset
 from app.middleware.http.auth import get_current_user
 from app.tasks.service.audit_service import log_audit
+from app.common.cache import cache
 
 router = APIRouter()
+
+
+# ============== 缓存键管理 (v3.3.1 L3) ==============
+
+# 团队详情缓存 TTL: 5 分钟
+TEAM_DETAIL_TTL = 300
+
+
+def _team_detail_key(team_id: int) -> str:
+    """团队详情缓存 key."""
+    return f"team:detail:{team_id}"
+
+
+def _invalidate_team_detail(team_id: int) -> None:
+    """使团队详情缓存失效 (写操作统一调用)."""
+    cache.delete(_team_detail_key(team_id))
 
 
 # ============== Schemas ==============
@@ -161,21 +187,101 @@ async def _count_managers(db: AsyncSession, team_id: int) -> int:
     return result.scalar() or 0
 
 
+def _assert_team_active(team: Team) -> None:
+    """v3.3.1 L3: 校验团队未归档 (已归档则 410 Gone).
+
+    - 已归档的团队不可被成员访问 (数据隔离 + 业务停止)
+    - 列表端点直接过滤, 此校验用于详情/写操作
+    - admin 可绕过 (用于恢复操作)
+    """
+    if team.archived_at is not None:
+        raise HTTPException(410, "团队已归档, 无法操作")
+
+
 # ============== Team CRUD ==============
 
 @router.get("")
 async def list_my_teams(
+    page: int = Query(default=1, ge=1, description="页码 (从 1 开始)"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页条数 (1-100)"),
+    search: Optional[str] = Query(default=None, description="按团队名/描述模糊搜索"),
+    sort: str = Query(
+        default="id_desc",
+        regex="^(id_desc|id_asc|name_asc|name_desc|member_count_desc|created_desc|created_asc)$",
+        description="排序方式",
+    ),
+    include_archived: bool = Query(default=False, description="是否包含已归档团队 (仅 admin)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """列出我创建和加入的团队 (数据隔离: 仅可见自己所属的团队)."""
-    result = await db.execute(
-        select(Team, TeamMember.role)
-        .join(TeamMember, TeamMember.team_id == Team.id)
-        .where(TeamMember.user_id == current_user.id)
-        .order_by(Team.id)
+    """列出我创建和加入的团队 (数据隔离: 仅可见自己所属的团队).
+
+    v3.3.1 L3 增强:
+      - 默认过滤 archived_at IS NULL (隐藏已归档)
+      - include_archived=true 仅 admin 可用, 显示全部
+      - 分页: page / page_size (默认 20, 最大 100)
+      - 搜索: search 参数模糊匹配 name / description / slug (大小写不敏感)
+      - 排序: sort 参数支持 7 种 (id 默认 desc, name, member_count, created_at)
+    """
+    from sqlalchemy import or_
+    from app.tasks.model.team_member import TeamMember as _TM
+
+    # 0. 子查询: 团队成员数 (独立统计, 不受外层 WHERE 影响)
+    # 注意: 不能直接在主查询里 COUNT(team_member.user_id), 因为外层已经
+    # 通过 WHERE 限定到当前用户, 会导致 count 恒为 1. 必须用子查询.
+    member_count_subq = (
+        select(_TM.team_id, func.count(_TM.user_id).label("mc"))
+        .group_by(_TM.team_id)
+        .subquery()
     )
+
+    # 1. 基础查询
+    base = (
+        select(Team, _TM.role, member_count_subq.c.mc.label("member_count"))
+        .join(_TM, _TM.team_id == Team.id)
+        .join(member_count_subq, member_count_subq.c.team_id == Team.id)
+        .where(_TM.user_id == current_user.id)
+    )
+    if not include_archived or not current_user.is_admin():
+        base = base.where(Team.archived_at.is_(None))
+
+    # 2. 搜索 (name / description / slug 模糊)
+    if search:
+        pattern = f"%{search.strip()}%"
+        base = base.where(
+            or_(
+                Team.name.ilike(pattern),
+                Team.description.ilike(pattern),
+                Team.slug.ilike(pattern),
+            )
+        )
+
+    # 3. 排序
+    if sort == "name_asc":
+        base = base.order_by(Team.name.asc(), Team.id.asc())
+    elif sort == "name_desc":
+        base = base.order_by(Team.name.desc(), Team.id.asc())
+    elif sort == "created_asc":
+        base = base.order_by(Team.created_at.asc(), Team.id.asc())
+    elif sort == "created_desc":
+        base = base.order_by(Team.created_at.desc(), Team.id.asc())
+    elif sort == "member_count_desc":
+        base = base.order_by(member_count_subq.c.mc.desc(), Team.id.asc())
+    elif sort == "id_asc":
+        base = base.order_by(Team.id.asc())
+    else:  # id_desc (默认)
+        base = base.order_by(Team.id.desc())
+
+    # 4. 计数
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    # 5. 分页
+    offset = (page - 1) * page_size
+    page_stmt = base.offset(offset).limit(page_size)
+    result = await db.execute(page_stmt)
     rows = result.all()
+
     return {
         "items": [
             {
@@ -186,10 +292,18 @@ async def list_my_teams(
                 "owner_id": t.owner_id,
                 "max_members": t.max_members,
                 "my_role": role,
+                "member_count": member_count,
                 "created_at": t.created_at.isoformat() if t.created_at else None,
+                "archived_at": t.archived_at.isoformat() if t.archived_at else None,
             }
-            for t, role in rows
-        ]
+            for t, role, member_count in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size if total else 0,
+        "sort": sort,
+        "search": search,
     }
 
 
@@ -252,14 +366,30 @@ async def get_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """团队详情 (仅成员可见, 数据隔离)."""
+    """团队详情 (仅成员可见, 数据隔离).
+
+    v3.3.1 L3:
+      - 已归档团队仅 admin 可见 (用于恢复), 其他用户 410.
+      - Redis 缓存: 5 分钟 TTL, 写操作后失效.
+    """
+    # 1. 权限校验 (缓存前必须先校验, 避免权限绕过)
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     # 数据隔离: 非成员不可访问 (包括管理员)
     await _get_member_or_403(db, team_id, current_user.id)
+    # 已归档团队对非 admin 返回 410
+    if not current_user.is_admin():
+        _assert_team_active(team)
 
-    return {
+    # 2. 缓存命中检查
+    cache_key = _team_detail_key(team_id)
+    cached_data = cache.get(cache_key)
+    if cached_data is not None:
+        return cached_data
+
+    # 3. 缓存未命中, 实时构建响应
+    data = {
         "id": team.id,
         "name": team.name,
         "slug": team.slug,
@@ -267,7 +397,13 @@ async def get_team(
         "owner_id": team.owner_id,
         "max_members": team.max_members,
         "created_at": team.created_at.isoformat() if team.created_at else None,
+        "archived_at": team.archived_at.isoformat() if team.archived_at else None,
+        "_cached": True,  # 标记已缓存 (debug 用)
     }
+
+    # 4. 写入缓存
+    cache.set(cache_key, data, ttl=TEAM_DETAIL_TTL)
+    return data
 
 
 @router.patch("/{team_id}")
@@ -284,11 +420,13 @@ async def update_team(
       2. max_members 范围 [2, 100]
       3. max_members 降级时不能 < 当前成员数
       4. 任意字段变更写入 audit_log
+      5. v3.3.1 L3: 已归档团队不可编辑
     """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     await _assert_can_manage(db, team, current_user)
+    _assert_team_active(team)  # v3.3.1 L3
 
     # 至少一个字段
     update_data = body.model_dump(exclude_none=True)
@@ -327,6 +465,8 @@ async def update_team(
         )
         await db.commit()
         await db.refresh(team)
+        # v3.3.1 L3: 失效团队详情缓存
+        _invalidate_team_detail(team_id)
 
     return {
         "id": team.id,
@@ -345,15 +485,20 @@ async def delete_team(
 ):
     """删除团队 (仅创建者).
 
-    v3.3.1 行为: 硬删 (Phase L3 软删). 级联删除:
-      - team_member (ON DELETE CASCADE)
-      - 数据集 team_id 字段被清空 (下方手动处理)
+    v3.3.1 L3 软删除改造:
+      - 不再级联硬删 (members cascade 仍然存在, 但实际触发的是设置 archived_at)
+      - 实际行为: 设置 archived_at = utcnow(), 记录审计
+      - 列表/详情自动过滤 archived_at IS NULL (非 admin 不可见)
+      - 数据集 team_id 字段被清空 (避免悬挂引用)
+      - admin 可通过 POST /api/teams/{id}/restore 恢复
     """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     if team.owner_id != current_user.id:
         raise HTTPException(403, "仅创建者可删除团队")
+    if team.archived_at is not None:
+        raise HTTPException(400, "团队已归档, 无需重复删除")
 
     # 统计成员数 (审计)
     member_count = (await db.execute(
@@ -367,7 +512,10 @@ async def delete_team(
         .values(team_id=None)
     )
 
-    # 审计 (在 db.delete 前记录, 避免级联删除时 audit_log 也被影响)
+    # 软删除: 设置 archived_at
+    team.archived_at = datetime.utcnow()
+
+    # 审计
     await log_audit(
         db,
         user_id=current_user.id,
@@ -375,12 +523,81 @@ async def delete_team(
         team_id=team_id,
         resource_type="team",
         resource_id=team_id,
-        detail={"name": team.name, "member_count": member_count},
+        detail={"name": team.name, "member_count": member_count, "soft_delete": True},
     )
 
-    await db.delete(team)
     await db.commit()
-    return {"success": True, "detail": f"Team {team_id} deleted"}
+    # v3.3.1 L3: 失效团队详情缓存
+    _invalidate_team_detail(team_id)
+    return {
+        "success": True,
+        "detail": f"Team {team_id} 已归档 (软删除)",
+        "archived_at": team.archived_at.isoformat(),
+    }
+
+
+@router.post("/{team_id}/restore")
+async def restore_team(
+    team_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """恢复已归档团队 (v3.3.1 L3).
+
+    权限: 仅系统管理员 (admin) 可恢复
+      - 软删除具有破坏性, 必须有平台级管控
+      - 普通用户若想恢复, 需联系管理员
+
+    限制:
+      - 团队必须存在 (无论归档与否)
+      - 必须处于 archived 状态 (否则 400)
+      - 恢复后 archived_at 清空, 团队恢复正常访问
+    """
+    # 管理员权限校验
+    if not current_user.is_admin():
+        raise HTTPException(403, "无权限: 仅系统管理员可恢复归档团队")
+
+    team = await db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    if team.archived_at is None:
+        raise HTTPException(400, "团队未归档, 无需恢复")
+
+    # 记录恢复前的归档时间 (审计)
+    archived_at_before = team.archived_at.isoformat()
+
+    # 清空 archived_at
+    team.archived_at = None
+
+    # 审计
+    await log_audit(
+        db,
+        user_id=current_user.id,
+        event_type="team_restored",
+        team_id=team_id,
+        resource_type="team",
+        resource_id=team_id,
+        detail={
+            "name": team.name,
+            "owner_id": team.owner_id,
+            "archived_at_before": archived_at_before,
+        },
+    )
+
+    await db.commit()
+    await db.refresh(team)
+    # v3.3.1 L3: 失效团队详情缓存 (恢复后状态变更)
+    _invalidate_team_detail(team_id)
+    return {
+        "success": True,
+        "detail": f"Team {team_id} 已恢复",
+        "team": {
+            "id": team.id,
+            "name": team.name,
+            "slug": team.slug,
+            "owner_id": team.owner_id,
+        },
+    }
 
 
 # ============== 成员管理 ==============
@@ -397,6 +614,9 @@ async def list_members(
         raise HTTPException(404, "Team not found")
     # 数据隔离: 非成员不可访问
     await _get_member_or_403(db, team_id, current_user.id)
+    # v3.3.1 L3: 已归档团队 (非 admin) 不可查看
+    if not current_user.is_admin():
+        _assert_team_active(team)
 
     result = await db.execute(
         select(TeamMember, User)
@@ -431,6 +651,7 @@ async def invite_member(
     if not team:
         raise HTTPException(404, "Team not found")
     await _assert_can_manage(db, team, current_user)
+    _assert_team_active(team)  # v3.3.1 L3
 
     if body.role not in TEAM_ROLES:
         raise HTTPException(400, f"无效角色: {body.role}, 可选: {TEAM_ROLES}")
@@ -504,6 +725,7 @@ async def leave_team(
         raise HTTPException(404, "Team not found")
     if team.owner_id == current_user.id:
         raise HTTPException(400, "创建者需先转让所有权才能退出团队")
+    _assert_team_active(team)  # v3.3.1 L3: 已归档团队不可退队
 
     member = await _get_member_or_403(db, team_id, current_user.id)
 
@@ -532,11 +754,13 @@ async def update_member_role(
     """修改成员角色 (仅 manager/owner).
 
     v3.3.1 L2: 最后一名 manager 保护 — 防止团队无 manager.
+    v3.3.1 L3: 已归档团队不可变更成员.
     """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     await _assert_can_manage(db, team, current_user)
+    _assert_team_active(team)  # v3.3.1 L3
 
     if body.role not in TEAM_ROLES:
         raise HTTPException(400, f"无效角色: {body.role}")
@@ -594,11 +818,13 @@ async def remove_member(
     """移除成员 (仅 manager/owner; owner 不能被移除).
 
     v3.3.1 L2: 最后一名 manager 保护 — 防止团队无 manager.
+    v3.3.1 L3: 已归档团队不可移除成员.
     """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     await _assert_can_manage(db, team, current_user)
+    _assert_team_active(team)  # v3.3.1 L3
 
     if user_id == team.owner_id:
         raise HTTPException(400, "不能移除团队创建者")
@@ -656,6 +882,7 @@ async def transfer_ownership(
       4. 接收方角色强制提升为 manager
       5. confirm=False 时返回 400 (防误操作)
       6. 写入 team_ownership_transferred 审计
+      7. v3.3.1 L3: 已归档团队不可转让
     """
     if not body.confirm:
         raise HTTPException(400, "请确认转让操作 (设置 confirm=true)")
@@ -665,6 +892,7 @@ async def transfer_ownership(
         raise HTTPException(404, "Team not found")
     if team.owner_id != current_user.id:
         raise HTTPException(403, "仅创建者可转让所有权")
+    _assert_team_active(team)  # v3.3.1 L3
 
     # 校验接收方
     new_owner_member = await _get_member_or_403(db, team_id, body.new_owner_id)
@@ -720,12 +948,15 @@ async def list_team_datasets(
 
     返回字段: id, name, description, task_type, image_count, annotated_count,
     category_count, status, owner_id, owner_name, my_access.
+
+    v3.3.1 L3: 已归档团队不可查看数据集列表.
     """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
     # 数据隔离: 非成员不可访问
     member = await _get_member_or_403(db, team_id, current_user.id)
+    _assert_team_active(team)  # v3.3.1 L3
 
     # 拉团队数据集 + 一次 JOIN 拿 owner_name
     result = await db.execute(

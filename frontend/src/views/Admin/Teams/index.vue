@@ -38,6 +38,25 @@ const teams = ref<TeamItem[]>([])
 /** 全平台用户 (用于邀请下拉) */
 const allUsers = ref<{ id: number; username: string; role: string }[]>([])
 
+/** v3.3.1 L3: 分页 / 搜索 / 排序状态 */
+const total = ref(0)
+const page = ref(1)
+const pageSize = ref(20)
+const search = ref('')
+const sort = ref('id_desc')
+const includeArchived = ref(false)
+
+/** v3.3.1 L3: 搜索 debounce 句柄 */
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
+const debouncedSearch = (v: string) => {
+  if (searchDebounce) clearTimeout(searchDebounce)
+  searchDebounce = setTimeout(() => {
+    search.value = v
+    page.value = 1
+    loadTeams()
+  }, 300)
+}
+
 /** 当前选中的团队 (详情视图) */
 const selectedTeam = ref<TeamItem | null>(null)
 /** 当前团队的成员 */
@@ -74,6 +93,10 @@ const editingMember = ref<TeamMemberItem | null>(null)
 // ============== 计算属性 ==============
 
 const currentUserId = computed(() => userStore.user?.id || 0)
+/** v3.3.1 L3: 是否管理员 (用于显示恢复按钮) */
+const isAdmin = computed(
+  () => userStore.user?.role === 'admin'
+)
 
 const isOwner = computed(
   () => !!selectedTeam.value && selectedTeam.value.owner_id === currentUserId.value
@@ -93,6 +116,10 @@ const memberIdSet = computed(() => new Set(teamMembers.value.map((m) => m.user_i
 // ============== 视图切换 ==============
 
 const onEnterTeam = async (team: TeamItem) => {
+  if (team.archived_at) {
+    ElMessage.warning('团队已归档, 无法进入管理')
+    return
+  }
   selectedTeam.value = team
   view.value = 'detail'
   activeTab.value = 'members'
@@ -113,8 +140,16 @@ const onBackToList = () => {
 const loadTeams = async () => {
   loading.value = true
   try {
-    const res: any = await teamApi.list()
+    const res: any = await teamApi.list({
+      page: page.value,
+      page_size: pageSize.value,
+      search: search.value || undefined,
+      sort: sort.value as 'id_desc' | 'id_asc' | 'name_asc' | 'name_desc'
+        | 'member_count_desc' | 'created_asc' | 'created_desc',
+      include_archived: includeArchived.value,
+    })
     teams.value = res.items || []
+    total.value = res.total || 0
   } catch (e: any) {
     ElMessage.error('加载团队列表失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
@@ -171,7 +206,7 @@ const onCreated = async () => {
 const onDeleteTeam = async (t: TeamItem) => {
   try {
     await ElMessageBox.confirm(
-      `确认删除团队 "${t.name}"?所有共享数据集将变为个人数据集。`,
+      `确认删除团队 "${t.name}"?\n\n团队将被「归档」, 数据集共享将自动解除, 之后可联系管理员恢复。`,
       '提示',
       { type: 'warning' }
     )
@@ -180,10 +215,30 @@ const onDeleteTeam = async (t: TeamItem) => {
   }
   try {
     await teamApi.remove(t.id)
-    ElMessage.success('删除成功')
+    ElMessage.success('团队已归档')
     await loadTeams()
   } catch (e: any) {
-    ElMessage.error('删除失败: ' + (e?.response?.data?.detail || e?.message))
+    ElMessage.error('归档失败: ' + (e?.response?.data?.detail || e?.message))
+  }
+}
+
+/** v3.3.1 L3: 恢复已归档团队 (仅 admin) */
+const onRestoreTeam = async (t: TeamItem) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认恢复团队 "${t.name}"?\n\n恢复后团队成员可重新访问, 共享数据集需重新分配。`,
+      '提示',
+      { type: 'info' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await teamApi.restore(t.id)
+    ElMessage.success('团队已恢复')
+    await loadTeams()
+  } catch (e: any) {
+    ElMessage.error('恢复失败: ' + (e?.response?.data?.detail || e?.message))
   }
 }
 
@@ -307,9 +362,20 @@ watch(view, (v) => {
       :teams="teams"
       :loading="loading"
       :current-user-id="currentUserId"
+      :total="total"
+      :page="page"
+      :page-size="pageSize"
+      :search="search"
+      :sort="sort"
+      :is-admin="isAdmin"
       @create="onCreateClick"
       @enter="onEnterTeam"
       @delete-team="onDeleteTeam"
+      @restore-team="onRestoreTeam"
+      @update:page="(p: number) => { page = p; loadTeams() }"
+      @update:page-size="(s: number) => { pageSize = s; page = 1; loadTeams() }"
+      @update:search="debouncedSearch"
+      @update:sort="(s: string) => { sort = s; loadTeams() }"
     />
 
     <!-- ============ 详情视图 ============ -->
