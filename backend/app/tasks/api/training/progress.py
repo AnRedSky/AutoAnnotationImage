@@ -15,6 +15,11 @@ training.progress 模块 — 训练进度查询 (REST + SSE 实时推送)
 - 之前: 即使鉴权可选, 任何 token 都能查任何 task_id 进度
 - 现在: 必须校验 task 对应 job 的 user_id == current_user.id 或 admin
 
+**v3.3.5-PERMISSION-REWRITE**: 严格最小权限
+- 任何角色 (含 super_admin) 必须满足 owner / dataset.team_member
+- 找不到对应 job (auto_annotate 等) → 拒绝 + 写 permission_denied 审计
+- 统一通过 assert_can_access_training_job 校验
+
 **v3.5.0 Phase T7 方案 C**: SSE 事件驱动 + 1s 兜底
 - worker 写库后 publish `job_state_channel:{task_id}` 通知
 - SSE 端点 subscribe 该频道, 收到事件 → 失效缓存 → 立即查 DB → 推送
@@ -38,6 +43,10 @@ from app.middleware.http.auth import get_current_user, get_user_optional_for_que
 from app.schemas.training import TrainStatusResponse
 from app.tasks.model.training_job import TrainingJob
 from app.tasks.service.job_state_service import JobStateService
+from app.tasks.service.permission_service import (
+    assert_can_access_training_job,
+    log_permission_denied,
+)
 from app.tasks.service.training_lifecycle_service.celery import (
     JOB_UPDATE_CHANNEL_TEMPLATE,
 )
@@ -46,28 +55,43 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-async def _assert_can_access_task_id(task_id: str, current_user: User, db: AsyncSession) -> None:
-    """v3.3.0 P0: 校验用户对训练任务的访问权 (admin / owner)
+async def _assert_can_access_task_id(
+    task_id: str,
+    current_user: User,
+    db: AsyncSession,
+    *,
+    endpoint: str = "",
+) -> None:
+    """v3.3.0 P0: 校验用户对训练任务的访问权 (v3.3.5 移除 super_admin 旁路)
 
-    - task_id 是 Celery UUID, 通过 TrainingJob.celery_task_id 反查 TrainingJob
-    - non-super_admin 仅能看自己 user_id 的 job 进度 (regular admin 仍受约束)
-    - 找不到对应 job (例如 auto_annotate 任务, 不写 TrainingJob) → 仅 super_admin 通过
+    v3.3.5-PERMISSION-REWRITE 核心变化 — 严格最小权限:
+      - 任何角色 (含 super_admin) 必须满足 owner / dataset.team_member 才能访问
+      - 找不到对应 job (auto_annotate 等不写 TrainingJob 的 Celery 任务) → 拒绝
+        (v3.3.4-PATCH 旧逻辑 super_admin 旁路, v3.3.5 完全移除)
 
-    v3.3.4-PATCH 修复 (admin 旁路):
-      - 旧逻辑: is_admin() 旁路, regular admin 可看全系统训练进度
-      - 新逻辑: 仅 super_admin 旁路, regular admin 走 owner 校验
+    实现方式:
+      - 找到 TrainingJob → 调 assert_can_access_training_job (含 dataset.team 校验)
+      - 找不到 → raise 403 + 写 permission_denied 审计
     """
-    if current_user.is_super_admin():
-        return
     job = (await db.execute(
         select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
     )).scalar_one_or_none()
     if job is None:
         # 找不到对应 job (可能是 auto_annotate 等不写 TrainingJob 的 Celery 任务)
-        # 非 super_admin 用户看不到
+        # v3.3.5: 任何角色 (含 super_admin) 均拒绝
+        await log_permission_denied(
+            db,
+            current_user=current_user,
+            resource_type="training_job",
+            resource_id=None,
+            endpoint=endpoint or f"/api/training/progress/{task_id}",
+            reason="training_job not found in DB (auto_annotate task or invalid task_id)",
+            detail={"task_id": task_id},
+        )
         raise HTTPException(403, "无权限访问此任务进度")
-    if job.user_id != current_user.id:
-        raise HTTPException(403, "无权限访问此任务进度")
+    await assert_can_access_training_job(
+        db, current_user, job.user_id, job.dataset_id
+    )
 
 
 # ============== REST 轮询接口 ==============
@@ -91,7 +115,10 @@ async def get_progress(
     """
     if current_user is None:
         raise HTTPException(401, "未授权: 需要有效的 access_token")
-    await _assert_can_access_task_id(task_id, current_user, db)
+    await _assert_can_access_task_id(
+        task_id, current_user, db,
+        endpoint=f"/api/training/progress/{task_id}",
+    )
     snap = await JobStateService.get_snapshot(task_id, db)
     return TrainStatusResponse(
         task_id=task_id,
@@ -155,7 +182,10 @@ async def stream_training_progress(
     """
     if current_user is None:
         raise HTTPException(401, "未授权: 需要有效的 access_token")
-    await _assert_can_access_task_id(task_id, current_user, db)
+    await _assert_can_access_task_id(
+        task_id, current_user, db,
+        endpoint=f"/api/training/progress/stream/{task_id}",
+    )
 
     from celery.result import AsyncResult
 

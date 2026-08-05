@@ -45,14 +45,14 @@ class User(Base):
     def can_access_dataset(self, dataset) -> bool:
         """同步权限检查 (不查 DB):
 
-        1. admin → 全通
-        2. owner → 自己创建的
-        3. 团队成员 → 需 API 层异步查 team_member (这里只做快速判断)
+        1. owner → 自己创建的
+        2. 团队成员 → 需 API 层异步查 team_member (这里只做快速判断)
 
         注: 完整权限检查 (含 team) 由 API 层 can_access_dataset_async 做异步 DB 查询.
+        v3.3.5-PERMISSION-REWRITE: 移除 is_admin() 旁路, 数据级访问严格遵循
+        最小权限原则, super_admin / admin 角色均不自动放行, 须由 API 层
+        调 assert_can_access_dataset 做完整 team 校验.
         """
-        if self.is_admin():
-            return True
         return dataset.owner_id == self.id
 
     def deactivate(self) -> None:

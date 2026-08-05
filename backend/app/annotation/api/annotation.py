@@ -733,37 +733,33 @@ async def recent_annotations(
     v3.3.4-PATCH 修复 (admin 越权):
       - P0-4 旧逻辑: is_admin() 看全系统
       - 新逻辑: 仅 super_admin 看全系统, regular admin 走个人+团队共享过滤
+
+    v3.3.5-PERMISSION-REWRITE 全面重写:
+      - 移除 super_admin 全局视角旁路
+      - 任何角色 (含 super_admin) 均按个人+团队共享过滤
+      - 严格遵循最小权限原则
     """
     from app.admin.model.user import User as UserModel
     from app.tasks.model.dataset import Dataset
     from app.tasks.model.team_member import TeamMember
+    from sqlalchemy import union_all
 
-    if current_user.is_super_admin():
-        # 超级管理员: 全局视角 (平台级审计)
-        stmt = (
-            select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
-            .join(Image, Image.id == AnnotationLog.image_id)
-            .join(UserModel, UserModel.id == AnnotationLog.user_id)
-            .order_by(AnnotationLog.id.desc())
-            .limit(limit)
-        )
-    else:
-        # 普通用户 + regular admin: 限定到有权限访问的 dataset
-        own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
-        team_ds_subq = (
-            select(Dataset.id)
-            .join(TeamMember, TeamMember.team_id == Dataset.team_id)
-            .where(TeamMember.user_id == current_user.id)
-        )
-        visible_ds_subq = own_ds_subq.union_all(team_ds_subq)
-        stmt = (
-            select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
-            .join(Image, Image.id == AnnotationLog.image_id)
-            .join(UserModel, UserModel.id == AnnotationLog.user_id)
-            .where(Image.dataset_id.in_(visible_ds_subq))
-            .order_by(AnnotationLog.id.desc())
-            .limit(limit)
-        )
+    # v3.3.5: 移除 super_admin 全局视角, 任何角色均按可见 dataset 过滤
+    own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
+    team_ds_subq = (
+        select(Dataset.id)
+        .join(TeamMember, TeamMember.team_id == Dataset.team_id)
+        .where(TeamMember.user_id == current_user.id)
+    )
+    visible_ds_subq = own_ds_subq.union_all(team_ds_subq)
+    stmt = (
+        select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
+        .join(Image, Image.id == AnnotationLog.image_id)
+        .join(UserModel, UserModel.id == AnnotationLog.user_id)
+        .where(Image.dataset_id.in_(visible_ds_subq))
+        .order_by(AnnotationLog.id.desc())
+        .limit(limit)
+    )
 
     rows = (await db.execute(stmt)).all()
     items = []

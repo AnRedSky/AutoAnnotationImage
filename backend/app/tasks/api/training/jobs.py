@@ -106,33 +106,35 @@ async def list_training_jobs(
       - 新逻辑: 仅 super_admin 看全部; regular admin / 普通用户
                 看自己创建的 + 团队共享数据集下的训练任务
       - 过滤条件: job.user_id == me OR job.dataset_id IN team_shared_datasets
+
+    v3.3.5-PERMISSION-REWRITE 全面重写:
+      - 移除 super_admin 旁路, 任何角色 (含 super_admin) 均按 owner/team 过滤
+      - 严格遵循最小权限原则
     """
     from app.tasks.model.team_member import TeamMember as _TM
     from app.tasks.model.team import Team as _Team
+    from sqlalchemy import or_ as _or
 
     base = select(TrainingJob)
     count_base = select(sa_func.count(TrainingJob.id))
-    # v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受团队隔离)
-    if not current_user.is_super_admin():
-        # 个人所有 + 团队共享数据集下的训练任务
-        member_team_ids_q = (
-            select(_TM.team_id)
-            .join(_Team, _Team.id == _TM.team_id)
-            .where(
-                _TM.user_id == current_user.id,
-                _Team.archived_at.is_(None),
-            )
+    # v3.3.5: 任何角色 (含 super_admin) 均按 owner/team 过滤, 不再旁路
+    member_team_ids_q = (
+        select(_TM.team_id)
+        .join(_Team, _Team.id == _TM.team_id)
+        .where(
+            _TM.user_id == current_user.id,
+            _Team.archived_at.is_(None),
         )
-        team_shared_ds_q = select(Dataset.id).where(
-            Dataset.team_id.in_(member_team_ids_q)
-        )
-        from sqlalchemy import or_ as _or
-        vis_filter = _or(
-            TrainingJob.user_id == current_user.id,
-            TrainingJob.dataset_id.in_(team_shared_ds_q),
-        )
-        base = base.where(vis_filter)
-        count_base = count_base.where(vis_filter)
+    )
+    team_shared_ds_q = select(Dataset.id).where(
+        Dataset.team_id.in_(member_team_ids_q)
+    )
+    vis_filter = _or(
+        TrainingJob.user_id == current_user.id,
+        TrainingJob.dataset_id.in_(team_shared_ds_q),
+    )
+    base = base.where(vis_filter)
+    count_base = count_base.where(vis_filter)
     if dataset_id is not None:
         base = base.where(TrainingJob.dataset_id == dataset_id)
         count_base = count_base.where(TrainingJob.dataset_id == dataset_id)

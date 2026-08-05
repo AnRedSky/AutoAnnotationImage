@@ -3,6 +3,7 @@ ModelVersion ORM Model (Active Record) — app/tasks/model/
 =======================================================
 
 **v3.0.0 Stage 2.3 迁移**: 从 app/model/model_version.py 迁入 tasks 应用
+**v3.3.5-PERMISSION-REWRITE**: 强制 dataset_id 非空 (与 migrations/enforce_model_dataset_notnull.py 配套)
 """
 from datetime import datetime
 from typing import Optional
@@ -17,7 +18,11 @@ class ModelVersion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     base_model: Mapped[str] = mapped_column(String(50), nullable=False)
-    dataset_id: Mapped[int] = mapped_column(
+    # v3.3.5: dataset_id 从 nullable=True → nullable=False
+    # 配合 migrations/enforce_model_dataset_notnull.py 在生产环境收紧
+    # 业务理由: 「孤儿 model」(无主) 在严格最小权限下无人可访问, 等于死数据
+    # 开发环境若尚未执行迁移, 这里保持 nullable=True 避免 ORM 启动失败
+    dataset_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("dataset.id"), nullable=True
     )
     task_type: Mapped[str] = mapped_column(

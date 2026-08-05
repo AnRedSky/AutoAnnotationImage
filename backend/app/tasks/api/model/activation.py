@@ -34,7 +34,7 @@ from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.service.model_service import ModelService
-from app.tasks.service.permission_service import assert_can_access_dataset
+from app.tasks.service.permission_service import assert_can_access_model
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -108,20 +108,15 @@ async def deactivate_model(
     v3.0.0 审查修复: 委托 ModelService.deactivate() 保证业务一致性
 
     v3.3.0 P0 修复: 必须校验写权限
+    v3.3.5-PERMISSION-REWRITE: 孤儿 model 任何角色均拒绝
+      (含 super_admin, 不再旁路; 需先迁移到有效 dataset)
     """
     target = await db.get(ModelVersion, model_id)
     if not target:
         raise HTTPException(404, "Model not found")
 
-    # 权限校验
-    if target.dataset_id:
-        ds = await db.get(Dataset, target.dataset_id)
-        if not ds:
-            raise HTTPException(404, "Dataset not found")
-        await assert_can_access_dataset(db, current_user, ds, require_write=True)
-    elif not current_user.is_super_admin():
-        # v3.3.4-PATCH: 收紧为仅 super_admin 可操作孤儿 model, regular admin 仍被拒
-        raise HTTPException(403, "无权限操作此模型")
+    # v3.3.5: 统一通过 assert_can_access_model 校验, 孤儿 model 任何角色拒绝
+    await assert_can_access_model(db, current_user, target.dataset_id, require_write=True)
 
     try:
         await ModelService.deactivate(db, target, commit=True)
@@ -171,12 +166,9 @@ async def batch_set_active(
         raise HTTPException(404, f"模型版本不存在: {missing}")
 
     # 权限校验: 任一 model 所属 dataset 不可写则整体拒绝
-    ds_ids = {m.dataset_id for m in rows if m.dataset_id}
-    for ds_id in ds_ids:
-        ds = await db.get(Dataset, ds_id)
-        if not ds:
-            continue
-        await assert_can_access_dataset(db, current_user, ds, require_write=True)
+    # v3.3.5-PERMISSION-REWRITE: 孤儿 model 任何角色都拒绝
+    for m in rows:
+        await assert_can_access_model(db, current_user, m.dataset_id, require_write=True)
 
     try:
         # 锁全部目标行

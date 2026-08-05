@@ -23,6 +23,8 @@ AUDIT_EVENT_TYPES = (
     "dataset_shared", "dataset_unshared",
     "annotation_saved", "training_started", "training_cancelled",
     "model_activated", "model_deleted",
+    # v3.3.5-PERMISSION-REWRITE: 越权访问审计
+    "permission_denied",
 )
 
 

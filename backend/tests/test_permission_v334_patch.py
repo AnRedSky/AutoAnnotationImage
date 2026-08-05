@@ -1,6 +1,6 @@
 """
-v3.3.4-PATCH 全面修复 - 安全测试 (list 接口 + 单条操作 admin 旁路)
-================================================================
+v3.3.4-PATCH + v3.3.5-PERMISSION-REWRITE - 安全测试 (list 接口 + 单条操作 admin 旁路)
+================================================================================
 
 对应权限审查报告 (docs/permissions-audit-2026-08-05.md) 中标记的 P0/P1 风险:
   P0-2: list_training_jobs admin 旁路 → 仅 super_admin 看全部
@@ -12,15 +12,15 @@ v3.3.4-PATCH 全面修复 - 安全测试 (list 接口 + 单条操作 admin 旁�
 
 测试矩阵 (PATCH):
   T-P01: regular admin 调用 list_datasets 看不到其他团队 dataset
-  T-P02: super_admin 调用 list_datasets 看到全部 dataset
+  T-P02: super_admin 调用 list_datasets 严格按 owner/team 过滤 (v3.3.5)
   T-P03: regular admin 调用 list_training_jobs 仅看自己+团队共享
-  T-P04: super_admin 调用 list_training_jobs 看到全部
+  T-P04: super_admin 调用 list_training_jobs 也仅看自己+团队共享 (v3.3.5)
   T-P05: regular admin 调用 list_models 仅看自己+团队共享
-  T-P06: super_admin 调用 list_models 看到全部
+  T-P06: super_admin 调用 list_models 也仅看自己+团队共享 (v3.3.5)
   T-P07: regular admin 调用 list_active_models 受 dataset 可见性约束
   T-P08: regular admin 调用 get_model_detail 失败 (别人的 model)
   T-P09: regular admin 调用 recent_annotations 受 dataset 可见性约束
-  T-P10: super_admin 调用 recent_annotations 看全系统
+  T-P10: super_admin 调用 recent_annotations 也仅看自己可见 dataset 的标注 (v3.3.5)
   T-P11: regular admin 调用 cancel_training_job 失败 (非 own)
   T-P12: regular admin 调用 pause_training_job 失败 (非 own)
   T-P13: regular admin 调用 get_training_log 失败 (非 own)
@@ -29,6 +29,10 @@ v3.3.4-PATCH 全面修复 - 安全测试 (list 接口 + 单条操作 admin 旁�
   T-P16: regular admin 调用 delete_model 失败 (别人的 model)
   T-P17: regular admin 调用 deactivate_model 失败 (别人的 model, 孤儿)
   T-P18: owner 仍可正常操作自己的 job/model (确保修复不影响正常路径)
+
+v3.3.5 重大变化:
+  - 所有数据级 list 接口对 super_admin 同样按 owner/team 过滤
+  - 越权测试中, super_admin 也不能看任何不属于自己的数据
 """
 import pytest
 import pytest_asyncio
@@ -274,17 +278,28 @@ async def carol_training_job_factory(
 
 
 @pytest.mark.asyncio
-async def test_super_admin_list_training_jobs_sees_all(
+async def test_super_admin_list_training_jobs_respects_ownership(
     client: AsyncClient, db_session, super_admin_user, alice_training_job, carol_training_job_factory
 ):
-    """T-P04: super_admin 调用 list_training_jobs 看到全部 job"""
+    """T-P04 (v3.3.5): super_admin 调用 list_training_jobs 也仅看自己+团队共享
+
+    v3.3.5-PERMISSION-REWRITE: super_admin 不再有数据级全局旁路,
+    任何角色 (含 super_admin) 均按 owner/team 过滤.
+    """
     headers = await _login(client, "patch_super", "patchsuper123")
     resp = await client.get("/api/training/jobs", headers=headers)
     assert resp.status_code == 200
     items = resp.json().get("items", [])
     job_ids = [j["id"] for j in items]
-    assert alice_training_job.id in job_ids
-    assert carol_training_job_factory.id in job_ids
+    # super_admin 没有 own + 没加入任何团队 → 应看不到任何 job
+    assert alice_training_job.id not in job_ids, (
+        f"super_admin should NOT see alice's job (v3.3.5). "
+        f"Got jobs: {job_ids}"
+    )
+    assert carol_training_job_factory.id not in job_ids, (
+        f"super_admin should NOT see carol's job (v3.3.5). "
+        f"Got jobs: {job_ids}"
+    )
 
 
 # ============== P0-3 / T-P05: list_models ==============
@@ -318,10 +333,13 @@ async def test_regular_admin_list_models_excludes_outsider(
 
 
 @pytest.mark.asyncio
-async def test_super_admin_list_models_sees_all(
+async def test_super_admin_list_models_respects_ownership(
     client: AsyncClient, db_session, super_admin_user, alice_model_version, carol_dataset
 ):
-    """T-P06: super_admin 调用 list_models 看到全部"""
+    """T-P06 (v3.3.5): super_admin 调用 list_models 也仅看自己可见的
+
+    v3.3.5: super_admin 不再有 model 列表的数据级旁路.
+    """
     carol_mv = ModelVersion(
         dataset_id=carol_dataset.id,
         name="carol_mv_super",
@@ -338,8 +356,13 @@ async def test_super_admin_list_models_sees_all(
     assert resp.status_code == 200
     items = resp.json().get("items", [])
     mv_ids = [m["id"] for m in items]
-    assert alice_model_version.id in mv_ids
-    assert carol_mv.id in mv_ids
+    # super_admin 不属于任何 dataset 的 owner/team → 都看不到
+    assert alice_model_version.id not in mv_ids, (
+        f"super_admin should NOT see alice's model (v3.3.5). Got: {mv_ids}"
+    )
+    assert carol_mv.id not in mv_ids, (
+        f"super_admin should NOT see carol's model (v3.3.5). Got: {mv_ids}"
+    )
 
 
 # ============== P0-3 / T-P07: list_active_models ==============
@@ -464,10 +487,13 @@ async def test_regular_admin_recent_annotations_excludes_outsider(
 
 
 @pytest.mark.asyncio
-async def test_super_admin_recent_annotations_sees_all(
+async def test_super_admin_recent_annotations_respects_ownership(
     client: AsyncClient, db_session, super_admin_user, alice_dataset
 ):
-    """T-P10: super_admin 调用 recent_annotations 看全系统"""
+    """T-P10 (v3.3.5): super_admin 调用 recent_annotations 也仅看自己可见 dataset 的标注
+
+    v3.3.5: super_admin 不再有 recent annotations 的全局旁路.
+    """
     from app.tasks.model.annotation_log import AnnotationLog
     from app.tasks.model.image import Image
 
@@ -511,8 +537,10 @@ async def test_super_admin_recent_annotations_sees_all(
     assert resp.status_code == 200
     items = resp.json().get("items", [])
     log_ids = [log["id"] for log in items]
-    assert carol_log.id in log_ids, (
-        f"super_admin should see all annotation logs. Got: {log_ids}"
+    # super_admin 不属于 carol_ds 的 owner/team → 看不到 carol 的标注
+    assert carol_log.id not in log_ids, (
+        f"super_admin should NOT see carol's annotation log (v3.3.5). "
+        f"Got: {log_ids}"
     )
 
 

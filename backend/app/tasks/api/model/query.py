@@ -52,30 +52,41 @@ async def list_models(
       - 新逻辑: 仅 super_admin 看全部; regular admin / 普通用户
                 看自己创建的 + 团队共享数据集下的 model
       - 过滤条件: model.dataset_id IN (个人所有 + 团队共享) dataset
+
+    v3.3.5-PERMISSION-REWRITE 全面重写:
+      - 移除 super_admin 旁路, 任何角色 (含 super_admin) 均按 owner/team 过滤
+      - 孤儿 model (dataset_id IS NULL) 不再返回 (需先迁移到有效 dataset)
+      - 严格遵循最小权限原则
     """
+    from app.tasks.model.team_member import TeamMember as _TM
+    from app.tasks.model.team import Team as _Team
+    from sqlalchemy import or_ as _or
+
+    # 找出我所在的、未归档的 team_id
+    member_team_ids_q = (
+        select(_TM.team_id)
+        .join(_Team, _Team.id == _TM.team_id)
+        .where(
+            _TM.user_id == current_user.id,
+            _Team.archived_at.is_(None),
+        )
+    )
+    # 数据可见性: 个人所有 + 团队共享
+    vis_ds_filter = _or(
+        Dataset.owner_id == current_user.id,
+        Dataset.team_id.in_(member_team_ids_q),
+    )
+    visible_ds_subq = select(Dataset.id).where(vis_ds_filter)
+
     stmt = select(ModelVersion)
+    # v3.3.5: 排除孤儿 model (dataset_id IS NULL) — 数据完整性约束
+    stmt = stmt.where(ModelVersion.dataset_id.is_not(None))
     if dataset_id is not None:
         stmt = stmt.where(ModelVersion.dataset_id == dataset_id)
     if active is not None:
         stmt = stmt.where(ModelVersion.is_active == active)  # noqa: E712
-    # P0-3 v3.3.4-PATCH: 收紧为仅 super_admin 旁路, regular admin 仍受团队隔离
-    if not current_user.is_super_admin():
-        from app.tasks.model.team_member import TeamMember as _TM
-        from app.tasks.model.team import Team as _Team
-        from sqlalchemy import or_ as _or
-        member_team_ids_q = (
-            select(_TM.team_id)
-            .join(_Team, _Team.id == _TM.team_id)
-            .where(
-                _TM.user_id == current_user.id,
-                _Team.archived_at.is_(None),
-            )
-        )
-        vis_ds_filter = _or(
-            Dataset.owner_id == current_user.id,
-            Dataset.team_id.in_(member_team_ids_q),
-        )
-        stmt = stmt.where(ModelVersion.dataset_id.in_(select(Dataset.id).where(vis_ds_filter)))
+    # v3.3.5: 任何角色 (含 super_admin) 均按 owner/team 过滤
+    stmt = stmt.where(ModelVersion.dataset_id.in_(visible_ds_subq))
     stmt = stmt.order_by(ModelVersion.created_at.desc())
     result = await db.execute(stmt)
     models = result.scalars().all()
@@ -145,23 +156,17 @@ async def list_active_models(
     v3.3.4-PATCH 修复 (admin 越权):
       - 旧逻辑: is_admin() 看全系统
       - 新逻辑: 仅 super_admin 看全系统, regular admin 走个人+团队共享过滤
+
+    v3.3.5-PERMISSION-REWRITE 全面重写:
+      - 移除 super_admin 旁路, 任何角色均走个人+团队共享过滤
+      - 严格遵循最小权限原则
     """
-    items: list[dict] = []
-
-    if current_user.is_super_admin():
-        if dataset_id is not None:
-            active = await ModelService.get_active_for_dataset(db, dataset_id, task_type=task_type)
-            if active:
-                items.append(_model_to_dict(active))
-        else:
-            active_map = await ModelService.get_active_for_all_datasets(db, task_type=task_type)
-            for ds_id, active in sorted(active_map.items()):
-                items.append(_model_to_dict(active))
-        return {"items": items, "count": len(items)}
-
-    # non-super_admin: 限定到可见 dataset (含 personal + team_shared)
     from app.tasks.model.team_member import TeamMember
     from sqlalchemy import union_all
+
+    items: list[dict] = []
+
+    # v3.3.5: 移除 super_admin 全局视角, 任何角色均按可见 dataset 过滤
     own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
     team_ds_subq = (
         select(Dataset.id)
@@ -219,21 +224,16 @@ async def get_model_detail(
     不一致 (例如激活状态: 列表显示「已激活」但弹窗显示「未激活」).
 
     v3.3.0 P0 修复: 必须校验访问权限
+    v3.3.5-PERMISSION-REWRITE: 孤儿 model 任何角色均拒绝
+      (含 super_admin, 不再旁路)
     """
+    from app.tasks.service.permission_service import assert_can_access_model
     m = await db.get(ModelVersion, model_id)
     if not m:
         raise HTTPException(404, "Model not found")
 
-    # 权限校验: 必须能访问该 model 所属 dataset
-    if m.dataset_id:
-        ds = await db.get(Dataset, m.dataset_id)
-        if not ds:
-            raise HTTPException(404, "Dataset not found")
-        from app.tasks.service.permission_service import assert_can_access_dataset
-        await assert_can_access_dataset(db, current_user, ds)
-    elif not current_user.is_super_admin():
-        # v3.3.4-PATCH: 收紧为仅 super_admin 可访问孤儿 model, regular admin 仍被拒
-        raise HTTPException(403, "无权限访问此模型")
+    # v3.3.5: 统一通过 assert_can_access_model 校验, 孤儿 model 任何角色拒绝
+    await assert_can_access_model(db, current_user, m.dataset_id)
 
     # 同步返回 dataset_name (前端弹窗可能用)
     ds_name = None

@@ -104,20 +104,16 @@ async def delete_model(
     - 尝试删除磁盘上的权重文件（仅在路径指向 models/ 目录时执行，避免误删）。
 
     v3.3.0 P0 修复: 必须校验写权限
+    v3.3.5-PERMISSION-REWRITE: 孤儿 model 任何角色均拒绝
+      (含 super_admin, 不再旁路; 需先迁移到有效 dataset 才能删除)
     """
+    from app.tasks.service.permission_service import assert_can_access_model
     m = await db.get(ModelVersion, model_id)
     if not m:
         raise HTTPException(404, "Model not found")
 
-    # 权限校验
-    if m.dataset_id:
-        ds = await db.get(Dataset, m.dataset_id)
-        if not ds:
-            raise HTTPException(404, "Dataset not found")
-        await assert_can_access_dataset(db, current_user, ds, require_write=True)
-    elif not current_user.is_super_admin():
-        # v3.3.4-PATCH: 收紧为仅 super_admin 可删孤儿 model, regular admin 仍被拒
-        raise HTTPException(403, "无权限操作此模型")
+    # v3.3.5: 统一通过 assert_can_access_model 校验, 孤儿 model 任何角色拒绝
+    await assert_can_access_model(db, current_user, m.dataset_id, require_write=True)
 
     was_active = m.is_active
 
@@ -185,15 +181,10 @@ async def batch_delete_models(
     found_map = {m.id: m for m in rows}
 
     # 1.5) 权限校验: 任一 model 所属 dataset 不可写则整体拒绝 (v3.3.0 P0 修复)
-    ds_ids_to_check = {m.dataset_id for m in rows if m.dataset_id}
-    for ds_id in ds_ids_to_check:
-        ds = await db.get(Dataset, ds_id)
-        if not ds:
-            continue
-        await assert_can_access_dataset(db, current_user, ds, require_write=True)
-    # 无 dataset_id 的 model 仅 super_admin 可删 (v3.3.4-PATCH 收紧 regular admin)
-    if any(m.dataset_id is None for m in rows) and not current_user.is_super_admin():
-        raise HTTPException(403, "包含无主模型, 仅超级管理员可操作")
+    # v3.3.5-PERMISSION-REWRITE: 孤儿 model 任何角色都拒绝
+    from app.tasks.service.permission_service import assert_can_access_model
+    for m in rows:
+        await assert_can_access_model(db, current_user, m.dataset_id, require_write=True)
 
     # 2) 校验: 缺失 (激活的不再拒绝, v2 改造: 删除即取消激活)
     missing = [i for i in uniq_ids if i not in found_map]

@@ -19,6 +19,7 @@ detection.progress 模块 — 训练/自动标注进度查询 (REST + SSE)
   必须支持"DB 没记录就回退到 Celery result.info"路径.
 
 **v3.3.0 P0 修复**: 必须鉴权 + 校验所有权, 防止跨用户 detection 进度泄露
+**v3.3.5-PERMISSION-REWRITE**: 严格最小权限, super_admin 不再旁路
 """
 import asyncio
 import json
@@ -33,31 +34,44 @@ from app.database import AsyncSessionLocal, get_db
 from app.middleware.http.auth import get_current_user, get_user_optional_for_query
 from app.admin.model.user import User
 from app.tasks.model.training_job import TrainingJob
+from app.tasks.service.permission_service import (
+    assert_can_access_training_job,
+    log_permission_denied,
+)
 
 router = APIRouter()
 
 
-async def _assert_can_access_detection_task(task_id: str, current_user: User) -> None:
-    """v3.3.0 P0: 校验用户对 detection 任务的访问权 (admin / owner)
+async def _assert_can_access_detection_task(
+    task_id: str,
+    current_user: User,
+    *,
+    endpoint: str = "",
+) -> None:
+    """v3.3.0 P0: 校验用户对 detection 任务的访问权 (v3.3.5 严格最小权限).
 
     - task_id 是 Celery UUID, 通过 TrainingJob.celery_task_id 反查 TrainingJob
-    - non-super_admin 仅能看自己 user_id 的 job 进度 (regular admin 仍受约束)
-    - 找不到对应 job (例如 auto_annotate 不写 TrainingJob) → 仅 super_admin 通过
-
-    v3.3.4-PATCH 修复 (admin 旁路):
-      - 旧逻辑: is_admin() 旁路
-      - 新逻辑: 仅 super_admin 旁路
+    - v3.3.5: 任何角色 (含 super_admin) 必须满足 owner / dataset.team_member
+    - 找不到对应 job (auto_annotate 不写 TrainingJob) → 拒绝 + 写审计
     """
-    if current_user.is_super_admin():
-        return
     async with AsyncSessionLocal() as db:
         job = (await db.execute(
             select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
         )).scalar_one_or_none()
-    if job is None:
-        raise HTTPException(403, "无权限访问此任务进度")
-    if job.user_id != current_user.id:
-        raise HTTPException(403, "无权限访问此任务进度")
+        if job is None:
+            await log_permission_denied(
+                db,
+                current_user=current_user,
+                resource_type="training_job",
+                resource_id=None,
+                endpoint=endpoint or f"/api/detection/progress/{task_id}",
+                reason="detection task not found in DB (auto_annotate task or invalid task_id)",
+                detail={"task_id": task_id, "task_kind": "detection"},
+            )
+            raise HTTPException(403, "无权限访问此任务进度")
+        await assert_can_access_training_job(
+            db, current_user, job.user_id, job.dataset_id,
+        )
 
 
 # ============== 统一进度解析 ==============
@@ -166,12 +180,26 @@ async def get_job_progress(
 
     v3.3.0 P0 修复: 必须校验所有权
     v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受 owner 校验)
+    v3.3.5-PERMISSION-REWRITE: 移除 super_admin 旁路, 走 dataset.team 校验
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
-    if not current_user.is_super_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限查看此训练任务进度")
+    try:
+        await assert_can_access_training_job(
+            db, current_user, job.user_id, job.dataset_id,
+        )
+    except HTTPException:
+        await log_permission_denied(
+            db,
+            current_user=current_user,
+            resource_type="training_job",
+            resource_id=job.id,
+            endpoint=f"/api/detection/jobs/{job_id}/progress",
+            reason="无权查看此训练任务进度 (detection)",
+            detail={"job_user_id": job.user_id, "job_dataset_id": job.dataset_id},
+        )
+        raise
     return {
         "id": job.id,
         "celery_task_id": job.celery_task_id,
@@ -203,12 +231,26 @@ async def stream_job_progress(
 
     v3.3.0 P0 修复: 必须校验所有权, 防止跨用户 SSE 进度泄露
     v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受 owner 校验)
+    v3.3.5-PERMISSION-REWRITE: 移除 super_admin 旁路, 走 dataset.team 校验
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
-    if not current_user.is_super_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限查看此训练任务进度")
+    try:
+        await assert_can_access_training_job(
+            db, current_user, job.user_id, job.dataset_id,
+        )
+    except HTTPException:
+        await log_permission_denied(
+            db,
+            current_user=current_user,
+            resource_type="training_job",
+            resource_id=job.id,
+            endpoint=f"/api/detection/jobs/{job_id}/stream",
+            reason="无权查看此训练任务进度 (detection SSE)",
+            detail={"job_user_id": job.user_id, "job_dataset_id": job.dataset_id},
+        )
+        raise
 
     async def event_gen():
         last_state = None
@@ -264,7 +306,10 @@ async def get_detection_progress(
 
     v3.3.0 P0 修复: 必须校验所有权
     """
-    await _assert_can_access_detection_task(task_id, current_user)
+    await _assert_can_access_detection_task(
+        task_id, current_user,
+        endpoint=f"/api/detection/progress/{task_id}",
+    )
     return await _resolve_detection_task_progress(task_id)
 
 
@@ -289,7 +334,10 @@ async def stream_detection_progress(
     """
     if current_user is None:
         raise HTTPException(401, "未授权: 需要有效的 access_token (query ?token= 或 Authorization header)")
-    await _assert_can_access_detection_task(task_id, current_user)
+    await _assert_can_access_detection_task(
+        task_id, current_user,
+        endpoint=f"/api/detection/progress/stream/{task_id}",
+    )
 
     SSE_DET_POLL_INTERVAL = 1.0
 
