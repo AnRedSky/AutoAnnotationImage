@@ -50,17 +50,21 @@ async def _assert_can_access_task_id(task_id: str, current_user: User, db: Async
     """v3.3.0 P0: 校验用户对训练任务的访问权 (admin / owner)
 
     - task_id 是 Celery UUID, 通过 TrainingJob.celery_task_id 反查 TrainingJob
-    - 非 admin 仅能看自己 user_id 的 job 进度
-    - 找不到对应 job (例如 auto_annotate 任务, 不写 TrainingJob) → 仅 admin 通过
+    - non-super_admin 仅能看自己 user_id 的 job 进度 (regular admin 仍受约束)
+    - 找不到对应 job (例如 auto_annotate 任务, 不写 TrainingJob) → 仅 super_admin 通过
+
+    v3.3.4-PATCH 修复 (admin 旁路):
+      - 旧逻辑: is_admin() 旁路, regular admin 可看全系统训练进度
+      - 新逻辑: 仅 super_admin 旁路, regular admin 走 owner 校验
     """
-    if current_user.is_admin():
+    if current_user.is_super_admin():
         return
     job = (await db.execute(
         select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
     )).scalar_one_or_none()
     if job is None:
         # 找不到对应 job (可能是 auto_annotate 等不写 TrainingJob 的 Celery 任务)
-        # 非 admin 用户看不到
+        # 非 super_admin 用户看不到
         raise HTTPException(403, "无权限访问此任务进度")
     if job.user_id != current_user.id:
         raise HTTPException(403, "无权限访问此任务进度")

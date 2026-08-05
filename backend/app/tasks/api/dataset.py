@@ -83,7 +83,7 @@ async def list_datasets(
     """v3.3.3: 数据集列表 (个人所有 + 团队共享, owner 视角优化).
 
     业务规则 (与用户新需求 §2「团队共享数据集可见性」对齐):
-      1. admin 看全部
+      1. super_admin 看全部 (v3.3.4-PATCH 收紧: regular admin 不再旁路)
       2. 普通用户: 看自己创建的 + 团队共享的 (仅当是其成员且团队未归档)
 
     返回字段新增 (v3.3.2):
@@ -97,7 +97,7 @@ async def list_datasets(
         — 这是因为 owner 视角下, dataset 仍首先是「我创建的」,
           团队共享是衍生行为, 不应让 owner 看到「别人的团队共享」
       - 个人计数 personal_count / team_shared_count 同样按「当前用户视角」计算
-      - admin 视角下, 非自己创建的 dataset 仍按团队共享处理
+      - super_admin 视角下, 非自己创建的 dataset 仍按团队共享处理
 
     返回字段 (v3.3.3):
       - source:       "personal" | "team_shared"
@@ -106,22 +106,28 @@ async def list_datasets(
       - team_name:    仅 source=team_shared 时返回团队名, 否则 null
       - shared_by:    仅 source=team_shared 时返回共享者用户名, 否则 null
       - my_access:    在该数据集上的有效角色
-                      ("owner" | "manager" | "editor" | "viewer" | "admin")
+                      ("owner" | "manager" | "editor" | "viewer" | "super_admin")
 
     排序: 个人所有优先 → 团队共享在后, 同源内按 id 倒序
+
+    v3.3.4-PATCH 修复 (admin 越权):
+      - is_admin() → is_super_admin(): regular admin 仍受团队隔离约束
+      - my_access 标注同步收紧: 仅 super_admin 显示 "super_admin",
+        regular admin 按其在团队中的实际角色计算
     """
     from sqlalchemy import or_
     from app.tasks.model.team_member import TeamMember as _TM
     from app.tasks.model.team import Team as _Team
 
     # ============== 1. 拿数据集 ==============
-    if current_user.is_admin():
-        # admin 看全部 dataset
+    # v3.3.4-PATCH: is_admin() → is_super_admin() (regular admin 仍受团队隔离)
+    if current_user.is_super_admin():
+        # super_admin 看全部 dataset
         all_stmt = select(Dataset).order_by(Dataset.id.desc())
         result = await db.execute(all_stmt)
         all_datasets = result.scalars().all()
     else:
-        # 普通用户: 个人所有 + 团队共享
+        # 普通用户 + regular admin: 个人所有 + 团队共享
         # 1) 找出我所在的、未归档的 team_id
         member_team_ids_q = (
             select(_TM.team_id)
@@ -197,7 +203,13 @@ async def list_datasets(
             team_id = None
             team_name = None
             shared_by = None
-            my_access = "owner" if is_owner else ("admin" if current_user.is_admin() else "viewer")
+            # v3.3.4-PATCH: 仅 super_admin 显示 "super_admin", regular admin 按 viewer 兜底
+            if is_owner:
+                my_access = "owner"
+            elif current_user.is_super_admin():
+                my_access = "super_admin"
+            else:
+                my_access = "viewer"
         else:
             # team_id 非空 — 区分 owner 视角 vs 其他人视角
             # v3.3.3 用户新需求 §1:
@@ -216,8 +228,9 @@ async def list_datasets(
                 team_id = d.team_id
                 team_name = team_name_map.get(d.team_id)
                 shared_by = shared_by_map.get(d.owner_id)
-                if current_user.is_admin():
-                    my_access = "admin"
+                # v3.3.4-PATCH: 仅 super_admin 显示 "super_admin", regular admin 按实际角色
+                if current_user.is_super_admin():
+                    my_access = "super_admin"
                 else:
                     role = my_role_map.get(d.team_id)
                     my_access = role or "viewer"

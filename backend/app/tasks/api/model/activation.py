@@ -119,7 +119,8 @@ async def deactivate_model(
         if not ds:
             raise HTTPException(404, "Dataset not found")
         await assert_can_access_dataset(db, current_user, ds, require_write=True)
-    elif not current_user.is_admin():
+    elif not current_user.is_super_admin():
+        # v3.3.4-PATCH: 收紧为仅 super_admin 可操作孤儿 model, regular admin 仍被拒
         raise HTTPException(403, "无权限操作此模型")
 
     try:

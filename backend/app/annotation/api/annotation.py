@@ -726,16 +726,20 @@ async def recent_annotations(
     全系统最近 N 条标注 (Dashboard 活动流)
 
     v3.3.0 P0 修复: 严格按用户隔离
-    - admin: 看全系统 (保留原行为, 运营视角)
-    - 普通用户: 仅返回自己有权限访问的数据集下产生的标注
+    - super_admin: 看全系统 (保留原行为, 平台级审计视角)
+    - regular admin / 普通用户: 仅返回自己有权限访问的数据集下产生的标注
       (防止通过此端点看到别人的标注活动, 严重隐私泄露)
+
+    v3.3.4-PATCH 修复 (admin 越权):
+      - P0-4 旧逻辑: is_admin() 看全系统
+      - 新逻辑: 仅 super_admin 看全系统, regular admin 走个人+团队共享过滤
     """
     from app.admin.model.user import User as UserModel
     from app.tasks.model.dataset import Dataset
     from app.tasks.model.team_member import TeamMember
 
-    if current_user.is_admin():
-        # 管理员: 保留全局视角
+    if current_user.is_super_admin():
+        # 超级管理员: 全局视角 (平台级审计)
         stmt = (
             select(AnnotationLog, Image.filename, Image.dataset_id, UserModel.username)
             .join(Image, Image.id == AnnotationLog.image_id)
@@ -744,7 +748,7 @@ async def recent_annotations(
             .limit(limit)
         )
     else:
-        # 普通用户: 限定到有权限访问的 dataset
+        # 普通用户 + regular admin: 限定到有权限访问的 dataset
         own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
         team_ds_subq = (
             select(Dataset.id)

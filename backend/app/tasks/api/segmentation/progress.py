@@ -41,8 +41,13 @@ router = APIRouter()
 
 
 async def _assert_can_access_segmentation_task(task_id: str, current_user: User) -> None:
-    """v3.3.0 P0: 校验用户对 segmentation 任务的访问权 (admin / owner)"""
-    if current_user.is_admin():
+    """v3.3.0 P0: 校验用户对 segmentation 任务的访问权 (admin / owner)
+
+    v3.3.4-PATCH 修复 (admin 旁路):
+      - 旧逻辑: is_admin() 旁路
+      - 新逻辑: 仅 super_admin 旁路, regular admin 走 owner 校验
+    """
+    if current_user.is_super_admin():
         return
     async with AsyncSessionLocal() as db:
         job = (await db.execute(
@@ -147,11 +152,12 @@ async def get_segmentation_job_progress(
     """拉取分割 TrainingJob 进度 (轮询)
 
     v3.3.0 P0 修复: 必须校验所有权
+    v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受 owner 校验)
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
-    if not current_user.is_admin() and job.user_id != current_user.id:
+    if not current_user.is_super_admin() and job.user_id != current_user.id:
         raise HTTPException(403, "无权限查看此训练任务进度")
     return {
         "id": job.id,

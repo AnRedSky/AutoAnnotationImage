@@ -46,16 +46,36 @@ async def list_models(
     列出所有模型版本
     - 可选过滤: dataset_id, active (按激活状态)
     - 同时返回关联 Dataset 的 name, 供前端表格「训练集」列展示
+
+    v3.3.4-PATCH 修复 (admin 越权):
+      - P0-3 旧逻辑: is_admin() 看全部, 否则只看自己 dataset 的 model
+      - 新逻辑: 仅 super_admin 看全部; regular admin / 普通用户
+                看自己创建的 + 团队共享数据集下的 model
+      - 过滤条件: model.dataset_id IN (个人所有 + 团队共享) dataset
     """
     stmt = select(ModelVersion)
     if dataset_id is not None:
         stmt = stmt.where(ModelVersion.dataset_id == dataset_id)
     if active is not None:
         stmt = stmt.where(ModelVersion.is_active == active)  # noqa: E712
-    # P1-1: 非 admin 只看自己 dataset 的 model
-    if not current_user.is_admin():
-        own_ds = select(Dataset.id).where(Dataset.owner_id == current_user.id)
-        stmt = stmt.where(ModelVersion.dataset_id.in_(own_ds))
+    # P0-3 v3.3.4-PATCH: 收紧为仅 super_admin 旁路, regular admin 仍受团队隔离
+    if not current_user.is_super_admin():
+        from app.tasks.model.team_member import TeamMember as _TM
+        from app.tasks.model.team import Team as _Team
+        from sqlalchemy import or_ as _or
+        member_team_ids_q = (
+            select(_TM.team_id)
+            .join(_Team, _Team.id == _TM.team_id)
+            .where(
+                _TM.user_id == current_user.id,
+                _Team.archived_at.is_(None),
+            )
+        )
+        vis_ds_filter = _or(
+            Dataset.owner_id == current_user.id,
+            Dataset.team_id.in_(member_team_ids_q),
+        )
+        stmt = stmt.where(ModelVersion.dataset_id.in_(select(Dataset.id).where(vis_ds_filter)))
     stmt = stmt.order_by(ModelVersion.created_at.desc())
     result = await db.execute(stmt)
     models = result.scalars().all()
@@ -122,12 +142,13 @@ async def list_active_models(
        (单 query + ROW_NUMBER OVER PARTITION BY). N+1 → 1 query.
 
     v3.3.0 P0 修复: 严格按用户隔离
-    - admin: 看全系统
-    - 普通用户: 仅看自己可见数据集的激活模型
+    v3.3.4-PATCH 修复 (admin 越权):
+      - 旧逻辑: is_admin() 看全系统
+      - 新逻辑: 仅 super_admin 看全系统, regular admin 走个人+团队共享过滤
     """
     items: list[dict] = []
 
-    if current_user.is_admin():
+    if current_user.is_super_admin():
         if dataset_id is not None:
             active = await ModelService.get_active_for_dataset(db, dataset_id, task_type=task_type)
             if active:
@@ -138,7 +159,7 @@ async def list_active_models(
                 items.append(_model_to_dict(active))
         return {"items": items, "count": len(items)}
 
-    # 非 admin: 限定到可见 dataset
+    # non-super_admin: 限定到可见 dataset (含 personal + team_shared)
     from app.tasks.model.team_member import TeamMember
     from sqlalchemy import union_all
     own_ds_subq = select(Dataset.id).where(Dataset.owner_id == current_user.id)
@@ -210,8 +231,8 @@ async def get_model_detail(
             raise HTTPException(404, "Dataset not found")
         from app.tasks.service.permission_service import assert_can_access_dataset
         await assert_can_access_dataset(db, current_user, ds)
-    elif not current_user.is_admin():
-        # 无 dataset_id 的孤儿 model 仅 admin 可访问
+    elif not current_user.is_super_admin():
+        # v3.3.4-PATCH: 收紧为仅 super_admin 可访问孤儿 model, regular admin 仍被拒
         raise HTTPException(403, "无权限访问此模型")
 
     # 同步返回 dataset_name (前端弹窗可能用)

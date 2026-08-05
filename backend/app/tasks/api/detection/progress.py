@@ -41,10 +41,14 @@ async def _assert_can_access_detection_task(task_id: str, current_user: User) ->
     """v3.3.0 P0: 校验用户对 detection 任务的访问权 (admin / owner)
 
     - task_id 是 Celery UUID, 通过 TrainingJob.celery_task_id 反查 TrainingJob
-    - 非 admin 仅能看自己 user_id 的 job 进度
-    - 找不到对应 job (例如 auto_annotate 不写 TrainingJob) → 仅 admin 通过
+    - non-super_admin 仅能看自己 user_id 的 job 进度 (regular admin 仍受约束)
+    - 找不到对应 job (例如 auto_annotate 不写 TrainingJob) → 仅 super_admin 通过
+
+    v3.3.4-PATCH 修复 (admin 旁路):
+      - 旧逻辑: is_admin() 旁路
+      - 新逻辑: 仅 super_admin 旁路
     """
-    if current_user.is_admin():
+    if current_user.is_super_admin():
         return
     async with AsyncSessionLocal() as db:
         job = (await db.execute(
@@ -161,11 +165,12 @@ async def get_job_progress(
     拉取 TrainingJob 进度 (兼容老接口, JSON 轮询)
 
     v3.3.0 P0 修复: 必须校验所有权
+    v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受 owner 校验)
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
-    if not current_user.is_admin() and job.user_id != current_user.id:
+    if not current_user.is_super_admin() and job.user_id != current_user.id:
         raise HTTPException(403, "无权限查看此训练任务进度")
     return {
         "id": job.id,
@@ -197,11 +202,12 @@ async def stream_job_progress(
     SSE 进度推送: 每秒轮询 TrainingJob, 终态自动断开
 
     v3.3.0 P0 修复: 必须校验所有权, 防止跨用户 SSE 进度泄露
+    v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受 owner 校验)
     """
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, f"TrainingJob id={job_id} not found")
-    if not current_user.is_admin() and job.user_id != current_user.id:
+    if not current_user.is_super_admin() and job.user_id != current_user.id:
         raise HTTPException(403, "无权限查看此训练任务进度")
 
     async def event_gen():

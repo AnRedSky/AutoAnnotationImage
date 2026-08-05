@@ -34,9 +34,13 @@ LOG_LINE_MAX_LEN = 2048  # 单行最大 2KB
 
 def _assert_can_access_job(job: TrainingJob, current_user: User) -> None:
     """v3.3.0 P0: 校验用户对训练任务的访问权 (admin / owner)
-    非 admin 仅能查看自己创建的 job
+    非 super_admin 仅能查看自己创建的 job (regular admin 仍受约束)
+
+    v3.3.4-PATCH 修复 (admin 旁路):
+      - 旧逻辑: is_admin() 旁路
+      - 新逻辑: 仅 super_admin 旁路
     """
-    if current_user.is_admin():
+    if current_user.is_super_admin():
         return
     if job.user_id != current_user.id:
         raise HTTPException(403, "无权限访问此训练任务日志")

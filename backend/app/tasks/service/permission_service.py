@@ -1,6 +1,6 @@
 """
-权限检查 helper (v3.3.0, v3.3.4 安全加固)
-========================================
+权限检查 helper (v3.3.0, v3.3.4 安全加固, v3.3.4-PATCH 全面修复)
+============================================================
 
 async 版 can_access_dataset — 检查 owner / team_member.
 供 API 层调用, 避免 15 处端点各自实现.
@@ -22,6 +22,14 @@ v3.3.4 安全加固 (权限审查整改):
     仅 super_admin 可绕过, regular admin 仍受团队隔离约束.
   - 平台级管理操作 (用户管理 / 审计 / 团队恢复) 仍走 is_admin() 校验,
     不在此次整改范围.
+
+v3.3.4-PATCH 全面修复 (修复 v3.3.4 遗漏的 list / 单条操作白点):
+  - 新增 assert_can_access_training_job / assert_can_access_model 辅助函数
+  - 修复 list_datasets / list_training_jobs / list_models / recent_annotations
+    等 list 接口的 admin 越权 (is_admin() → is_super_admin() + team 共享过滤)
+  - 修复训练任务单条操作 (cancel/pause/resume/delete/error) 的 admin 旁路
+  - 修复模型 delete / activate 的 admin 旁路
+  - 修复训练日志/进度 (training/detection/segmentation) 的 admin 旁路
 """
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -137,6 +145,76 @@ async def assert_can_share_to_team(
             "共享数据集需要「可管理」角色,"
             f"您当前角色是「{_role_label(member.role)}」",
         )
+
+
+# ============== v3.3.4-PATCH 新增: training job 权限校验 ==============
+
+async def assert_can_access_training_job(
+    db: AsyncSession,
+    current_user: User,
+    job_user_id: int,
+    job_dataset_id: int | None = None,
+) -> None:
+    """检查用户对训练任务的访问权 (v3.3.4-PATCH 新增).
+
+    校验规则 (与数据集访问对齐):
+      1. super_admin → 全通
+      2. job.user_id == current_user.id (创建者) → 通过
+      3. 通过 job.dataset_id 关联的 dataset:
+         - 走 assert_can_access_dataset 校验 (含 team 共享)
+      4. 找不到 dataset 时, 仅 super_admin / 创建者通过
+
+    Args:
+        db: AsyncSession
+        current_user: 当前用户
+        job_user_id: 训练任务的创建者 user_id
+        job_dataset_id: 训练任务关联的数据集 id (可能为 None, e.g. auto_annotate)
+    """
+    if current_user.is_super_admin():
+        return
+    if job_user_id == current_user.id:
+        return
+    if job_dataset_id is not None:
+        ds = await db.get(Dataset, job_dataset_id)
+        if ds:
+            # 走统一的 dataset 权限 (含 team 共享 + viewer 校验)
+            await assert_can_access_dataset(db, current_user, ds)
+            return
+    raise HTTPException(403, "无权限访问此训练任务")
+
+
+# ============== v3.3.4-PATCH 新增: model 权限校验 ==============
+
+async def assert_can_access_model(
+    db: AsyncSession,
+    current_user: User,
+    model_dataset_id: int | None,
+    *,
+    require_write: bool = False,
+) -> None:
+    """检查用户对模型版本的访问权 (v3.3.4-PATCH 新增).
+
+    模型本身不存储 owner 字段, 通过关联 dataset 间接校验权限:
+      1. super_admin → 全通 (含无主 model)
+      2. model.dataset_id 非空 → 走 assert_can_access_dataset 校验
+      3. model.dataset_id 为空 (孤儿 model) → 仅 super_admin 通过
+         (regular admin 不再旁路, 与 v3.3.4 数据级严格分离对齐)
+
+    Args:
+        db: AsyncSession
+        current_user: 当前用户
+        model_dataset_id: 模型关联的数据集 id (可能为 None)
+        require_write: 是否需要写权限 (activate/delete 时传 True)
+    """
+    if current_user.is_super_admin():
+        return
+    if model_dataset_id is None:
+        # 孤儿 model: 仅 super_admin 可访问 (v3.3.4-PATCH 收紧 regular admin)
+        raise HTTPException(403, "无主模型, 仅超管可访问")
+    ds = await db.get(Dataset, model_dataset_id)
+    if not ds:
+        raise HTTPException(404, f"模型关联的数据集 (id={model_dataset_id}) 不存在")
+    await assert_can_access_dataset(db, current_user, ds, require_write=require_write)
 
 
 def _role_label(role: str) -> str:

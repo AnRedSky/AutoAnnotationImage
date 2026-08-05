@@ -115,7 +115,8 @@ async def delete_model(
         if not ds:
             raise HTTPException(404, "Dataset not found")
         await assert_can_access_dataset(db, current_user, ds, require_write=True)
-    elif not current_user.is_admin():
+    elif not current_user.is_super_admin():
+        # v3.3.4-PATCH: 收紧为仅 super_admin 可删孤儿 model, regular admin 仍被拒
         raise HTTPException(403, "无权限操作此模型")
 
     was_active = m.is_active
@@ -190,9 +191,9 @@ async def batch_delete_models(
         if not ds:
             continue
         await assert_can_access_dataset(db, current_user, ds, require_write=True)
-    # 无 dataset_id 的 model 仅 admin 可删
-    if any(m.dataset_id is None for m in rows) and not current_user.is_admin():
-        raise HTTPException(403, "包含无主模型, 仅管理员可操作")
+    # 无 dataset_id 的 model 仅 super_admin 可删 (v3.3.4-PATCH 收紧 regular admin)
+    if any(m.dataset_id is None for m in rows) and not current_user.is_super_admin():
+        raise HTTPException(403, "包含无主模型, 仅超级管理员可操作")
 
     # 2) 校验: 缺失 (激活的不再拒绝, v2 改造: 删除即取消激活)
     missing = [i for i in uniq_ids if i not in found_map]

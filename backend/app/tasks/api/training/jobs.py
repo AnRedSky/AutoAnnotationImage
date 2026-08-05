@@ -28,6 +28,7 @@ from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.model.training_job import TrainingJob
 from app.tasks.model.model_version import ModelVersion
+from app.tasks.model.dataset import Dataset
 from app.schemas.training import (
     TrainingJobList,
     TrainingJobOut,
@@ -99,13 +100,39 @@ async def list_training_jobs(
     - 按 q 关键词在 model_name / base_model 两个字段做模糊匹配 (大小写不敏感)
     - 分页: page (>=1) + page_size (1-100, 默认 10)
     - 返回 total + items, 前端 el-pagination 直接用
+
+    v3.3.4-PATCH 修复 (admin 越权):
+      - P0-6 旧逻辑: 非 admin 只看自己的训练任务; admin 看全部
+      - 新逻辑: 仅 super_admin 看全部; regular admin / 普通用户
+                看自己创建的 + 团队共享数据集下的训练任务
+      - 过滤条件: job.user_id == me OR job.dataset_id IN team_shared_datasets
     """
+    from app.tasks.model.team_member import TeamMember as _TM
+    from app.tasks.model.team import Team as _Team
+
     base = select(TrainingJob)
     count_base = select(sa_func.count(TrainingJob.id))
-    # P0-6: 非 admin 只看自己的训练任务; admin 看全部
-    if not current_user.is_admin():
-        base = base.where(TrainingJob.user_id == current_user.id)
-        count_base = count_base.where(TrainingJob.user_id == current_user.id)
+    # v3.3.4-PATCH: 收紧为仅 super_admin 旁路 (regular admin 仍受团队隔离)
+    if not current_user.is_super_admin():
+        # 个人所有 + 团队共享数据集下的训练任务
+        member_team_ids_q = (
+            select(_TM.team_id)
+            .join(_Team, _Team.id == _TM.team_id)
+            .where(
+                _TM.user_id == current_user.id,
+                _Team.archived_at.is_(None),
+            )
+        )
+        team_shared_ds_q = select(Dataset.id).where(
+            Dataset.team_id.in_(member_team_ids_q)
+        )
+        from sqlalchemy import or_ as _or
+        vis_filter = _or(
+            TrainingJob.user_id == current_user.id,
+            TrainingJob.dataset_id.in_(team_shared_ds_q),
+        )
+        base = base.where(vis_filter)
+        count_base = count_base.where(vis_filter)
     if dataset_id is not None:
         base = base.where(TrainingJob.dataset_id == dataset_id)
         count_base = count_base.where(TrainingJob.dataset_id == dataset_id)
@@ -146,13 +173,18 @@ async def get_training_job(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """获取单个训练任务详情 (v3.3.0 P0 修复: 必须校验所有权)"""
+    """获取单个训练任务详情 (v3.3.0 P0 修复: 必须校验所有权)
+
+    v3.3.4-PATCH 修复 (admin 越权):
+      - 旧逻辑: admin 看全部 (越权)
+      - 新逻辑: 仅 super_admin 旁路, regular admin 需走 team 共享校验
+    """
+    from app.tasks.service.permission_service import assert_can_access_training_job
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
-    # 权限校验: admin 看全部, 否则只能看自己的
-    if not current_user.is_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限查看此训练任务")
+    # v3.3.4-PATCH: 统一权限函数 (含 super_admin / owner / team 共享)
+    await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_id)
     # v3.0.0: 补 pretrain_source_mv_name (单条直接走单查询, 不走批量)
     await _batch_fill_source_mv_names(db, [job])
     return job
@@ -183,9 +215,9 @@ async def cancel_training_job(
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
-    # 权限校验
-    if not current_user.is_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限操作此训练任务")
+    # 权限校验 (v3.3.4-PATCH: 含 super_admin / owner / team 共享)
+    from app.tasks.service.permission_service import assert_can_access_training_job
+    await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_id)
     # v3.5.0: 允许从 PENDING/PROGRESS/PAUSED 取消 (从 PAUSED 也能取消, 业务场景常见)
     if job.state not in ("PENDING", "PROGRESS", "PAUSED"):
         return {
@@ -236,9 +268,9 @@ async def get_training_error(
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
-    # 权限校验
-    if not current_user.is_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限查看此训练任务")
+    # 权限校验 (v3.3.4-PATCH: 含 super_admin / owner / team 共享)
+    from app.tasks.service.permission_service import assert_can_access_training_job
+    await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_id)
     err = job.error
     redis_err = None
     if job.celery_task_id:
@@ -277,9 +309,9 @@ async def pause_training_job(
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
-    # 权限校验
-    if not current_user.is_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限操作此训练任务")
+    # 权限校验 (v3.3.4-PATCH: 含 super_admin / owner / team 共享)
+    from app.tasks.service.permission_service import assert_can_access_training_job
+    await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_id)
     if job.state not in ("PENDING", "PROGRESS"):
         return TrainingJobActionResult(
             success=False,
@@ -336,9 +368,9 @@ async def update_training_job(
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
-    # 权限校验
-    if not current_user.is_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限操作此训练任务")
+    # 权限校验 (v3.3.4-PATCH: 含 super_admin / owner / team 共享)
+    from app.tasks.service.permission_service import assert_can_access_training_job
+    await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_id)
     if job.state == "PROGRESS":
         raise HTTPException(409, f"任务 #${job_id} 正在训练中, 暂不允许编辑参数")
 
@@ -387,9 +419,9 @@ async def delete_training_job(
     job = await db.get(TrainingJob, job_id)
     if not job:
         raise HTTPException(404, "Training job not found")
-    # 权限校验
-    if not current_user.is_admin() and job.user_id != current_user.id:
-        raise HTTPException(403, "无权限操作此训练任务")
+    # v3.3.4-PATCH: 统一权限函数 (含 super_admin / owner / team 共享)
+    from app.tasks.service.permission_service import assert_can_access_training_job
+    await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_id)
     if job.state in ("PENDING", "PROGRESS"):
         return TrainingJobActionResult(
             success=False,
