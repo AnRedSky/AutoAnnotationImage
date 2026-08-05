@@ -50,7 +50,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -58,6 +58,7 @@ from app.admin.model.user import User
 from app.tasks.model.team import Team
 from app.tasks.model.team_member import TeamMember, TEAM_ROLES, WRITE_ROLES
 from app.tasks.model.dataset import Dataset
+from app.tasks.model.audit_log import AuditLog
 from app.middleware.http.auth import get_current_user
 from app.tasks.service.audit_service import log_audit
 from app.common.cache import cache
@@ -1064,3 +1065,111 @@ async def unshare_dataset(
         )
     await db.commit()
     return {"success": True, "dataset_id": dataset_id, "team_id": None}
+
+
+# ============== 团队活动 Feed (v3.3.1 L4) ==============
+
+# 活动事件类型语义化映射 (前端可直接显示)
+_TEAM_ACTIVITY_LABELS = {
+    "team_created": "创建团队",
+    "team_updated": "更新团队",
+    "team_deleted": "归档团队",
+    "team_restored": "恢复团队",
+    "team_ownership_transferred": "转让所有权",
+    "team_left": "退出团队",
+    "team_member_invited": "邀请成员",
+    "team_member_role_changed": "变更成员角色",
+    "team_member_removed": "移除成员",
+    "dataset_shared_to_team": "共享数据集",
+    "dataset_unshared_from_team": "取消共享数据集",
+}
+
+
+@router.get("/{team_id}/activities")
+async def list_team_activities(
+    team_id: int,
+    limit: int = Query(default=50, ge=1, le=200, description="返回条数 (1-200)"),
+    event_type: Optional[str] = Query(default=None, description="事件类型过滤"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """v3.3.1 L4: 团队活动 Feed (团队成员可见).
+
+    聚合最近 N 条团队相关 audit_log, JOIN User 拿 username + 事件类型语义化标签.
+    用于团队详情页「动态」 Tab 展示.
+
+    业务规则:
+      - 仅团队成员可见 (数据隔离)
+      - 已归档团队对非 admin 返回 410
+      - 按 created_at DESC 排序 (最新在前)
+      - event_type 可选过滤
+
+    响应字段:
+      - items: [{id, user_id, username, event_type, event_label, resource_type,
+                 resource_id, detail, created_at}]
+      - total: 符合条件的总条数
+    """
+    # 1. 权限与归档校验
+    team = await db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    # 数据隔离: 非成员不可访问, 但 admin 可绕过 (用于合规审计/恢复)
+    if not current_user.is_admin():
+        await _get_member_or_403(db, team_id, current_user.id)
+        _assert_team_active(team)
+
+    # 2. 基础查询
+    conditions = [AuditLog.team_id == team_id]
+    if event_type:
+        conditions.append(AuditLog.event_type == event_type)
+
+    # 3. 总数
+    count_stmt = select(func.count(AuditLog.id)).where(and_(*conditions))
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    # 4. 分页查询 (按 created_at DESC, 最新在前)
+    stmt = (
+        select(AuditLog, User.username)
+        .join(User, User.id == AuditLog.user_id)
+        .where(and_(*conditions))
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return {
+        "items": [
+            {
+                "id": log.id,
+                "user_id": log.user_id,
+                "username": username,
+                "event_type": log.event_type,
+                "event_label": _TEAM_ACTIVITY_LABELS.get(log.event_type, log.event_type),
+                "resource_type": log.resource_type,
+                "resource_id": log.resource_id,
+                "detail": log.detail,
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log, username in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "event_type": event_type,
+    }
+
+
+# ============== 缓存监控 (v3.3.1 L4) ==============
+
+@router.get("/_cache/stats")
+async def get_cache_stats(
+    current_user: User = Depends(get_current_user),
+):
+    """v3.3.1 L4: 缓存统计 (hit/miss 计数 + 命中率).
+
+    权限: 仅 admin (运维监控)
+    用途: 前端管理后台「缓存监控」卡片展示 hit_rate_percent + 趋势.
+    """
+    if not current_user.is_admin():
+        raise HTTPException(403, "无权限: 仅系统管理员可查看缓存统计")
+    return cache.get_stats()

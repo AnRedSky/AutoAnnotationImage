@@ -22,6 +22,8 @@ import TeamDetailHeader from './components/TeamDetailHeader.vue'
 import TeamMemberTable from './components/TeamMemberTable.vue'
 import TeamDatasetList from './components/TeamDatasetList.vue'
 import TeamStatsCard from './components/TeamStatsCard.vue'
+import TeamActivities from './components/TeamActivities.vue'  // v3.3.1 L4
+import CacheMonitorCard from './components/CacheMonitorCard.vue'  // v3.3.1 L4
 
 import CreateTeamDialog from './components/dialogs/CreateTeamDialog.vue'
 import EditTeamDialog from './components/dialogs/EditTeamDialog.vue'
@@ -426,6 +428,12 @@ watch(view, (v) => {
             :team-id="selectedTeam.id"
             :days="statsDays"
           />
+        </el-tab-pane>
+        <el-tab-pane label="团队动态" name="activities">
+          <TeamActivities :team-id="selectedTeam.id" :limit="50" />
+        </el-tab-pane>
+        <el-tab-pane v-if="isAdmin" label="缓存监控" name="cache">
+          <CacheMonitorCard />
         </el-tab-pane>
       </el-tabs>
     </template>

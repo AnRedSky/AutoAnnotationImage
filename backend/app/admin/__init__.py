@@ -59,11 +59,15 @@ class AdminApp(AppInterface):
         from app.admin.api import stats as stats_api
         from app.admin.api import system as system_api
         from app.admin.api import team as team_api  # v3.3.0
+        from app.admin.api import audit as audit_api  # v3.3.1 L4
         return [
             RouteEntry(user_api, "/api/users", ["用户管理"]),
             RouteEntry(stats_api, "/api/stats", ["统计分析"]),
             RouteEntry(system_api, "/api", ["系统"]),
             RouteEntry(team_api, "/api/teams", ["团队管理"]),  # v3.3.0
+            # v3.3.1 L4: 审计路由 (含 /api/audit-logs)
+            # 注意: audit_router 的端点路径已含 /audit-logs, 这里 prefix="/api" 拼成 /api/audit-logs
+            RouteEntry(audit_api, "/api", ["审计日志"]),  # v3.3.1 L4
         ]
 
     def register_events(self) -> list[str]:

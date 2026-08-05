@@ -725,6 +725,70 @@ export const teamApi = {
     http.post(`/teams/datasets/${datasetId}/share`, null, { params: { team_id: teamId } }),
   unshareDataset: (datasetId: number) =>
     http.delete(`/teams/datasets/${datasetId}/share`),
+  // v3.3.1 L4: 团队活动 Feed
+  listActivities: (id: number, params?: { limit?: number; event_type?: string }) =>
+    http.get<{
+      items: Array<{
+        id: number
+        user_id: number
+        username: string
+        event_type: string
+        event_label: string
+        resource_type: string | null
+        resource_id: number | null
+        detail: any
+        created_at: string | null
+      }>
+      total: number
+      limit: number
+      event_type: string | null
+    }>(`/teams/${id}/activities`, { params }),
+}
+
+// ============== 审计日志 (v3.3.1 L4) ==============
+export interface AuditLogItem {
+  id: number
+  user_id: number
+  username: string
+  event_type: string
+  resource_type: string | null
+  resource_id: number | null
+  team_id: number | null
+  detail: any
+  ip_address: string | null
+  created_at: string | null
+}
+
+export const auditApi = {
+  list: (params?: {
+    page?: number
+    page_size?: number
+    event_type?: string
+    team_id?: number
+    user_id?: number
+    resource_type?: string
+    start?: string
+    end?: string
+  }) => http.get<{
+    items: AuditLogItem[]
+    page: number
+    page_size: number
+    total: number
+    total_pages: number
+    filters: Record<string, any>
+  }>('/audit-logs', { params }),
+}
+
+// ============== 缓存监控 (v3.3.1 L4) ==============
+export interface CacheStats {
+  hits: number
+  misses: number
+  total: number
+  hit_rate_percent: number
+}
+
+export const cacheApi = {
+  stats: () => http.get<CacheStats>('/teams/_cache/stats'),
 }
 
 // ============== 用户管理 (v3.3.0) ==============
