@@ -345,17 +345,43 @@ class TestTeamActivities:
         assert resp.status_code == 410
 
     async def test_f04_admin_can_view_archived_activities(
-        self, client: AsyncClient, admin_headers: dict,
-        archived_team: Team, owner: User, db_session: AsyncSession,
+        self, client: AsyncClient, db_session: AsyncSession,
+        archived_team: Team, owner: User,
     ):
-        """F04: admin 可查看已归档团队的活动."""
+        """F04: super_admin 可查看已归档团队的活动 (v3.3.4: 收紧为仅 super_admin).
+
+        旧行为: regular admin 可旁路 _get_member_or_403, 直接看任何团队活动
+        新行为: 仅 super_admin 可看任意团队活动 (合规审计场景),
+                regular admin 必须有团队成员关系
+
+        验证 super_admin 旁路场景 (test_regular_admin 在
+        test_permission_v334_audit.py::test_regular_admin_cannot_view_outsider_team_activities)
+        """
+        # 用 super_admin 账号登录 (绕过成员关系校验)
+        from app.middleware.security.security import hash_password
+        from app.admin.model.user import User as _User
+        su = _User(
+            username="l4_super_admin",
+            email="l4_super@example.com",
+            password_hash=hash_password("superpass123"),
+            role="super_admin",
+            is_active=True,
+        )
+        db_session.add(su)
+        await db_session.commit()
+        await db_session.refresh(su)
+        su_headers = await _login(client, "l4_super_admin", "superpass123")
+
         await _seed_audit_logs(db_session, archived_team, owner, count=2)
 
         resp = await client.get(
             f"/api/teams/{archived_team.id}/activities",
-            headers=admin_headers,
+            headers=su_headers,
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, (
+            f"super_admin should view any team activities. "
+            f"Got: {resp.status_code} - {resp.text}"
+        )
         body = resp.json()
         assert body["total"] >= 2
 

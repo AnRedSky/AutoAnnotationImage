@@ -154,27 +154,24 @@ async def _get_member_or_403(db: AsyncSession, team_id: int, user_id: int) -> Te
     return member
 
 
-async def _assert_can_manage(db: AsyncSession, team: Team, user: User) -> TeamMember:
+async def _assert_can_manage(db: AsyncSession, team: Team, user: User) -> None:
     """要求可管理权限 (manager) 或 owner.
+
+    v3.3.4 (P1-5 加固): 不再返回伪造的 TeamMember 对象
+      - 旧实现: owner 若不在 team_member 表, 会构造一个游离的 TeamMember
+        实例返回, 潜在风险: 该游离对象如果被误用 (如 db.add 或属性修改),
+        可能产生悬挂引用或脏数据
+      - 新实现: 返回 None 表示 owner (由调用方按 owner 语义处理),
+        普通成员校验失败时直接 raise
 
     注意: 不再对 admin 绕过 — 非团队成员(包括管理员)不可操作.
     """
     if team.owner_id == user.id:
-        # owner 自动有 manager 权限
-        # 但仍需返回 member 对象 (owner 可能不在 team_member 表里)
-        result = await db.execute(
-            select(TeamMember).where(
-                TeamMember.team_id == team.id,
-                TeamMember.user_id == user.id,
-            )
-        )
-        return result.scalar_one_or_none() or TeamMember(
-            team_id=team.id, user_id=user.id, role="manager"
-        )
+        # owner 自动有 manager 权限 — 不返回 TeamMember 对象
+        return
     member = await _get_member_or_403(db, team.id, user.id)
     if not member.can_manage():
         raise HTTPException(403, "无权限: 需要「可管理」角色")
-    return member
 
 
 async def _count_managers(db: AsyncSession, team_id: int) -> int:
@@ -1394,8 +1391,15 @@ async def list_team_activities(
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
-    # 数据隔离: 非成员不可访问, 但 admin 可绕过 (用于合规审计/恢复)
-    if not current_user.is_admin():
+    # v3.3.4 (P1-4 加固): 移除 admin 旁路
+    # 旧逻辑: admin 可绕过成员关系校验 (用于合规审计)
+    # 新逻辑: 仅 super_admin 可访问未加入团队的活动 feed (审计场景),
+    # regular admin 仍受团队成员关系约束, 避免横向越权
+    if current_user.is_super_admin():
+        # super_admin 可看任意团队活动 (审计)
+        pass
+    else:
+        # 数据隔离: 非成员不可访问
         await _get_member_or_403(db, team_id, current_user.id)
         _assert_team_active(team)
 

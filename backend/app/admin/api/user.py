@@ -322,13 +322,44 @@ async def change_user_role(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    """修改用户角色"""
+    """修改用户角色
+
+    v3.3.4 (P0-3 安全加固): 角色变更后立即吊销该用户的所有 token
+      - 防止权限收敛延迟: 旧 token 在角色变更后到下次刷新前仍可使用,
+        可能造成「已降级但仍能短暂访问管理接口」的窗口期
+      - 强制用户重新登录, 获得符合新角色的权限
+      - super_admin 不能被非 super_admin 降级, 业务保护已就位
+    """
     user = await UserService.get(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
     if user.id == admin.id and body.new_role not in ("admin", "super_admin"):
         raise HTTPException(400, "Cannot demote yourself from admin")
+    old_role = user.role
     await UserService.change_role(db, user, body.new_role)
+
+    # v3.3.4 (P0-3): 角色变更后吊销该用户所有 token
+    # - 用户级吊销通过 jwt:revoked:user:{id} 时间戳实现
+    # - 后续签发的 token 必须 iat > 时间戳, 否则视为已吊销
+    # - 旧 token (iat 早于吊销时间戳) 在 decode_token 时被拒绝
+    from app.middleware.security.token_revocation import revoke_user
+    revoke_user(user.id)
+
+    # v3.3.4: 审计 (角色变更属高敏感操作)
+    from app.tasks.service.audit_service import log_audit
+    try:
+        await log_audit(
+            db,
+            user_id=admin.id,
+            event_type="user_role_changed",
+            resource_type="user",
+            resource_id=user.id,
+            detail={"old_role": old_role, "new_role": body.new_role, "tokens_revoked": True},
+        )
+    except Exception:
+        # 审计失败不影响主流程
+        pass
+
     return {"id": user.id, "role": user.role}
 
 

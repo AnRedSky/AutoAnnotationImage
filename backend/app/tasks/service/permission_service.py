@@ -1,6 +1,6 @@
 """
-权限检查 helper (v3.3.0)
-=========================
+权限检查 helper (v3.3.0, v3.3.4 安全加固)
+========================================
 
 async 版 can_access_dataset — 检查 owner / team_member.
 供 API 层调用, 避免 15 处端点各自实现.
@@ -15,6 +15,13 @@ v3.3.2 增强 (协作增强):
     业务规则: 仅数据集 owner 可发起共享 (owner 同时必须是目标团队的成员,
     避免给非自己团队共享; 团队内仅 manager 角色可对非自己创建的数据集执行权限管理)
   - 提供 can_manage_team / can_edit_team 谓词函数, 供列表/详情组装 my_access
+
+v3.3.4 安全加固 (权限审查整改):
+  - 系统角色 (User.role) 与团队角色 (TeamMember.role) 严格分离:
+    数据级访问 (assert_can_access_dataset / assert_can_share_to_team)
+    仅 super_admin 可绕过, regular admin 仍受团队隔离约束.
+  - 平台级管理操作 (用户管理 / 审计 / 团队恢复) 仍走 is_admin() 校验,
+    不在此次整改范围.
 """
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -59,13 +66,18 @@ async def assert_can_access_dataset(
 ) -> None:
     """检查用户是否有权访问数据集, 不通过则 raise 403.
 
-    规则:
-      1. admin/super_admin → 全通
+    系统角色 vs 团队角色严格分离 (v3.3.4):
+      1. super_admin → 全通 (平台级运维/审计, 不受团队隔离约束)
       2. owner → 全通
       3. team_member (dataset.team_id 非空) → 通过
          - require_write=True 时, viewer 角色被拒
+      4. admin/annotator/viewer 角色 → 受团队数据隔离约束, 必须通过 team 共享
+
+    注意: regular admin (User.role='admin') 业务管理员不再自动绕过团队隔离.
+    系统级管理 (用户管理/审计查询) 仍通过 is_admin() 校验; 数据级访问受
+    团队角色管控, 这是 system role vs team role 的严格分离.
     """
-    if current_user.is_admin():
+    if current_user.is_super_admin():
         return
     if dataset.owner_id == current_user.id:
         return
@@ -90,18 +102,17 @@ async def assert_can_share_to_team(
     dataset: Dataset,
     target_team_id: int,
 ) -> None:
-    """v3.3.2: 校验「将数据集共享到团队」的权限.
+    """v3.3.2: 校验「将数据集共享到团队」的权限 (v3.3.4 加固).
 
     业务规则 (与用户新需求 §4「共享权限控制」对齐):
-      1. admin 可绕过 (运维场景, 仅用于强制重置)
-      2. 仅数据集的原始共享者 (owner) 可发起共享 — 与 L1 阶段一致
+      1. super_admin 可绕过 (平台运维场景, regular admin 不再绕过)
+      2. 仅数据集的原始共享者 (owner) 可发起共享
       3. 当前用户必须是目标团队成员 (防止给非自己团队共享)
       4. 目标团队内, 当前用户角色必须是「可管理」(manager)
-         - 与「团队管理角色权限体系完善」中共享权限保持一致
       5. 目标团队未归档 (已归档不可共享新数据集)
     """
-    # 1. admin 绕过
-    if current_user.is_admin():
+    # 1. super_admin 绕过 (v3.3.4: 收紧为仅超管, regular admin 仍需校验)
+    if current_user.is_super_admin():
         return
 
     # 2. 仅 owner 可共享
