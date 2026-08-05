@@ -123,10 +123,11 @@ await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_
 
 ## 五、修改文件清单
 
-### 5.1 后端代码 (10 个文件)
+### 5.1 后端代码 (11 个文件)
 
 | 文件 | 修复点 |
 |------|--------|
+| `app/tasks/api/dataset.py` | `list_datasets` `is_admin()` → `is_super_admin()` + `my_access` 标注收紧 |
 | `app/tasks/api/training/jobs.py` | `list_training_jobs` 收紧 + `delete_training_job` 改用 `assert_can_access_training_job` |
 | `app/tasks/api/model/query.py` | `list_models` 收紧 + `get_model_detail`/`list_active_models` 改用 `is_super_admin()` |
 | `app/tasks/api/model/deletion.py` | `delete_model`/`batch_delete_models` 孤儿旁路收紧 |
@@ -136,6 +137,7 @@ await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_
 | `app/tasks/api/segmentation/progress.py` | 2 处改用 `is_super_admin()` |
 | `app/tasks/api/detection/progress.py` | 3 处改用 `is_super_admin()` |
 | `app/annotation/api/annotation.py` | `recent_annotations` 改用 `is_super_admin()` |
+| `app/tasks/service/permission_service.py` | 新增 `assert_can_access_training_job` / `assert_can_access_model` |
 
 ### 5.2 新增测试 (1 个文件)
 
@@ -201,7 +203,8 @@ await assert_can_access_training_job(db, current_user, job.user_id, job.dataset_
 ## 八、待提交内容
 
 ```bash
-# 1. 后端代码 (10 个文件修改)
+# 1. 后端代码 (11 个文件修改)
+git add app/tasks/api/dataset.py
 git add app/tasks/api/training/jobs.py
 git add app/tasks/api/training/progress.py
 git add app/tasks/api/training/log.py
@@ -211,6 +214,7 @@ git add app/tasks/api/model/activation.py
 git add app/tasks/api/segmentation/progress.py
 git add app/tasks/api/detection/progress.py
 git add app/annotation/api/annotation.py
+git add app/tasks/service/permission_service.py
 
 # 2. 新增测试
 git add tests/test_permission_v334_patch.py
@@ -243,7 +247,7 @@ git add docs/task-summaries/009-task-summary.md
 
 ## 十、待跟进事项
 
-1. **提交前确认**: 关联 P0-1 的 `list_datasets` 修复 (008 报告) + P0-2~P0-6 + P1 的 PATCH 修复 + 17 项测试, 建议合并为 1 个 commit `fix(permission): v3.3.4-PATCH 全面修复 list 接口 + 单条操作 admin 旁路`
+1. **提交前确认**: 关联 P0-1 的 `list_datasets` 修复 (008 报告) + P0-2~P0-6 + P1 的 PATCH 修复 + 17 项测试, 建议合并为 1 个 commit `fix(permission): v3.3.4-PATCH 全面修复 list 接口 + 单条操作 admin 旁路 (11 个后端文件 + 1 个测试)`
 2. **前端验证**: regular admin 登录后, 数据集/训练/模型/标注活动列表的可见性应符合预期 (可手动测试)
 3. **后续 PR 评审**: 评审重点关注:
    - team 共享过滤的 SQL 性能 (子查询是否需要加索引)
