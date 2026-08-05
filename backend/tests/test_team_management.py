@@ -793,3 +793,155 @@ async def test_t20_invite_over_quota(
     )
     assert resp.status_code == 400
     assert "已满" in resp.json()["detail"]
+
+
+# ============== T2.5 L2: 最后一名 manager 保护 ==============
+
+@pytest.mark.asyncio
+async def test_t21_demote_owner_blocked_by_owner_protection(
+    client: AsyncClient, alice: User, bob: User,
+    alice_headers: dict, bob_headers: dict,
+    team_factory,
+):
+    """T21: owner 改自己角色为非 manager → 触发 owner 保护 (优先于 manager 保护)."""
+    team_factory.set_headers("alice", alice_headers)
+    team_factory.set_headers("bob", bob_headers)
+    # alice 是 owner+manager (创建时自动加入 TeamMember 表)
+    # bob 是 editor
+    team_id = await team_factory.make("alice", "TestTeam", members={"bob": "editor"})
+
+    # alice 改自己为 editor → 触发 owner 保护
+    resp = await client.put(
+        f"/api/teams/{team_id}/members/{alice.id}",
+        headers=alice_headers,
+        json={"role": "editor"},
+    )
+    assert resp.status_code == 400
+    # owner 保护先于 manager 保护触发
+    assert "创建者必须保持" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_t22_demote_manager_with_two_managers_allowed(
+    client: AsyncClient, alice: User, bob: User,
+    alice_headers: dict, bob_headers: dict,
+    team_factory,
+):
+    """T22: 团队有 2 个 manager, 降级其中一个 → 200 (剩下 1 个 manager)."""
+    team_factory.set_headers("alice", alice_headers)
+    team_factory.set_headers("bob", bob_headers)
+    # bob 是 manager (有 2 个 manager)
+    team_id = await team_factory.make("alice", "TestTeam", members={"bob": "manager"})
+
+    # alice 降级 bob 为 editor
+    resp = await client.put(
+        f"/api/teams/{team_id}/members/{bob.id}",
+        headers=alice_headers,
+        json={"role": "editor"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "editor"
+
+
+@pytest.mark.asyncio
+async def test_t23_demote_after_transfer_old_owner_still_manager(
+    client: AsyncClient, alice: User, bob: User,
+    alice_headers: dict, bob_headers: dict,
+    team_factory,
+):
+    """T23: 转让所有权后, 原 owner 仍是 manager, 转让后原 owner 可被降级.
+
+    验证 manager 计数含原 owner (转让后角色保持 manager).
+    """
+    team_factory.set_headers("alice", alice_headers)
+    team_factory.set_headers("bob", bob_headers)
+    team_id = await team_factory.make("alice", "TestTeam", members={"bob": "manager"})
+
+    # 转让给 bob: 现在 bob=owner+manager, alice=manager (保留)
+    transfer_resp = await client.post(
+        f"/api/teams/{team_id}/transfer",
+        headers=alice_headers,
+        json={"new_owner_id": bob.id, "confirm": True},
+    )
+    assert transfer_resp.status_code == 200
+
+    # bob 现在降级 alice (manager) → 应成功 (剩 bob 1 个 manager)
+    resp = await client.put(
+        f"/api/teams/{team_id}/members/{alice.id}",
+        headers=bob_headers,
+        json={"role": "editor"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "editor"
+
+
+@pytest.mark.asyncio
+async def test_t24_remove_last_non_owner_manager_blocked(
+    client: AsyncClient, alice: User, bob: User,
+    alice_headers: dict, bob_headers: dict,
+    team_factory,
+):
+    """T24: 转让所有权后, 移除原 owner (非 owner, manager) → 应被阻止 (留 0 个 manager)."""
+    team_factory.set_headers("alice", alice_headers)
+    team_factory.set_headers("bob", bob_headers)
+    team_id = await team_factory.make("alice", "TestTeam", members={"bob": "manager"})
+
+    # 转让给 bob: bob=owner+manager, alice=manager
+    transfer_resp = await client.post(
+        f"/api/teams/{team_id}/transfer",
+        headers=alice_headers,
+        json={"new_owner_id": bob.id, "confirm": True},
+    )
+    assert transfer_resp.status_code == 200
+
+    # bob 尝试移除 alice (非 owner, manager)
+    # 移除前 _count_managers = 2 (bob + alice), 移除 alice 后剩 1 (bob)
+    # 所以这次应成功 (还有 1 个 manager 剩)
+    resp = await client.delete(
+        f"/api/teams/{team_id}/members/{alice.id}",
+        headers=bob_headers,
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_t25_remove_only_manager_when_owner_protected(
+    client: AsyncClient, alice: User, bob: User,
+    alice_headers: dict, bob_headers: dict,
+    team_factory,
+):
+    """T25: 唯一 manager 是 owner, 移除 owner → 400 (owner 保护先触发).
+
+    团队只有 alice (owner+manager) + bob (editor).
+    移除 alice (owner) → 应被 owner 保护阻止.
+    """
+    team_factory.set_headers("alice", alice_headers)
+    team_factory.set_headers("bob", bob_headers)
+    team_id = await team_factory.make("alice", "TestTeam", members={"bob": "editor"})
+
+    # 尝试移除 owner alice → 400 owner 保护
+    resp = await client.delete(
+        f"/api/teams/{team_id}/members/{alice.id}",
+        headers=alice_headers,
+    )
+    assert resp.status_code == 400
+    assert "创建者" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_t26_remove_editor_always_allowed(
+    client: AsyncClient, alice: User, bob: User,
+    alice_headers: dict, bob_headers: dict,
+    team_factory,
+):
+    """T26: 移除非 manager 成员 (editor/viewer) 永远允许 (manager 计数保护不影响)."""
+    team_factory.set_headers("alice", alice_headers)
+    team_factory.set_headers("bob", bob_headers)
+    # alice (manager, owner) + bob (editor)
+    team_id = await team_factory.make("alice", "TestTeam", members={"bob": "editor"})
+
+    resp = await client.delete(
+        f"/api/teams/{team_id}/members/{bob.id}",
+        headers=alice_headers,
+    )
+    assert resp.status_code == 200

@@ -21,6 +21,7 @@ import TeamList from './components/TeamList.vue'
 import TeamDetailHeader from './components/TeamDetailHeader.vue'
 import TeamMemberTable from './components/TeamMemberTable.vue'
 import TeamDatasetList from './components/TeamDatasetList.vue'
+import TeamStatsCard from './components/TeamStatsCard.vue'
 
 import CreateTeamDialog from './components/dialogs/CreateTeamDialog.vue'
 import EditTeamDialog from './components/dialogs/EditTeamDialog.vue'
@@ -53,7 +54,10 @@ const datasetLoading = ref(false)
 const view = ref<'list' | 'detail'>('list')
 
 /** 详情视图活动 Tab */
-const activeTab = ref<'members' | 'datasets'>('members')
+const activeTab = ref<'members' | 'datasets' | 'stats'>('members')
+
+/** 统计 Tab 时间范围 */
+const statsDays = ref<number>(7)
 
 // ============== 弹窗可见性 ==============
 const showCreate = ref(false)
@@ -343,6 +347,20 @@ watch(view, (v) => {
             @unshare="onUnshareDataset"
           />
         </el-tab-pane>
+        <el-tab-pane label="数据统计" name="stats">
+          <div class="stats-toolbar">
+            <span class="toolbar-label">趋势区间:</span>
+            <el-radio-group v-model="statsDays" size="small">
+              <el-radio-button :value="7">近 7 天</el-radio-button>
+              <el-radio-button :value="14">近 14 天</el-radio-button>
+              <el-radio-button :value="30">近 30 天</el-radio-button>
+            </el-radio-group>
+          </div>
+          <TeamStatsCard
+            :team-id="selectedTeam.id"
+            :days="statsDays"
+          />
+        </el-tab-pane>
       </el-tabs>
     </template>
 
@@ -394,5 +412,15 @@ watch(view, (v) => {
 }
 .detail-tabs :deep(.el-tabs__nav-wrap::after) {
   height: 1px;
+}
+.stats-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.toolbar-label {
+  font-size: 13px;
+  color: var(--text-secondary, #606266);
 }
 </style>

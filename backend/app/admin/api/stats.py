@@ -7,12 +7,18 @@ Stats API: 标注 / 训练 / 系统综合统计
   - 置信度分布（直方图）
   - 每日标注量（折线图）
   - 训练曲线数据
+  - 团队统计 (v3.3.1 L2)
 
 v3.3.0 P0 修复: 仪表盘数据严格按 user 隔离
 - 之前: 全局聚合, 任何登录用户能看到全系统的统计
 - 现在: 非 admin 用户只能看到自己有权限访问的数据集相关数据
 - 单 dataset 端点: 校验访问权限后再查
 - 端点级说明: overview/annotator-efficiency 仅展示当前用户视角的数据
+
+v3.3.1 L2 新增: 团队级统计
+- /team/{team_id} 仅团队成员可访问
+- 聚合该团队下所有共享数据集的统计数据
+- 含: 数据集/图片概览、状态分布、贡献者排名、每日趋势、AI 节省时间
 """
 from datetime import datetime, timedelta
 from typing import Optional
@@ -27,6 +33,8 @@ from app.tasks.model.category import Category
 from app.tasks.model.annotation_log import AnnotationLog
 from app.tasks.model.model_version import ModelVersion
 from app.tasks.model.training_job import TrainingJob
+from app.tasks.model.team import Team
+from app.tasks.model.team_member import TeamMember
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.admin.service.stats_service import StatsService
@@ -380,4 +388,226 @@ async def annotator_efficiency(
                 "avg_seconds": round((total_ms / 1000.0) / max(annos, 1), 2),
             }
         ]
+    }
+
+
+# ============== v3.3.1 L2: 团队统计 ==============
+
+async def _assert_team_member_or_403(
+    db: AsyncSession, team_id: int, user_id: int
+) -> TeamMember:
+    """校验当前用户是团队成员 (数据隔离: 非成员不可访问, 包括 admin).
+
+    返回 TeamMember 对象.
+    """
+    result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(403, "无权限: 非团队成员")
+    return member
+
+
+@router.get("/team/{team_id}")
+async def team_stats(
+    team_id: int,
+    days: int = Query(default=7, ge=1, le=90, description="趋势天数 (1-90)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    团队级统计 (v3.3.1 L2)
+
+    聚合该团队下所有共享数据集的统计指标, 用于前端 ECharts 可视化:
+      - 团队基础信息 (id, name, member_count, dataset_count)
+      - 图片概览 (total, labeled, unqualified)
+      - 图片状态分布 (饼图, 排除不合格)
+      - 贡献者 Top 10 (柱状图)
+      - 每日标注趋势 (折线图)
+      - AI 节省时间估算
+
+    权限: 仅团队成员可访问 (含 owner, manager, editor, viewer)
+    """
+    # 1. 团队存在性 + 成员校验
+    team = await db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    await _assert_team_member_or_403(db, team_id, current_user.id)
+
+    # 2. 团队下的 dataset_id 列表 (该团队共享的所有数据集)
+    ds_rows = (await db.execute(
+        select(Dataset.id).where(Dataset.team_id == team_id)
+    )).all()
+    dataset_ids = [r[0] for r in ds_rows]
+    dataset_count = len(dataset_ids)
+
+    # 3. 成员数
+    member_count = (await db.execute(
+        select(func.count(TeamMember.id)).where(TeamMember.team_id == team_id)
+    )).scalar() or 0
+
+    # 4. 图片概览 (按数据集)
+    if dataset_ids:
+        img_total = (await db.execute(
+            select(func.count(Image.id)).where(Image.dataset_id.in_(dataset_ids))
+        )).scalar() or 0
+
+        # 已标数 (human_confirmed + human_corrected + trained)
+        labeled_total = (await db.execute(
+            select(func.count(Image.id)).where(
+                Image.dataset_id.in_(dataset_ids),
+                Image.status.in_(("human_confirmed", "human_corrected", "trained")),
+            )
+        )).scalar() or 0
+
+        # 不合格图片
+        unqualified_count = (await db.execute(
+            select(func.count(Image.id)).where(
+                Image.dataset_id.in_(dataset_ids),
+                Image.quality_flag == "unqualified",
+            )
+        )).scalar() or 0
+
+        # 状态分布 (饼图数据, 排除不合格)
+        status_rows = (await db.execute(
+            select(Image.status, func.count(Image.id))
+            .where(
+                Image.dataset_id.in_(dataset_ids),
+                Image.quality_flag.is_(None),
+            )
+            .group_by(Image.status)
+        )).all()
+        status_counts = {row[0]: row[1] for row in status_rows}
+    else:
+        img_total = 0
+        labeled_total = 0
+        unqualified_count = 0
+        status_counts = {}
+
+    # 5. 贡献者 Top 10 (按 annotation 数量倒序)
+    contributors_stmt = (
+        select(
+            AnnotationLog.user_id,
+            User.username,
+            func.count(AnnotationLog.id).label("annos"),
+            func.coalesce(func.sum(AnnotationLog.time_spent_ms), 0).label("total_ms"),
+        )
+        .join(User, User.id == AnnotationLog.user_id)
+        .where(AnnotationLog.team_id == team_id)
+        .group_by(AnnotationLog.user_id, User.username)
+        .order_by(func.count(AnnotationLog.id).desc())
+        .limit(10)
+    )
+    contributor_rows = (await db.execute(contributors_stmt)).all()
+    contributors = []
+    for r in contributor_rows:
+        total_ms = float(r[3] or 0)
+        annos = int(r[2] or 0)
+        contributors.append({
+            "user_id": int(r[0]),
+            "username": r[1],
+            "annotation_count": annos,
+            "total_seconds": round(total_ms / 1000.0, 2),
+            "avg_seconds_per_annotation": round(
+                (total_ms / 1000.0) / max(annos, 1), 2
+            ),
+        })
+
+    # 6. 每日趋势 (最近 N 天, 默认 7)
+    end = datetime.utcnow().date()
+    start = end - timedelta(days=days - 1)
+
+    if dataset_ids:
+        timeline_stmt = (
+            select(
+                func.date(AnnotationLog.created_at).label("day"),
+                func.count(AnnotationLog.id).label("count"),
+            )
+            .where(
+                AnnotationLog.team_id == team_id,
+                func.date(AnnotationLog.created_at) >= start,
+            )
+            .group_by("day")
+            .order_by("day")
+        )
+        timeline_rows = (await db.execute(timeline_stmt)).all()
+        timeline_data = {str(row[0]): row[1] for row in timeline_rows}
+    else:
+        timeline_data = {}
+
+    timeline = []
+    for i in range(days):
+        d = start + timedelta(days=i)
+        ds = d.isoformat()
+        timeline.append({"date": ds, "count": timeline_data.get(ds, 0)})
+
+    # 7. AI 节省时间估算 (聚合团队所有标注)
+    if dataset_ids:
+        time_stmt = (
+            select(
+                func.coalesce(func.sum(AnnotationLog.time_spent_ms), 0),
+                func.count(AnnotationLog.id),
+            )
+            .where(AnnotationLog.team_id == team_id)
+        )
+        total_ms_row = (await db.execute(time_stmt)).one()
+        total_ms = float(total_ms_row[0] or 0)
+        total_annos = int(total_ms_row[1] or 0)
+    else:
+        total_ms = 0.0
+        total_annos = 0
+
+    actual_seconds = total_ms / 1000.0
+    ai_labeled = status_counts.get("ai_labeled", 0)
+    confirmed = status_counts.get("human_confirmed", 0)
+    corrected = status_counts.get("human_corrected", 0)
+    total_processed = confirmed + corrected + ai_labeled
+    baseline_seconds = total_processed * HUMAN_BASELINE_SECONDS
+    saved_seconds = max(0.0, baseline_seconds - actual_seconds)
+    saved_ratio = saved_seconds / baseline_seconds if baseline_seconds > 0 else 0.0
+    avg_seconds = actual_seconds / max(total_annos, 1) if total_annos else 0.0
+
+    # 8. 类别分布 (该团队所有数据集的标签分布)
+    if dataset_ids:
+        cat_stmt = (
+            select(Category.name, func.count(Image.id))
+            .join(Image, Image.final_label_id == Category.id, isouter=True)
+            .where(Category.dataset_id.in_(dataset_ids))
+            .group_by(Category.name)
+        )
+        cat_rows = (await db.execute(cat_stmt)).all()
+        category_distribution = {row[0]: row[1] for row in cat_rows}
+    else:
+        category_distribution = {}
+
+    return {
+        "team_id": team_id,
+        "team_name": team.name,
+        "member_count": int(member_count),
+        "dataset_count": dataset_count,
+        "image_total": img_total,
+        "labeled_total": labeled_total,
+        "unqualified_count": unqualified_count,
+        "status_counts": status_counts,
+        "category_distribution": category_distribution,
+        "top_contributors": contributors,
+        "timeline": {
+            "days": days,
+            "data": timeline,
+        },
+        "ai_saved": {
+            "total_annotations": total_annos,
+            "actual_seconds": round(actual_seconds, 2),
+            "avg_seconds_per_image": round(avg_seconds, 2),
+            "ai_labeled_count": ai_labeled,
+            "human_confirmed_count": confirmed,
+            "human_corrected_count": corrected,
+            "estimated_saved_seconds": round(saved_seconds, 2),
+            "estimated_saved_ratio": round(saved_ratio, 4),
+            "baseline_seconds_per_image": HUMAN_BASELINE_SECONDS,
+        },
     }

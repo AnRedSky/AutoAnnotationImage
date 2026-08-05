@@ -529,7 +529,10 @@ async def update_member_role(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """修改成员角色 (仅 manager/owner)."""
+    """修改成员角色 (仅 manager/owner).
+
+    v3.3.1 L2: 最后一名 manager 保护 — 防止团队无 manager.
+    """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -556,6 +559,15 @@ async def update_member_role(
     if old_role == body.role:
         return {"team_id": team_id, "user_id": user_id, "role": member.role}
 
+    # v3.3.1 L2: 最后一名 manager 保护
+    if old_role == "manager" and body.role != "manager":
+        if await _count_managers(db, team_id) <= 1:
+            raise HTTPException(
+                400,
+                "不能降级最后一名「可管理」成员,"
+                "请先提升其他成员为「可管理」或转让团队所有权",
+            )
+
     member.role = body.role
 
     # v3.3.1: 审计
@@ -579,7 +591,10 @@ async def remove_member(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """移除成员 (仅 manager/owner; owner 不能被移除)."""
+    """移除成员 (仅 manager/owner; owner 不能被移除).
+
+    v3.3.1 L2: 最后一名 manager 保护 — 防止团队无 manager.
+    """
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -597,6 +612,15 @@ async def remove_member(
     member = result.scalar_one_or_none()
     if not member:
         raise HTTPException(404, "成员不存在")
+
+    # v3.3.1 L2: 最后一名 manager 保护
+    if member.role == "manager":
+        if await _count_managers(db, team_id) <= 1:
+            raise HTTPException(
+                400,
+                "不能移除最后一名「可管理」成员,"
+                "请先提升其他成员为「可管理」或转让团队所有权",
+            )
 
     await db.delete(member)
 

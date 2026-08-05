@@ -3,9 +3,11 @@
 **v3.0.0 Stage 2.5 迁移**: 从 app/api/user.py 迁入 admin 应用
 **v3.0.0 Phase D 修复**: 业务全部下沉到 UserService, API 只做参数解析和 HTTP 适配
 **v3.3.0 完善**: 新增创建用户 / 删除用户 + 个人中心 (改昵称/邮箱/密码)
+**v3.3.1 L2**: 新增 GET /search (供团队邀请下拉远程搜索, 任何已登录用户可用)
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.model.user import User
@@ -84,6 +86,54 @@ async def list_users(
                 "created_at": _iso_utc(u.created_at) if is_admin else None,
                 "last_login_at": _iso_utc(u.last_login_at) if is_admin else None,
             }
+            for u in users
+        ],
+        "total": len(users),
+    }
+
+
+# ============== 用户搜索 (v3.3.1 L2) ==============
+# 必须定义在 GET /{user_id} 之前, 避免被路由参数吞掉
+@router.get("/search")
+async def search_users(
+    q: str = Query(..., min_length=1, max_length=50, description="搜索关键词 (按 username 模糊匹配)"),
+    limit: int = Query(20, ge=1, le=50, description="最大返回数量"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """v3.3.1 L2: 用户搜索 (供团队邀请下拉, 任何已登录用户可用).
+
+    业务规则:
+    - 任何已登录用户可调用 (不再限制 admin)
+    - 排除当前用户自己
+    - 仅返回 id + username (不暴露 email/role/is_active 等敏感信息)
+    - 模糊匹配 username (大小写不敏感)
+    - 仅返回 is_active=True 的用户
+    - 按 username 升序, 限制最大 limit 条
+    """
+    keyword = q.strip()
+    if not keyword:
+        return {"items": [], "total": 0}
+
+    # SQLAlchemy 模糊匹配: ilike (PostgreSQL 大小写不敏感)
+    # MySQL 默认 utf8mb4_general_ci 也大小写不敏感
+    # SQLite: LIKE 默认大小写不敏感 (仅 ASCII 字符)
+    # 兼容处理: 用 LIKE + 两侧都加 % 让任意子串匹配
+    pattern = f"%{keyword}%"
+    result = await db.execute(
+        select(User)
+        .where(
+            User.is_active == True,  # noqa: E712
+            User.id != current_user.id,
+            User.username.like(pattern),
+        )
+        .order_by(User.username.asc())
+        .limit(limit)
+    )
+    users = result.scalars().all()
+    return {
+        "items": [
+            {"id": u.id, "username": u.username}
             for u in users
         ],
         "total": len(users),

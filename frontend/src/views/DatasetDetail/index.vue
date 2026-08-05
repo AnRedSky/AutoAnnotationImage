@@ -32,9 +32,10 @@
  * - view 编排 (模板 + 事件转发)
  */
 import { ElMessage } from 'element-plus'
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { annotationApi } from '@/api'
+import { ref, onMounted, onBeforeUnmount, nextTick, computed, watch } from 'vue'
+import { annotationApi, teamApi, type TeamItem } from '@/api'
 import { REJECT_REASON_OPTIONS } from '@/utils/rejectReason'
+import { useUserStore } from '@/stores/user'
 import { useDatasetDetail } from '@/composables/useDatasetDetail'
 import { useImageSelection } from '@/composables/useImageSelection'
 import { useImageBatchOps } from '@/composables/useImageBatchOps'
@@ -46,6 +47,7 @@ import { useImageView } from '@/composables/useImageView'
 import AnnotationViewer from './components/AnnotationViewer.vue'
 import UploadQueue from '../Datasets/components/UploadQueue.vue'
 import PreviewDialog from './components/PreviewDialog.vue'
+import ShareDatasetDialog from '../Admin/Teams/components/dialogs/ShareDatasetDialog.vue'
 
 // 本页私有组件
 import DatasetHero from './components/DatasetHero.vue'
@@ -55,6 +57,7 @@ import DatasetImageGrid from './components/DatasetImageGrid.vue'
 import DatasetImageList from './components/DatasetImageList.vue'
 
 // ============== 数据加载 / 状态 ==============
+const userStore = useUserStore()
 const {
   dataset, images, total, page, pageSize, pageSizes,
   statusFilter, keyword, loading, stats, categories, activeModel,
@@ -66,6 +69,37 @@ const {
   handleExport,
   formatBytes, confColor, statusType, statusLabel, hasAnnotation,
 } = useDatasetDetail({ autoLoad: true })
+
+/** v3.3.1 L2: 当前用户是否是 owner (控制分享按钮 + 弹窗) */
+const isDatasetOwner = computed(
+  () => !!dataset.value && dataset.value.owner_id === userStore.user?.id
+)
+
+/** v3.3.1 L2: 我的团队列表 (供分享弹窗) */
+const myTeams = ref<TeamItem[]>([])
+/** v3.3.1 L2: 已共享的团队 id 集合 (用于弹窗排除已共享项) */
+const sharedTeamIds = ref<Set<number>>(new Set())
+/** v3.3.1 L2: 分享弹窗可见性 */
+const shareDialogOpen = ref(false)
+
+/** 加载我的团队列表 + 该数据集的已共享状态 */
+const loadShareData = async () => {
+  if (!datasetIdRef.value) return
+  try {
+    const teamsRes: any = await teamApi.list()
+    myTeams.value = teamsRes.items || []
+  } catch {
+    // 非成员/未登录/无权限, 静默失败
+    myTeams.value = []
+  }
+  // 已共享: 通过 teamDatasetList 反查 (本数据集的 team_id)
+  // 注意: listDatasets 返回 owner 视角的所有数据集, 这里用 dataset.team_id 直接判断
+  if (dataset.value?.team_id) {
+    sharedTeamIds.value = new Set([dataset.value.team_id])
+  } else {
+    sharedTeamIds.value = new Set()
+  }
+}
 
 // ============== 图像选中 ==============
 const {
@@ -229,6 +263,7 @@ async function confirmBatchMarkUnqualified() {
 }
 
 // ============== 整页滚动隔离 ==============
+/** 整页滚动隔离 ============== */
 /**
  * v3.x 布局优化: 图片区需要独立滚动, 整页不能跟随滚动
  * - 父级 .app-main 默认 overflow: auto, 内容溢出时会整页滚动
@@ -238,11 +273,32 @@ async function confirmBatchMarkUnqualified() {
 onMounted(() => {
   const main = document.querySelector('.app-main') as HTMLElement | null
   if (main) main.classList.add('app-main--locked')
+  // v3.3.1 L2: 加载分享相关数据
+  loadShareData()
 })
 onBeforeUnmount(() => {
   const main = document.querySelector('.app-main') as HTMLElement | null
   if (main) main.classList.remove('app-main--locked')
 })
+
+/** v3.3.1 L2: 监听 dataset 变化, 重新加载共享状态 */
+watch(dataset, () => loadShareData())
+
+// ============== v3.3.1 L2: 分享数据集 ==============
+function openShareDialog() {
+  if (!isDatasetOwner.value) {
+    ElMessage.warning('只有数据集所有者可分享到团队')
+    return
+  }
+  if (!dataset.value) return
+  shareDialogOpen.value = true
+}
+
+/** 共享成功 → 刷新数据集 (更新 team_id 显示) */
+async function onSharedSuccess() {
+  await load()
+  await loadShareData()
+}
 </script>
 
 <template>
@@ -250,10 +306,12 @@ onBeforeUnmount(() => {
     <!-- 顶部 hero -->
     <DatasetHero
       :dataset="dataset"
+      :is-owner="isDatasetOwner"
       @back="goBack"
       @refresh="load"
       @upload="openUpload"
       @export="(fmt: 'coco' | 'yolo' | 'csv') => handleExport(fmt)"
+      @share="openShareDialog"
     />
 
     <!-- 5 张统计卡 (v3.0.0: 含不合格指标, 同一行 flex 等分) -->
@@ -439,6 +497,17 @@ onBeforeUnmount(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- v3.3.1 L2: 分享数据集到团队弹窗 -->
+    <ShareDatasetDialog
+      v-if="dataset"
+      v-model="shareDialogOpen"
+      :dataset-id="dataset.id"
+      :dataset-name="dataset.name"
+      :all-teams="myTeams"
+      :shared-team-ids="sharedTeamIds"
+      @shared="onSharedSuccess"
+    />
   </div>
 </template>
 

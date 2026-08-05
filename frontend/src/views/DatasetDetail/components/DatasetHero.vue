@@ -5,13 +5,19 @@
  * v3.0.0 Phase L 拆分: 从 DatasetDetail/index.vue 抽离
  *
  * 包含: 返回按钮 + 数据集名称 + 任务类型 tag + 描述
- * 右侧: 刷新 / 上传 / 导出 三个操作
+ * 右侧: 刷新 / 上传 / 分享到团队 / 导出 四个操作
+ *
+ * v3.3.1 L2: 新增「分享到团队」按钮 (仅 owner 可见)
+ *   - 通过 emit('share') 由父组件打开 ShareDatasetDialog
+ *   - 这样 hero 保持纯展示, 不耦合 teamApi
  */
-import { ArrowLeft, Refresh, UploadFilled, Download } from '@element-plus/icons-vue'
+import { ArrowLeft, Refresh, UploadFilled, Download, Share } from '@element-plus/icons-vue'
 import { getTaskTypeMeta } from '@/utils/taskType'
 
 const props = defineProps<{
   dataset: any
+  /** 当前用户是否是数据集 owner, 控制分享按钮是否显示 */
+  isOwner?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +25,7 @@ const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'upload'): void
   (e: 'export', format: 'coco' | 'yolo' | 'csv'): void
+  (e: 'share'): void
 }>()
 </script>
 
@@ -53,6 +60,13 @@ const emit = defineEmits<{
       </div>
       <div class="ds-hero__actions">
         <el-button :icon="Refresh" @click="emit('refresh')">刷新</el-button>
+        <el-button
+          v-if="props.isOwner"
+          :icon="Share"
+          @click="emit('share')"
+        >
+          分享到团队
+        </el-button>
         <el-button :icon="UploadFilled" type="success" @click="emit('upload')">
           上传图片
         </el-button>

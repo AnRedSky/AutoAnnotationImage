@@ -424,6 +424,46 @@ export const exportApi = {
 }
 
 // ============== 统计分析 ==============
+export interface TeamContributorItem {
+  user_id: number
+  username: string
+  annotation_count: number
+  total_seconds: number
+  avg_seconds_per_annotation: number
+}
+
+export interface TeamStatsTimelineData {
+  date: string
+  count: number
+}
+
+export interface TeamStatsAiSaved {
+  total_annotations: number
+  actual_seconds: number
+  avg_seconds_per_image: number
+  ai_labeled_count: number
+  human_confirmed_count: number
+  human_corrected_count: number
+  estimated_saved_seconds: number
+  estimated_saved_ratio: number
+  baseline_seconds_per_image: number
+}
+
+export interface TeamStats {
+  team_id: number
+  team_name: string
+  member_count: number
+  dataset_count: number
+  image_total: number
+  labeled_total: number
+  unqualified_count: number
+  status_counts: Record<string, number>
+  category_distribution: Record<string, number>
+  top_contributors: TeamContributorItem[]
+  timeline: { days: number; data: TeamStatsTimelineData[] }
+  ai_saved: TeamStatsAiSaved
+}
+
 export const statsApi = {
   overview: () => http.get('/stats/overview'),
   dataset: (datasetId: number) => http.get(`/stats/dataset/${datasetId}`),
@@ -431,7 +471,10 @@ export const statsApi = {
   timeline: (datasetId: number, days = 7) =>
     http.get(`/stats/timeline/${datasetId}`, { params: { days } }),
   annotatorEfficiency: (params?: { task_type?: string }) =>
-    http.get('/stats/annotator-efficiency', { params })
+    http.get('/stats/annotator-efficiency', { params }),
+  // v3.3.1 L2: 团队统计 (仅团队成员可访问)
+  team: (teamId: number, days = 7) =>
+    http.get<TeamStats>(`/stats/team/${teamId}`, { params: { days } }),
 }
 
 // ============== v2.0.0 S3+: 目标检测 ==============
