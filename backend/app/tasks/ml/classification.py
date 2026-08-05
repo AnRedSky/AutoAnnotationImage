@@ -66,6 +66,52 @@ def _create_base_model_cached(name: str, num_classes: int) -> "nn.Module":
     return timm.create_model(name, pretrained=True, num_classes=num_classes)
 
 
+# ============== v3.6.0 Phase 3: 训练样本 PIL 解码 LRU 缓存 ==============
+# DataLoader num_workers>0 + persistent_workers=True 时, 每个 worker 进程反复访问
+# 同一批图片 (shuffle 后命中相同 path 的概率很高). 每次 Image.open + convert("RGB")
+# 需要解析 PNG/JPG header + 解码像素, 单张 1920x1080 RGB 图约 20-50ms.
+# 用 functools.lru_cache 缓存 (path -> PIL.Image), 同 path 命中走 ~ms 级.
+#
+# 注意:
+# - 缓存 key = 绝对文件路径字符串 (相对路径在 chdir 后会失效)
+# - 这是函数级 lru_cache, **每个 DataLoader worker 进程独立一份**, 不会跨进程污染
+#   (multiprocessing spawn 复制, 不共享内存)
+# - 128 张 × 224x224×3×4B ≈ 75MB / worker, 4 workers ≈ 300MB, 安全范围内
+# - 大图场景 (单图 50MB+ 医学影像) 需把 cache_size 调小, 否则 OOM
+# - maxsize 从 settings.TRAIN_DECODE_CACHE_SIZE 读取, 修改 .env 后需重启 worker
+# - 训练过程中图片文件被覆盖 (如重新标注后同 path 写入新图) 时, 缓存会返回旧图.
+#   业务上: 训练启动时已锁住数据集版本, 训练期间文件不变, 可接受.
+
+_DECODE_CACHE_MAXSIZE = max(1, settings.TRAIN_DECODE_CACHE_SIZE)
+
+
+@functools.lru_cache(maxsize=_DECODE_CACHE_MAXSIZE)
+def _decode_image_cached(path: str) -> "Image.Image":
+    """v3.6.0 Phase 3: LRU 缓存的 PIL 解码 (PIL.Image.open + convert RGB)
+
+    与 _create_base_model_cached 一样, 是模块级 lru_cache 函数,
+    DataLoader worker 进程独立一份缓存. cache key = path 字符串,
+    相同 path 二次进入直接返回缓存的 PIL Image, 跳过磁盘 IO + 解码.
+
+    Args:
+        path: 绝对文件路径 (e.g. /tmp/cache/1/abc.png)
+
+    Returns:
+        PIL.Image.Image (RGB 模式)
+    """
+    return Image.open(path).convert("RGB")
+
+
+def decode_image_cache_info():
+    """诊断用: 返回当前进程 _decode_image_cached 缓存状态 (hits/misses/maxsize)."""
+    return _decode_image_cached.cache_info()
+
+
+def decode_image_cache_clear():
+    """诊断用: 清空 _decode_image_cached 缓存 (释放内存)."""
+    _decode_image_cached.cache_clear()
+
+
 class ImageClassificationDataset(Dataset):
     """已标注图片数据集"""
 
@@ -79,7 +125,8 @@ class ImageClassificationDataset(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.samples[idx]
-        img = Image.open(path).convert("RGB")
+        # v3.6.0 Phase 3: 走 LRU 缓存的 PIL 解码, 避免 DataLoader worker 重复解码同图
+        img = _decode_image_cached(path)
         if self.transform:
             img = self.transform(img)
         return img, label
@@ -234,16 +281,30 @@ def run_training(
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
+    # v3.6.0 P0: DataLoader 全面加速配置
+    # - pin_memory: 启用锁页内存 (CUDA 加速 host->device 传输, 仅 CUDA 有效)
+    # - persistent_workers: 多 epoch 训练时复用 worker 进程, 避免反复 fork 开销 (~10s/epoch)
+    # - prefetch_factor: 每个 worker 预取 2 个 batch, 保证 GPU 不等待
+    # - num_workers=0 (CPU 默认) 时以上选项自动失效, 保持兼容性
+    _use_cuda = torch.cuda.is_available()
+    _dl_kwargs: Dict[str, Any] = {
+        "num_workers": settings.DATALOADER_WORKERS,
+        "pin_memory": settings.DATALOADER_WORKERS > 0 and _use_cuda,
+    }
+    if settings.DATALOADER_WORKERS > 0:
+        # persistent_workers + prefetch_factor 仅在 num_workers>0 时生效
+        _dl_kwargs["persistent_workers"] = True
+        _dl_kwargs["prefetch_factor"] = 2
+
     train_loader = DataLoader(
         ImageClassificationDataset(train_samples, train_transform),
         batch_size=batch_size, shuffle=True,
-        # v3.1.0 Phase W4.1: num_workers 参数化, GPU 训练推荐 2-4, CPU 默认 0
-        num_workers=settings.DATALOADER_WORKERS,
+        **_dl_kwargs,
     )
     val_loader = DataLoader(
         ImageClassificationDataset(val_samples, val_transform),
         batch_size=batch_size, shuffle=False,
-        num_workers=settings.DATALOADER_WORKERS,
+        **_dl_kwargs,
     )
 
     # 构建模型
@@ -312,40 +373,67 @@ def run_training(
                 pg["lr"] = warmup_lr
 
         # Train
-        model.train()
-        t_loss, t_correct, t_total = 0, 0, 0
+        # v3.6.0 P0: tensor 累积, 消除每 batch 的 .item() CPU-GPU 同步
+        # 旧版 t_loss += loss.item() 每个 batch 强制 GPU->CPU 同步 (60-120ms/epoch)
+        # 新版: epoch 内累积到 GPU tensor, 末次 .item() 一次同步
+        # t_total: 训练集总样本数 (最后 batch 可能不满, 不影响 loss 平均)
+        t_loss_t = torch.zeros((), device=device)
+        t_correct_t = torch.zeros((), device=device)
         total_batches = max(len(train_loader), 1)
         for batch_idx, (imgs, labels) in enumerate(train_loader):
-            imgs, labels = imgs.to(device), labels.to(device)
-            optimizer.zero_grad()
+            # non_blocking=True 与 pin_memory 配合, host->device 异步传输
+            imgs = imgs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            # set_to_none=True 减少内存分配 (PyTorch 1.7+ 推荐)
+            optimizer.zero_grad(set_to_none=True)
             outputs = model(imgs)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            t_loss += loss.item()
+            # detach() 避免梯度累积到计算图
+            t_loss_t += loss.detach()
             _, pred = outputs.max(1)
-            t_total += labels.size(0)
-            t_correct += pred.eq(labels).sum().item()
+            t_correct_t += pred.eq(labels).sum()
 
-            # 每 100 batch 回调 (替代原 5 batch)
-            if progress_callback and batch_idx % 100 == 0:
+            # v3.6.0 P2: 进度回调按 batch 数动态调整粒度
+            # 小数据集 (6 batch) 每 batch 回调, 大数据集 (1000+ batch) 每 50 batch
+            # 旧版硬编码 100 batch, 240 样本训练 12 batch 一次都不回调 → 用户感觉"卡住"
+            _cb_interval = max(1, total_batches // 50) if total_batches > 0 else 1
+            if progress_callback and batch_idx % _cb_interval == 0:
                 p = (epoch * total_batches + batch_idx) / (epochs * total_batches) * 100
-                progress_callback(p, f"Epoch {epoch+1}/{epochs} batch {batch_idx}/{total_batches}")
+                progress_callback(
+                    p, f"Epoch {epoch+1}/{epochs} batch {batch_idx}/{total_batches}"
+                )
+
+        # epoch 末再同步一次, 拿到标量
+        t_loss = (t_loss_t / total_batches).item()
+        t_correct = int(t_correct_t.item())
+        t_total = len(train_samples)  # 训练集实际样本数 (避免最后 batch 偏小影响 acc)
 
         # Validation
+        # v3.6.0 P0: val 循环同样累积到 GPU tensor
         model.eval()
-        v_loss, v_correct, v_total = 0, 0, 0
-        all_preds, all_labels = [], []
+        v_loss_t = torch.zeros((), device=device)
+        v_correct_t = torch.zeros((), device=device)
+        all_preds_t = None
+        all_labels_t = None
         with torch.no_grad():
             for imgs, labels in val_loader:
-                imgs, labels = imgs.to(device), labels.to(device)
+                imgs = imgs.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
                 outputs = model(imgs)
-                v_loss += criterion(outputs, labels).item()
+                v_loss_t += criterion(outputs, labels)
                 _, pred = outputs.max(1)
-                v_total += labels.size(0)
-                v_correct += pred.eq(labels).sum().item()
-                all_preds.extend(pred.cpu().tolist())
-                all_labels.extend(labels.cpu().tolist())
+                v_correct_t += pred.eq(labels).sum()
+                # 累积 preds/labels (供混淆矩阵 / 详细报告用)
+                all_preds_t = pred if all_preds_t is None else torch.cat([all_preds_t, pred])
+                all_labels_t = labels if all_labels_t is None else torch.cat([all_labels_t, labels])
+
+        v_loss = (v_loss_t / max(len(val_loader), 1)).item()
+        v_total = all_labels_t.size(0) if all_labels_t is not None else 0
+        v_correct = int(v_correct_t.item())
+        all_preds = all_preds_t.cpu().tolist() if all_preds_t is not None else []
+        all_labels = all_labels_t.cpu().tolist() if all_labels_t is not None else []
 
         # 只有过了 warmup 期才让 scheduler 接管
         if epoch >= warmup_epochs:
