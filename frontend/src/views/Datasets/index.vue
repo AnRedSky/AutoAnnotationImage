@@ -6,7 +6,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Plus, View, Delete, Download, CollectionTag, Lightning, Folder
+  Plus, View, Delete, Download, CollectionTag, Lightning, Folder, Share, UserFilled
 } from '@element-plus/icons-vue'
 import { datasetApi, autoAnnotateApi, exportApi } from '@/api'
 // v2.5.8 架构优化: 业务组件全部迁入当前页面私有目录
@@ -88,13 +88,30 @@ const load = async () => {
   loading.value = true
   try {
     const res: any = await datasetApi.list()
-    data.value = res?.items || res || []
+    // v3.3.2: 响应可能是 { items, total, personal_count, team_shared_count } 或旧数组
+    if (res && Array.isArray(res.items)) {
+      data.value = res.items
+      personalTotal.value = res.personal_count || res.items.length
+      teamSharedTotal.value = res.team_shared_count || 0
+    } else {
+      data.value = res || []
+      personalTotal.value = data.value.length
+      teamSharedTotal.value = 0
+    }
   } catch (e: any) {
     ElMessage.error('加载失败: ' + (e?.response?.data?.detail || e?.message))
   } finally {
     loading.value = false
   }
 }
+
+/**
+ * v3.3.2 数据来源统计 (用于页面标题 + 来源列)
+ * - personalTotal: 个人所有 dataset 数量
+ * - teamSharedTotal: 团队共享 dataset 数量
+ */
+const personalTotal = ref(0)
+const teamSharedTotal = ref(0)
 
 const loadCategories = async (dsId: number) => {
   try {
@@ -239,6 +256,43 @@ const openCategory = (ds: any) => {
   catOpen.value = true
 }
 
+/**
+ * v3.3.2: 数据来源列渲染
+ * - personal: 蓝色「个人所有」标签
+ * - team_shared: 绿色「团队共享」标签 + tooltip 显示团队名
+ *
+ * 返回: { type, label, tooltip }
+ */
+const getSourceMeta = (row: any) => {
+  if (row?.source === 'team_shared') {
+    return {
+      type: 'success',
+      label: '团队共享',
+      tooltip: row.team_name
+        ? `共享自团队: ${row.team_name}${row.shared_by ? ` · 共享者: ${row.shared_by}` : ''}`
+        : '团队共享',
+    }
+  }
+  // 默认: 个人所有
+  return {
+    type: 'primary',
+    label: '个人所有',
+    tooltip: '我创建的数据集',
+  }
+}
+
+/** v3.3.2: 我的访问权限中文标签 */
+const getMyAccessLabel = (access?: string) => {
+  const m: Record<string, string> = {
+    owner: '所有者',
+    admin: '管理员',
+    manager: '可管理',
+    editor: '可编辑',
+    viewer: '可阅读',
+  }
+  return m[access || 'viewer'] || '可阅读'
+}
+
 const closeUpload = async () => {
   // 关闭前主动刷新一次, 确保 image_count 立即更新
   await load()
@@ -255,6 +309,17 @@ const closeUpload = async () => {
           <el-icon class="page-title__icon"><Folder /></el-icon>
           <span>数据集管理</span>
           <span class="page-title__count text-faint">· {{ data.length }} 个</span>
+          <!-- v3.3.2: 数据来源统计 (个人/团队共享) -->
+          <span class="page-title__source">
+            <el-tag size="small" type="primary" effect="plain" class="source-tag">
+              <el-icon><UserFilled /></el-icon>
+              个人 {{ personalTotal }}
+            </el-tag>
+            <el-tag size="small" type="success" effect="plain" class="source-tag">
+              <el-icon><Share /></el-icon>
+              团队共享 {{ teamSharedTotal }}
+            </el-tag>
+          </span>
         </h2>
         <p class="page-desc text-soft">
           创建、分类、训练图像数据集; 一键启动 AI 预标注, 大幅减少人工标注工作量
@@ -292,6 +357,33 @@ const closeUpload = async () => {
             <el-icon><Folder /></el-icon>
             {{ row.name }}
           </el-link>
+        </template>
+      </el-table-column>
+      <el-table-column label="数据来源" width="130">
+        <template #default="{ row }">
+          <el-tooltip :content="getSourceMeta(row).tooltip" placement="top">
+            <el-tag
+              size="small"
+              :type="getSourceMeta(row).type as any"
+              effect="plain"
+              class="source-cell"
+            >
+              <el-icon v-if="row?.source === 'team_shared'" style="margin-right: 3px; vertical-align: -1px;">
+                <Share />
+              </el-icon>
+              <el-icon v-else style="margin-right: 3px; vertical-align: -1px;">
+                <UserFilled />
+              </el-icon>
+              {{ getSourceMeta(row).label }}
+            </el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="我的权限" width="100">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.source === 'team_shared' ? 'warning' : 'info'" effect="plain">
+            {{ getMyAccessLabel(row.my_access) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="description" label="描述" show-overflow-tooltip min-width="200" />
@@ -541,6 +633,25 @@ const closeUpload = async () => {
   font-size: 14px;
   font-weight: 400;
   margin-left: 4px;
+}
+/* v3.3.2: 数据来源统计 (个人/团队共享) */
+.page-title__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+.source-tag {
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.source-cell {
+  display: inline-flex;
+  align-items: center;
+  cursor: default;
 }
 .page-desc {
   margin: 0;

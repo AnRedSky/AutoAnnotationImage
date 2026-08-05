@@ -23,6 +23,16 @@ TEAM_ROLES = ("manager", "editor", "viewer")
 # 可写角色: manager + editor (viewer 不可写)
 WRITE_ROLES = ("manager", "editor")
 
+# 可管理角色: 仅 manager (用于成员管理 / 数据集共享 / 团队编辑)
+MANAGE_ROLES = ("manager",)
+
+# 角色中文显示映射 (前端可复用)
+ROLE_LABELS = {
+    "manager": "可管理",
+    "editor": "可编辑",
+    "viewer": "可阅读",
+}
+
 
 class TeamMember(Base):
     """团队成员 (per-team 角色)."""

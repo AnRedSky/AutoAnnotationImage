@@ -59,8 +59,35 @@ export const authApi = {
 }
 
 // ============== 数据集 ==============
+export interface DatasetItem {
+  id: number
+  name: string
+  description?: string | null
+  task_type: string
+  image_count: number
+  annotated_count: number
+  category_count: number
+  status: string
+  owner_id: number
+  created_at: string | null
+  // v3.3.2: 数据来源与权限字段
+  source?: 'personal' | 'team_shared'
+  team_id?: number | null
+  team_name?: string | null
+  shared_by?: string | null
+  my_access?: 'owner' | 'manager' | 'editor' | 'viewer' | 'admin'
+}
+
 export const datasetApi = {
-  list: (params?: any) => http.get('/datasets', { params }),
+  /**
+   * v3.3.2: 列表返回个人所有 + 团队共享 dataset, 含 source/team_name 等字段
+   */
+  list: (params?: any) => http.get<{
+    items: DatasetItem[]
+    total: number
+    personal_count: number
+    team_shared_count: number
+  }>('/datasets', { params }),
   create: (data: {
     name: string
     description?: string
@@ -677,6 +704,19 @@ export interface TeamDatasetItem {
   owner_id: number
   owner_name: string
   my_access: string
+  my_access_label: string  // v3.3.2: 中文标签 (可管理/可编辑/可阅读)
+}
+
+// v3.3.2: 可共享给团队的数据集 (供团队管理页「共享数据集」按钮使用)
+export interface ShareableDatasetItem {
+  id: number
+  name: string
+  task_type: string
+  image_count: number
+  annotated_count: number
+  category_count: number
+  status: string
+  created_at: string | null
 }
 
 export const teamApi = {
@@ -725,6 +765,11 @@ export const teamApi = {
     http.post(`/teams/datasets/${datasetId}/share`, null, { params: { team_id: teamId } }),
   unshareDataset: (datasetId: number) =>
     http.delete(`/teams/datasets/${datasetId}/share`),
+  // v3.3.2: 团队级「可共享数据集」列表 (团队管理页「共享数据集」按钮)
+  listShareableDatasets: (id: number) =>
+    http.get<{ items: ShareableDatasetItem[]; total: number }>(
+      `/teams/${id}/shareable-datasets`
+    ),
   // v3.3.1 L4: 团队活动 Feed
   listActivities: (id: number, params?: { limit?: number; event_type?: string }) =>
     http.get<{

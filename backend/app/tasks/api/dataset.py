@@ -80,27 +80,143 @@ async def list_datasets(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # P0-1: 非 admin 只看自己的 dataset; admin 看全部
-    stmt = select(Dataset).order_by(Dataset.id.desc())
-    if not current_user.is_admin():
-        stmt = stmt.where(Dataset.owner_id == current_user.id)
-    result = await db.execute(stmt)
-    datasets = result.scalars().all()
+    """v3.3.2: 数据集列表 (个人所有 + 团队共享).
+
+    业务规则 (与用户新需求 §2「团队共享数据集可见性」对齐):
+      1. admin 看全部
+      2. 普通用户: 看自己创建的 + 团队共享的 (仅当是其成员且团队未归档)
+
+    返回字段新增 (v3.3.2):
+      - source:       "personal" | "team_shared"
+        (按 team_id 是否非空判断, 与 owner_id 解耦)
+      - team_id:      当 source=team_shared 时返回团队 id, 否则 null
+      - team_name:    当 source=team_shared 时返回团队名, 否则 null
+      - shared_by:    当 source=team_shared 时返回共享者用户名, 否则 null
+      - my_access:    在该数据集上的有效角色
+                      ("owner" | "manager" | "editor" | "viewer" | "admin")
+
+    排序: 个人所有优先 → 团队共享在后, 同源内按 id 倒序
+    """
+    from sqlalchemy import or_
+    from app.tasks.model.team_member import TeamMember as _TM
+    from app.tasks.model.team import Team as _Team
+
+    # ============== 1. 拿数据集 ==============
+    if current_user.is_admin():
+        # admin 看全部 dataset
+        all_stmt = select(Dataset).order_by(Dataset.id.desc())
+        result = await db.execute(all_stmt)
+        all_datasets = result.scalars().all()
+    else:
+        # 普通用户: 个人所有 + 团队共享
+        # 1) 找出我所在的、未归档的 team_id
+        member_team_ids_q = (
+            select(_TM.team_id)
+            .join(_Team, _Team.id == _TM.team_id)
+            .where(
+                _TM.user_id == current_user.id,
+                _Team.archived_at.is_(None),
+            )
+        )
+        # 2) 拿所有 (个人 + 团队共享) dataset
+        all_stmt = (
+            select(Dataset)
+            .where(
+                or_(
+                    Dataset.owner_id == current_user.id,
+                    Dataset.team_id.in_(member_team_ids_q),
+                )
+            )
+            .order_by(Dataset.id.desc())
+        )
+        result = await db.execute(all_stmt)
+        all_datasets = result.scalars().all()
+
+    # 按 source 分桶
+    personal_datasets = [d for d in all_datasets if d.team_id is None]
+    team_datasets = [d for d in all_datasets if d.team_id is not None]
+
+    # ============== 2. 准备团队名 + 共享者映射 ==============
+    team_ids = {d.team_id for d in team_datasets if d.team_id is not None}
+    team_name_map: dict[int, str] = {}
+    if team_ids:
+        team_name_result = await db.execute(
+            select(_Team.id, _Team.name).where(_Team.id.in_(team_ids))
+        )
+        for tid, tname in team_name_result.all():
+            team_name_map[tid] = tname
+
+    # 共享者用户名
+    shared_by_user_ids = {d.owner_id for d in team_datasets}
+    shared_by_map: dict[int, str] = {}
+    if shared_by_user_ids:
+        from app.admin.model.user import User as _User
+        user_result = await db.execute(
+            select(_User.id, _User.username).where(_User.id.in_(shared_by_user_ids))
+        )
+        for uid, uname in user_result.all():
+            shared_by_map[uid] = uname
+
+    # 当前用户在每个团队里的角色 (用于 my_access)
+    my_role_map: dict[int, str] = {}
+    if team_ids:
+        role_result = await db.execute(
+            select(_TM.team_id, _TM.role).where(
+                _TM.user_id == current_user.id,
+                _TM.team_id.in_(team_ids),
+            )
+        )
+        for tid, r in role_result.all():
+            my_role_map[tid] = r
+
+    # ============== 3. 组装响应 ==============
+    def _build(d: Dataset) -> dict:
+        is_owner = d.owner_id == current_user.id
+        if d.team_id is None:
+            # 个人数据集
+            source = "personal"
+            team_id = None
+            team_name = None
+            shared_by = None
+            my_access = "owner" if is_owner else ("admin" if current_user.is_admin() else "viewer")
+        else:
+            # 团队共享数据集
+            source = "team_shared"
+            team_id = d.team_id
+            team_name = team_name_map.get(d.team_id)
+            shared_by = shared_by_map.get(d.owner_id)
+            if is_owner:
+                my_access = "owner"
+            elif current_user.is_admin():
+                my_access = "admin"
+            else:
+                role = my_role_map.get(d.team_id)
+                my_access = role or "viewer"
+        return {
+            "id": d.id,
+            "name": d.name,
+            "description": d.description,
+            "task_type": d.task_type,
+            "image_count": d.image_count,
+            "annotated_count": d.annotated_count,
+            "category_count": d.category_count,
+            "status": d.status,
+            "owner_id": d.owner_id,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+            # v3.3.2 新增字段
+            "source": source,
+            "team_id": team_id,
+            "team_name": team_name,
+            "shared_by": shared_by,
+            "my_access": my_access,
+        }
+
+    items = [_build(d) for d in personal_datasets] + [_build(d) for d in team_datasets]
     return {
-        "items": [
-            {
-                "id": d.id,
-                "name": d.name,
-                "description": d.description,
-                "task_type": d.task_type,
-                "image_count": d.image_count,
-                "annotated_count": d.annotated_count,
-                "category_count": d.category_count,
-                "status": d.status,
-                "created_at": d.created_at.isoformat(),
-            }
-            for d in datasets
-        ]
+        "items": items,
+        "total": len(items),
+        "personal_count": len(personal_datasets),
+        "team_shared_count": len(team_datasets),
     }
 
 

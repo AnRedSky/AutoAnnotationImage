@@ -1,18 +1,19 @@
 <script setup lang="ts">
 /**
- * 团队级数据集列表 (v3.3.1)
- * ==========================
+ * 团队级数据集列表 (v3.3.1 + v3.3.2)
+ * =================================
  *
  * Props:
  *  - datasets: TeamDatasetItem[]
  *  - loading:  boolean
- *  - canManage: boolean   是否能取消共享 (manager 角色以上)
+ *  - canManage: boolean   是否能取消共享 + 共享新数据集 (manager 角色以上)
  *
  * Emits:
- *  - view-dataset  点击跳转到 DatasetDetail
- *  - unshare       取消共享 (参数: dataset)
+ *  - view-dataset   点击跳转到 DatasetDetail
+ *  - unshare        取消共享 (参数: dataset)
+ *  - share-dataset  v3.3.2: 打开「共享数据集」弹窗 (manager 限定)
  */
-import { DataLine } from '@element-plus/icons-vue'
+import { DataLine, Share } from '@element-plus/icons-vue'
 import type { TeamDatasetItem } from '@/api'
 import { useRouter } from 'vue-router'
 
@@ -25,6 +26,7 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'view-dataset', dataset: TeamDatasetItem): void
   (e: 'unshare', dataset: TeamDatasetItem): void
+  (e: 'share-dataset'): void  // v3.3.2
 }>()
 
 const router = useRouter()
@@ -66,6 +68,16 @@ const taskTypeLabel = (t: string) => {
   }
   return m[t] || t
 }
+
+/** v3.3.2: 角色枚举 → 中文标签 (兜底映射, 优先用后端 my_access_label) */
+const myAccessLabel = (role: string) => {
+  const m: Record<string, string> = {
+    manager: '可管理',
+    editor: '可编辑',
+    viewer: '可阅读',
+  }
+  return m[role] || role
+}
 </script>
 
 <template>
@@ -75,6 +87,16 @@ const taskTypeLabel = (t: string) => {
         <el-icon><DataLine /></el-icon>
         <span>共享数据集 ({{ datasets.length }})</span>
       </span>
+      <!-- v3.3.2: 团队管理页「共享数据集」按钮 (仅 manager) -->
+      <el-button
+        v-if="canManage"
+        type="primary"
+        size="small"
+        :icon="Share"
+        @click="emit('share-dataset')"
+      >
+        共享数据集
+      </el-button>
     </div>
 
     <el-table
@@ -117,7 +139,14 @@ const taskTypeLabel = (t: string) => {
       </el-table-column>
       <el-table-column label="我的权限" width="100">
         <template #default="{ row }">
-          <el-tag size="small">{{ row.my_access }}</el-tag>
+          <!-- v3.3.2: 优先使用后端 my_access_label, 兜底前端映射 -->
+          <el-tag
+            size="small"
+            :type="row.my_access === 'manager' ? 'danger' : (row.my_access === 'editor' ? 'warning' : 'info')"
+            effect="plain"
+          >
+            {{ row.my_access_label || myAccessLabel(row.my_access) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="200" fixed="right">
@@ -142,6 +171,12 @@ const taskTypeLabel = (t: string) => {
 
 <style scoped>
 @import '@/styles/admin.css';
+.card-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
 .title-with-icon {
   display: flex;
   align-items: center;

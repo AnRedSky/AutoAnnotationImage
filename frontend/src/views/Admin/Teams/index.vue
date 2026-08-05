@@ -30,6 +30,7 @@ import EditTeamDialog from './components/dialogs/EditTeamDialog.vue'
 import InviteMemberDialog from './components/dialogs/InviteMemberDialog.vue'
 import EditRoleDialog from './components/dialogs/EditRoleDialog.vue'
 import TransferOwnerDialog from './components/dialogs/TransferOwnerDialog.vue'
+import ShareDatasetToTeamDialog from './components/dialogs/ShareDatasetToTeamDialog.vue'  // v3.3.2
 
 const userStore = useUserStore()
 
@@ -86,6 +87,8 @@ const showEdit = ref(false)
 const showInvite = ref(false)
 const showEditRole = ref(false)
 const showTransfer = ref(false)
+// v3.3.2: 团队管理页「共享数据集」弹窗
+const showShareDataset = ref(false)
 
 /** 邀请弹窗上下文 */
 const inviteContext = ref<{ teamId: number; members: TeamMemberItem[] } | null>(null)
@@ -344,6 +347,16 @@ const onUnshareDataset = async (d: TeamDatasetItem) => {
   }
 }
 
+/** v3.3.2: 团队管理页「共享数据集」按钮 - 打开弹窗 */
+const onShareDatasetClick = () => {
+  showShareDataset.value = true
+}
+
+/** v3.3.2: 共享成功回调 - 刷新团队数据集列表 */
+const onDatasetShared = async () => {
+  await loadTeamDatasets()
+}
+
 // ============== 生命周期 ==============
 
 onMounted(async () => {
@@ -413,6 +426,7 @@ watch(view, (v) => {
             :can-manage="isManager"
             @view-dataset="onViewDataset"
             @unshare="onUnshareDataset"
+            @share-dataset="onShareDatasetClick"
           />
         </el-tab-pane>
         <el-tab-pane label="数据统计" name="stats">
@@ -474,6 +488,15 @@ watch(view, (v) => {
       :team-name="selectedTeam.name"
       :members="teamMembers"
       @transferred="onTransferred"
+    />
+
+    <!-- ============ 共享数据集到团队弹窗 (v3.3.2) ============ -->
+    <ShareDatasetToTeamDialog
+      v-if="selectedTeam"
+      v-model="showShareDataset"
+      :team-id="selectedTeam.id"
+      :team-name="selectedTeam.name"
+      @shared="onDatasetShared"
     />
   </div>
 </template>

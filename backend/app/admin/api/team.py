@@ -948,10 +948,13 @@ async def list_team_datasets(
     """v3.3.1: 列出共享给本团队的数据集 (任意成员可见).
 
     返回字段: id, name, description, task_type, image_count, annotated_count,
-    category_count, status, owner_id, owner_name, my_access.
+    category_count, status, owner_id, owner_name, my_access, my_access_label.
 
     v3.3.1 L3: 已归档团队不可查看数据集列表.
+    v3.3.2 增强: my_access 增加中文标签 my_access_label (用于前端展示).
     """
+    from app.tasks.model.team_member import ROLE_LABELS
+
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
@@ -983,9 +986,78 @@ async def list_team_datasets(
                 "owner_name": owner_name,
                 # my_access: 当前成员在团队中的角色
                 "my_access": member.role,
+                # v3.3.2: 中文标签 (前端直接展示)
+                "my_access_label": ROLE_LABELS.get(member.role, member.role),
             }
             for d, owner_name in rows
         ]
+    }
+
+
+# ============== v3.3.2: 团队级「可共享数据集」端点 ==============
+
+@router.get("/{team_id}/shareable-datasets")
+async def list_shareable_datasets(
+    team_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """v3.3.2: 列出「可共享给本团队」的数据集 (用户新需求 §1).
+
+    用途: 团队管理页「共享数据集」按钮, 弹出选择器.
+    业务规则:
+      1. 当前用户必须是本团队成员 (数据隔离)
+      2. 当前用户在团队中必须是 manager 角色
+         (与「共享权限控制」一致, 普通成员无共享权)
+      3. 团队未归档
+      4. 返回当前用户拥有且未共享给本团队的 dataset
+         - 排除: 已共享给本团队 (避免重复共享)
+         - 排除: 已共享给其他团队 (避免 1 个 dataset 同时挂 2 个 team_id,
+           当前数据模型 Dataset.team_id 是单值, 不能复用)
+      5. 排除状态为 processing 的 (避免在上传/AI 预标注中共享)
+
+    返回字段: id, name, task_type, image_count, annotated_count,
+    category_count, status, created_at.
+    """
+    team = await db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    member = await _get_member_or_403(db, team_id, current_user.id)
+    _assert_team_active(team)
+
+    # 仅 manager 可发起共享 (与 share_dataset_to_team 一致)
+    if member.role != "manager" and team.owner_id != current_user.id:
+        raise HTTPException(403, "无权限: 需要「可管理」角色才能共享数据集")
+
+    # 当前用户拥有的、未共享给本团队、未共享给其他团队 (team_id IS NULL)
+    result = await db.execute(
+        select(Dataset)
+        .where(
+            Dataset.owner_id == current_user.id,
+            # 团队共享字段为空, 即尚未分享给任何团队
+            Dataset.team_id.is_(None),
+            # 排除上传/处理中状态
+            Dataset.status.in_(("draft", "done")),
+        )
+        .order_by(Dataset.id.desc())
+    )
+    datasets = result.scalars().all()
+
+    return {
+        "items": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "task_type": d.task_type,
+                "image_count": d.image_count,
+                "annotated_count": d.annotated_count,
+                "category_count": d.category_count,
+                "status": d.status,
+                "created_at": d.created_at.isoformat() if d.created_at else None,
+            }
+            for d in datasets
+        ],
+        "total": len(datasets),
     }
 
 
@@ -998,21 +1070,52 @@ async def share_dataset_to_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """把数据集共享给团队 (仅数据集 owner)."""
+    """把数据集共享给团队 (v3.3.2 权限升级).
+
+    权限校验 (统一在 permission_service.assert_can_share_to_team 中):
+      1. admin 绕过
+      2. 仅数据集 owner 可发起共享
+      3. 当前用户必须是目标团队成员
+      4. 目标团队内必须是 manager
+      5. 团队未归档
+    """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限共享此数据集")
 
     team = await db.get(Team, team_id)
     if not team:
         raise HTTPException(404, "Team not found")
 
-    # v3.3.1: 共享前必须要求当前用户是团队成员 (避免给非自己团队共享)
-    await _get_member_or_403(db, team_id, current_user.id)
+    # v3.3.2: 升级为统一权限检查 (含 manager 校验)
+    from app.tasks.service.permission_service import assert_can_share_to_team
+    await assert_can_share_to_team(db, current_user, dataset, team_id)
 
-    old_team_id = dataset.team_id
+    # 团队未归档 (admin 也会被该校验拦下, 避免误操作)
+    _assert_team_active(team)
+
+    # 二次保护: 若 dataset 已共享给别的团队, 先清空 (因为 team_id 是单值)
+    if dataset.team_id and dataset.team_id != team_id:
+        # 写入旧团队的「取消共享」审计
+        old_team_id = dataset.team_id
+        await log_audit(
+            db,
+            user_id=current_user.id,
+            event_type="dataset_unshared_from_team",
+            team_id=old_team_id,
+            resource_type="dataset",
+            resource_id=dataset_id,
+            detail={
+                "dataset_id": dataset_id,
+                "dataset_name": dataset.name,
+                "team_id": old_team_id,
+                "auto_replaced": True,  # 标记自动解除 (被新共享覆盖)
+            },
+        )
+        old_team_id_for_log = old_team_id
+    else:
+        old_team_id_for_log = None
+
     dataset.team_id = team_id
 
     await log_audit(
@@ -1026,7 +1129,7 @@ async def share_dataset_to_team(
             "dataset_id": dataset_id,
             "dataset_name": dataset.name,
             "team_id": team_id,
-            "old_team_id": old_team_id,
+            "old_team_id": old_team_id_for_log,
         },
     )
     await db.commit()
@@ -1039,12 +1142,20 @@ async def unshare_dataset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """取消数据集共享 (仅数据集 owner)."""
+    """取消数据集共享 (v3.3.2 权限明确: 仅原始共享者).
+
+    业务规则 (与用户新需求 §4「共享权限控制」一致):
+      - 仅数据集的原始共享者 (owner) 可取消共享
+      - admin 可绕过 (运维场景)
+      - 与团队角色无关 (即使 manager 也不能替 owner 取消)
+    """
     dataset = await db.get(Dataset, dataset_id)
     if not dataset:
         raise HTTPException(404, "Dataset not found")
-    if dataset.owner_id != current_user.id:
-        raise HTTPException(403, "无权限取消共享")
+
+    # v3.3.2: 严格校验 — 仅 owner / admin 可取消
+    if not current_user.is_admin() and dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限取消共享: 仅数据集原始共享者可操作")
 
     old_team_id = dataset.team_id
     dataset.team_id = None

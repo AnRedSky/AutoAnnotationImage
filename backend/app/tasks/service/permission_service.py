@@ -9,6 +9,12 @@ async 版 can_access_dataset — 检查 owner / team_member.
   - manager (可管理): 可标注 + 可管理成员/数据集
   - editor (可编辑): 可标注
   - viewer (仅阅读): 只读
+
+v3.3.2 增强 (协作增强):
+  - 新增 assert_can_share_to_team: 校验「将数据集共享到团队」的权限
+    业务规则: 仅数据集 owner 可发起共享 (owner 同时必须是目标团队的成员,
+    避免给非自己团队共享; 团队内仅 manager 角色可对非自己创建的数据集执行权限管理)
+  - 提供 can_manage_team / can_edit_team 谓词函数, 供列表/详情组装 my_access
 """
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -16,8 +22,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.model.user import User
 from app.tasks.model.dataset import Dataset
-from app.tasks.model.team_member import TeamMember, WRITE_ROLES
+from app.tasks.model.team_member import TeamMember, WRITE_ROLES, MANAGE_ROLES
 
+
+# ============== 谓词 (无副作用, 用于组装 my_access 字段) ==============
+
+def can_manage_team(user: User, team_id: int | None, member_role: str | None) -> bool:
+    """当前用户在该团队是否具有「可管理」权限.
+
+    Args:
+        user: 当前用户
+        team_id: 团队 id (None 表示非团队成员)
+        member_role: 成员角色 (manager / editor / viewer / None)
+
+    Returns:
+        True if team_id 非空 AND 角色为 manager.
+    """
+    if team_id is None or member_role is None:
+        return False
+    return member_role in MANAGE_ROLES
+
+
+def can_edit_team(member_role: str | None) -> bool:
+    """当前成员是否可编辑 (manager + editor)."""
+    return member_role is not None and member_role in WRITE_ROLES
+
+
+# ============== 写操作前的硬校验 (失败抛 HTTPException) ==============
 
 async def assert_can_access_dataset(
     db: AsyncSession,
@@ -51,3 +82,56 @@ async def assert_can_access_dataset(
                 raise HTTPException(403, "只读权限, 不可修改")
             return
     raise HTTPException(403, "无权限访问此数据集")
+
+
+async def assert_can_share_to_team(
+    db: AsyncSession,
+    current_user: User,
+    dataset: Dataset,
+    target_team_id: int,
+) -> None:
+    """v3.3.2: 校验「将数据集共享到团队」的权限.
+
+    业务规则 (与用户新需求 §4「共享权限控制」对齐):
+      1. admin 可绕过 (运维场景, 仅用于强制重置)
+      2. 仅数据集的原始共享者 (owner) 可发起共享 — 与 L1 阶段一致
+      3. 当前用户必须是目标团队成员 (防止给非自己团队共享)
+      4. 目标团队内, 当前用户角色必须是「可管理」(manager)
+         - 与「团队管理角色权限体系完善」中共享权限保持一致
+      5. 目标团队未归档 (已归档不可共享新数据集)
+    """
+    # 1. admin 绕过
+    if current_user.is_admin():
+        return
+
+    # 2. 仅 owner 可共享
+    if dataset.owner_id != current_user.id:
+        raise HTTPException(403, "无权限共享此数据集: 仅数据集所有者可发起共享")
+
+    # 3. 必须是目标团队成员
+    result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == target_team_id,
+            TeamMember.user_id == current_user.id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(403, "您不是目标团队的成员, 无法共享数据集")
+
+    # 4. 目标团队内必须是 manager
+    if member.role not in MANAGE_ROLES:
+        raise HTTPException(
+            403,
+            "共享数据集需要「可管理」角色,"
+            f"您当前角色是「{_role_label(member.role)}」",
+        )
+
+
+def _role_label(role: str) -> str:
+    """角色枚举 → 中文标签 (内嵌避免循环 import)."""
+    return {
+        "manager": "可管理",
+        "editor": "可编辑",
+        "viewer": "可阅读",
+    }.get(role, role)
