@@ -214,6 +214,14 @@ class Settings(BaseSettings):
     # v3.1.0 Phase W4.1: 分类训练 DataLoader 工作进程数
     # 0=同步加载 (CPU 训练默认), >0=多进程并行加载 (GPU 训练推荐 2-4)
     DATALOADER_WORKERS: int = int(os.getenv("DATALOADER_WORKERS", "0"))
+    # v3.6.0: MinIO 训练样本预下载并发数 (信号量限流, 避免打爆 MinIO)
+    # 1=走旧版串行下载 (兼容); 2-10=并发 (GPU 训练推荐 10);
+    # >20 可能触发 MinIO 限流, 生产建议保持 <=16
+    MINIO_DOWNLOAD_CONCURRENCY: int = int(os.getenv("MINIO_DOWNLOAD_CONCURRENCY", "10"))
+    # v3.6.0: 训练样本预解码 LRU 缓存大小 (worker 进程级, 总内存 = workers × size × per_image)
+    # 仅对 PIL 解码生效 (DataLoader worker 进程内 lru_cache, 不会跨进程污染).
+    # 128 张 × 224x224×3×4B ≈ 75MB / worker, 4 workers ≈ 300MB, 安全范围内.
+    TRAIN_DECODE_CACHE_SIZE: int = int(os.getenv("TRAIN_DECODE_CACHE_SIZE", "128"))
     # v3.1.0 Phase W4.3: 分割推理 batch size (逐张推理改为分批)
     SEG_INFERENCE_BATCH_SIZE: int = int(os.getenv("SEG_INFERENCE_BATCH_SIZE", "4"))
 
@@ -429,6 +437,7 @@ _ENV_SYNC_KEYS = [
     "CELERY_WORKER_POOL", "CELERY_WORKER_CONCURRENCY",
     "SECRET_KEY",
     "JWT_ISSUER", "JWT_AUDIENCE", "JWT_ALGORITHM", "JWT_LEEWAY_SECONDS",
+    "MINIO_DOWNLOAD_CONCURRENCY", "TRAIN_DECODE_CACHE_SIZE", "DATALOADER_WORKERS",
 ]
 for _k in _ENV_SYNC_KEYS:
     _v = getattr(settings, _k, None)
