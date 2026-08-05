@@ -291,8 +291,26 @@ class AutoAnnotateService:
     # ============== 状态查询 ==============
 
     @staticmethod
-    def get_async_status(task_id: str) -> Dict[str, Any]:
-        """查询异步任务状态 (供 SSE / 轮询用)"""
+    async def get_async_status(
+        task_id: str,
+        current_user=None,
+        db: Optional[AsyncSession] = None,
+    ) -> Dict[str, Any]:
+        """查询异步任务状态 (供 SSE / 轮询用)
+
+        v3.3.6-STATS-ISOLATION 修复 (P0-越权):
+          - 之前: 任何登录用户可查询任意 task_id 的进度 (含他人数据集)
+          - 现在: 校验 task meta 里的 user_id/dataset_id, 防止跨用户枚举
+          - 严格最小权限: super_admin 也不旁路, 必须满足 owner / team_member
+
+        Args:
+            task_id: Celery 任务 id
+            current_user: 当前登录用户 (供权限校验)
+            db: AsyncSession (供 dataset 访问权校验)
+
+        Returns:
+            状态字典 {task_id, state, progress, message, total, auto_labeled}
+        """
         from celery.result import AsyncResult
         state = "PENDING"
         info: Dict[str, Any] = {}
@@ -311,6 +329,38 @@ class AutoAnnotateService:
         except Exception:
             state = "PENDING"
             info = {}
+
+        # v3.3.6-STATS-ISOLATION: 权限校验
+        # 1) 任何登录用户必须满足: 自己创建的 task, 或有权访问关联 dataset
+        # 2) 老的 task (没有 user_id meta) → 拒绝 (保守策略, 防止历史 task 越权)
+        if current_user is not None and db is not None:
+            task_user_id = info.get("user_id")
+            task_dataset_id = info.get("dataset_id")
+            # 老 task (无 user_id meta) → 拒绝访问, 提示重启任务
+            if task_user_id is None:
+                from fastapi import HTTPException
+                raise HTTPException(
+                    403,
+                    "无权限访问此任务 (task meta 缺少 owner 标识, 旧版任务不可查询, 请重新启动)"
+                )
+            # 校验: 创建者本人 OR 关联 dataset 有权访问
+            if int(task_user_id) == current_user.id:
+                pass  # owner
+            elif task_dataset_id is not None:
+                # 走 dataset 权限校验 (含 team 共享)
+                from app.tasks.model.dataset import Dataset as _Ds
+                from app.tasks.service.permission_service import (
+                    assert_can_access_dataset as _assert_ds,
+                )
+                ds = await db.get(_Ds, int(task_dataset_id))
+                if ds is None:
+                    from fastapi import HTTPException
+                    raise HTTPException(404, "无权限: 关联数据集不存在")
+                await _assert_ds(db, current_user, ds)
+            else:
+                from fastapi import HTTPException
+                raise HTTPException(403, "无权限: 非任务创建者, 且无关联 dataset")
+
         return {
             "task_id": task_id,
             "state": state,

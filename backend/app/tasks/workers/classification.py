@@ -355,8 +355,11 @@ def auto_annotate_task(self, dataset_id: int, model_name: str,
     from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
 
     task_id = self.request.id
+    # v3.3.6-STATS-ISOLATION: 把 user_id 和 dataset_id 写入 meta,
+    # 供 /api/auto-annotate/status/{task_id} 端点做权限校验
     TrainingLifecycleService.set_task_state(self, "PROGRESS", {
-        "progress": 0, "msg": "Loading model..."
+        "progress": 0, "msg": "Loading model...",
+        "user_id": user_id, "dataset_id": dataset_id,
     })
 
     try:
