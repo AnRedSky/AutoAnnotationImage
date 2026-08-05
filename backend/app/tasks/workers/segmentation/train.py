@@ -62,12 +62,25 @@ def train_segmentation_task(
     device: str = "cpu",
 ):
     """启动分割训练 (DeepLabV3+, Phase 5: 编排下沉到 TrainingLifecycleService)"""
-    from app.tasks.ml.segmentation.seg_dataset import collect_segmentation_pairs
+    from app.tasks.ml.segmentation.seg_dataset import collect_segmentation_dataset_meta
     from app.tasks.ml.segmentation.seg_train import train_segmentation
+    from app.tasks.ml.classification import TrainingPaused
     from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
+    # v3.5.0: 统一控制信号 (pause/cancel 区分)
+    from app.tasks.workers.control_signals import (
+        SignalAction,
+        TaskCanceled,
+        clear_all as clear_control_signals,
+        make_pause_check,
+    )
 
     task_id = self.request.id
     started_at = datetime.utcnow()
+
+    # v3.5.0: 启动时清掉历史 pause/cancel 残留
+    clear_control_signals(task_id)
+    # v3.5.0: 工厂方法生成 pause_check 回调
+    _pause_check_factory = make_pause_check(task_id)
 
     # ---- 1) 创建/复用 TrainingJob (委托 Service) ----
     job_id = TrainingLifecycleService.create_or_reset_job_sync(
@@ -83,12 +96,17 @@ def train_segmentation_task(
         started_at=started_at,
     )
 
-    # ---- 2) 加载 (image, mask) pairs ----
-    async def _load_pairs():
+    # ---- 2) 加载 (image, mask) pairs + 类目 (v3.5.0 Phase T7 #7: 一次 session 查) ----
+    # 原实现: _load_pairs() (查 imgs + masks) + _load_categories() (单独 session 查 Category)
+    # = 2 次 AsyncSession 创建 + 2 次 SQL round-trip (~5-30ms/次)
+    # 修复: collect_segmentation_dataset_meta 共享同一 session, 共用 (dataset_id) 索引
+    async def _load_pairs_and_categories():
         from app.database import AsyncSessionLocal
         async with AsyncSessionLocal() as db:
-            return await collect_segmentation_pairs(db, dataset_id)
-    images, masks = _run_async(_load_pairs())
+            return await collect_segmentation_dataset_meta(db, dataset_id)
+    # v3.5.0 Phase T7 #7: 同时返回 imgs / masks / category_names
+    # 原 _load_categories() 单独 session 已合并到这里 (共享同一 db session)
+    images, masks, category_names = _run_async(_load_pairs_and_categories())
     if not images:
         _finish_failed(self, job_id, "数据集无 image+mask 配对, 请先上传 mask", started_at, task_id)
         return {"status": "FAILURE", "reason": "empty_dataset"}
@@ -103,17 +121,8 @@ def train_segmentation_task(
         pass
 
     # ---- 3) 加载类目 (用于 sticky_meta) ----
-    async def _load_categories():
-        from sqlalchemy import select
-        from app.database import AsyncSessionLocal
-        from app.tasks.model.category import Category
-        async with AsyncSessionLocal() as db:
-            rows = (await db.execute(
-                select(Category).where(Category.dataset_id == dataset_id)
-            )).scalars().all()
-            return [c.name for c in rows]
-    category_names = _run_async(_load_categories())
-
+    # v3.5.0 Phase T7 #7: 已在 _load_pairs_and_categories 一次性加载, 不再单独 session 查
+    # 原 _load_categories() 闭包已删除 (消除冗余 AsyncSession + 1 次 SQL round-trip)
     n_total = len(masks)
     n_train = int(n_total * 0.8)
     n_val = n_total - n_train
@@ -122,7 +131,7 @@ def train_segmentation_task(
         "data_train": n_train,
         "data_val": n_val,
         "num_classes": None,
-        "class_names": sorted(category_names),
+        "class_names": category_names,  # v3.5.0 Phase T7 #7: 直接复用, 不再 sorted()
     }
     # v3.0.0: 合并设备信息字段 (供 mark_success/mark_failure 持久化到 TrainingJob)
     if _device_info_dict:
@@ -138,6 +147,7 @@ def train_segmentation_task(
 
     def _train_cb(stage, current, total, info, metrics=None):
         progress_pct = (current / total * 100.0) if total else 0.0
+        epoch_msg = f"{stage} {current}/{total} {info}".strip()
         meta = {
             "stage": stage,
             "progress": round(progress_pct, 2),
@@ -145,7 +155,7 @@ def train_segmentation_task(
             "total": total,
             "current_epoch": current,
             "total_epochs": total,
-            "msg": f"{stage} {current}/{total} {info}".strip(),
+            "msg": epoch_msg,
             "info": info,
         }
         if metrics and isinstance(metrics, dict):
@@ -154,15 +164,23 @@ def train_segmentation_task(
                     meta[_k] = metrics[_k]
             history_buffer.append(metrics)
         meta.update(sticky_meta)
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", meta)
-        # 推历史曲线
+        # v3.5.0 Phase T7 #8: 合并 commit (log + progress + current_epoch + history)
+        TrainingLifecycleService.set_task_state(
+            self, "PROGRESS", meta,
+            commit_progress=progress_pct,
+            commit_message=epoch_msg,
+            commit_current_epoch=current,
+            commit_history=list(history_buffer) if history_buffer else None,
+        )
+        # 推历史曲线 (RPUSH 到 Redis, commit_db=False 避免重复写 DB)
         if history_buffer:
             TrainingLifecycleService.push_history(
                 task_id, list(history_buffer),
                 job_id=job_id,
                 progress=progress_pct,
-                message=f"{stage} {current}/{total} {info}",
+                message=epoch_msg,
                 current_epoch=current,
+                commit_db=False,  # Phase T7 #8: 已合并到 set_task_state
             )
 
     # ---- 4) 训练 ----
@@ -189,7 +207,65 @@ def train_segmentation_task(
             epochs=epochs, batch_size=batch_size,
             learning_rate=learning_rate, crop_size=crop_size,
             device=device, progress_cb=_train_cb,
+            # v3.5.0: 注入 pause_check 回调, 让 train_segmentation 每个 epoch 起点
+            # 检查暂停/取消信号 (SignalAction 枚举)
+            pause_check=_pause_check_factory,
         )
+    except TaskCanceled as tc:
+        # v3.5.0: 用户主动取消 (TaskCanceled 异常来自 train_segmentation 的 pause_check 回调)
+        from app.database.redis import redis_client as _redis_for_cleanup
+        try:
+            _redis_for_cleanup.delete(f"train:cancel:{task_id}")
+        except Exception:
+            pass
+        TrainingLifecycleService.mark_canceled_sync(
+            job_id=job_id,
+            started_at=started_at,
+            epoch=tc.epoch,
+            total_epochs=tc.total_epochs,
+            history_buffer=history_buffer,
+            model_name=model_alias,
+            reason=getattr(tc, "reason", "user_cancel"),
+        )
+        # 走 update_state(REVOKED) 让 Celery 端状态正确
+        # v3.5.0: 显式带 exc_type, 避免 Celery _store_result 抛 "Exception information
+        # must include the exception type" 异常 (整个 worker 退出)
+        TrainingLifecycleService.set_task_state(self, "REVOKED", {
+            "progress": round(tc.epoch / max(tc.total_epochs, 1) * 100, 2),
+            "msg": f"Canceled at epoch {tc.epoch}/{tc.total_epochs} ({getattr(tc, 'reason', 'user_cancel')})",
+            "epoch": tc.epoch,
+            "total_epochs": tc.total_epochs,
+            "job_id": job_id,
+            "exc_type": "TaskCanceled",
+        })
+        return None
+    except TrainingPaused as tp:
+        # v3.5.0: 用户主动暂停 (TrainingPaused 异常来自 train_segmentation 的 pause_check 回调)
+        from app.database.redis import redis_client as _redis_for_cleanup
+        try:
+            _redis_for_cleanup.delete(f"train:pause:{task_id}")
+        except Exception:
+            pass
+        TrainingLifecycleService.mark_paused_sync(
+            job_id=job_id,
+            started_at=started_at,
+            epoch=tp.epoch,
+            total_epochs=tp.total_epochs,
+            history_buffer=history_buffer,
+            model_name=model_alias,
+        )
+        # 走 update_state(REVOKED) 让 Celery 端状态正确
+        # v3.5.0: 显式带 exc_type, 避免 Celery _store_result 抛 "Exception information
+        # must include the exception type" 异常 (整个 worker 退出)
+        TrainingLifecycleService.set_task_state(self, "REVOKED", {
+            "progress": round(tp.epoch / max(tp.total_epochs, 1) * 100, 2),
+            "msg": f"Paused at epoch {tp.epoch}/{tp.total_epochs}",
+            "epoch": tp.epoch,
+            "total_epochs": tp.total_epochs,
+            "job_id": job_id,
+            "exc_type": "TrainingPaused",
+        })
+        return None
     except Exception as e:
         _finish_failed(self, job_id, f"训练失败: {e}", started_at, task_id)
         return {"status": "FAILURE", "error": str(e)}

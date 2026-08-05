@@ -20,12 +20,20 @@ TRAIN_STATE_SUCCESS = "SUCCESS"
 TRAIN_STATE_FAILURE = "FAILURE"
 TRAIN_STATE_REVOKED = "REVOKED"
 TRAIN_STATE_PAUSED = "PAUSED"
+# v3.5.0: 新增 CANCELED 状态, 区分"用户主动取消"与 Celery 自动撤销 (REVOKED)
+# - REVOKED: Celery 自身撤销 (历史遗留, 多用于信号 kill_job 路径)
+# - CANCELED: 用户在前端点"取消"按钮, 走业务级 Redis signal 路径
+TRAIN_STATE_CANCELED = "CANCELED"
 TRAIN_STATE_VALUES = (
     TRAIN_STATE_PENDING, TRAIN_STATE_PROGRESS, TRAIN_STATE_SUCCESS,
     TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED, TRAIN_STATE_PAUSED,
+    TRAIN_STATE_CANCELED,
 )
-# 终态 (不可再转移)
-TRAIN_TERMINAL_STATES = frozenset((TRAIN_STATE_SUCCESS, TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED))
+# 终态 (不可再转移); CANCELED 是终态, 用户点"再训练"会创建新 job
+TRAIN_TERMINAL_STATES = frozenset((
+    TRAIN_STATE_SUCCESS, TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED,
+    TRAIN_STATE_CANCELED,
+))
 
 # 预训练模式 (v3.0.0 新增, 记录任务是基于哪个 MV 训练, 用于追溯)
 # - from_scratch: 微调 (基于 timm ImageNet 预训练权重, 不依赖业务 MV; 沿用旧名便于 DB 兼容)
@@ -57,8 +65,13 @@ class TrainingJob(Base):
 
     # 输入参数
     dataset_id = Column(Integer, ForeignKey("dataset.id"), nullable=False)
-    base_model = Column(String(64), nullable=False)
-    model_name = Column(String(128), nullable=False)
+    # v3.5.0 Phase T7 #4 优化: 加 index=True
+    # 列表搜索 q 走 ilike('%xxx%') OR ilike('%xxx%') (LIKE 前缀通配符用不上 B-tree,
+    # 但至少 = / 前缀搜索受益, 配合 Redis list 端点缓存 (dataset_id, state, task_type, q)
+    # 整体将模糊搜索从全表扫降到 5-30s TTL 命中)
+    # 训练任务表行数上 10w 后, 这两个索引是必备 (否则每次搜索都全表)
+    base_model = Column(String(64), nullable=False, index=True)
+    model_name = Column(String(128), nullable=False, index=True)
     task_type = Column(
         String(32), default="classification", nullable=False, index=True,
     )
@@ -126,6 +139,10 @@ class TrainingJob(Base):
     def is_revoked(self) -> bool:
         return self.state == TRAIN_STATE_REVOKED
 
+    def is_canceled(self) -> bool:
+        """v3.5.0: 是否用户主动取消 (与 is_revoked 区分业务语义)."""
+        return self.state == TRAIN_STATE_CANCELED
+
     def is_classification(self) -> bool:
         return self.task_type == "classification"
 
@@ -138,16 +155,18 @@ class TrainingJob(Base):
     def transition_to(self, new_state: str, message: Optional[str] = None) -> None:
         """业务规则: 状态机转移 (非法转移抛异常)
 
-        PENDING -> PROGRESS -> SUCCESS / FAILURE / REVOKED
-        FAILURE 不可再转移 (终态); REVOKED 不可再转移
+        PENDING -> PROGRESS -> SUCCESS / FAILURE / REVOKED / CANCELED
+        PAUSED  -> PROGRESS (继续) / REVOKED / CANCELED
+        FAILURE/REVOKED/CANCELED 不可再转移 (终态)
         """
         _transitions = {
-            TRAIN_STATE_PENDING: (TRAIN_STATE_PROGRESS, TRAIN_STATE_REVOKED, TRAIN_STATE_FAILURE),
-            TRAIN_STATE_PROGRESS: (TRAIN_STATE_SUCCESS, TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED),
+            TRAIN_STATE_PENDING: (TRAIN_STATE_PROGRESS, TRAIN_STATE_REVOKED, TRAIN_STATE_FAILURE, TRAIN_STATE_CANCELED),
+            TRAIN_STATE_PROGRESS: (TRAIN_STATE_SUCCESS, TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED, TRAIN_STATE_PAUSED, TRAIN_STATE_CANCELED),
             TRAIN_STATE_SUCCESS: (),  # 终态
             TRAIN_STATE_FAILURE: (),  # 终态
             TRAIN_STATE_REVOKED: (),  # 终态
-            TRAIN_STATE_PAUSED: (TRAIN_STATE_PROGRESS, TRAIN_STATE_REVOKED),
+            TRAIN_STATE_CANCELED: (),  # 终态 (v3.5.0 新增)
+            TRAIN_STATE_PAUSED: (TRAIN_STATE_PROGRESS, TRAIN_STATE_REVOKED, TRAIN_STATE_CANCELED),
         }
         allowed = _transitions.get(self.state, ())
         if new_state not in allowed:

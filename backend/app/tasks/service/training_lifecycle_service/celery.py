@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.database.redis import redis_client  # noqa: F401  (兼容旧 re-export)
 from app.utils.async_helpers import run_async_in_worker as _run_async
@@ -77,25 +77,56 @@ _LOG_MAX_LINES = 200      # 与 TrainingJob.LOG_MAX_LINES 一致 (这里硬编�
 _LAST_LOG_SIG: Dict[str, tuple] = {}
 
 
-def _persist_log_line_sync(celery_task_id: Optional[str], line: str) -> None:
+def _persist_log_line_sync(
+    celery_task_id: Optional[str],
+    line: str,
+    *,
+    commit_progress: Optional[float] = None,
+    commit_message: Optional[str] = None,
+    commit_current_epoch: Optional[int] = None,
+    commit_history: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """同步包装: 异步把一行日志写入 TrainingJob.log
 
     失败静默吞掉, 不影响 set_task_state 主流程.
     celery_task_id 为 None (极端情况) 时也静默跳过.
+    commit_* 参数透传给 _persist_log_line_async, 用于合并写 (Phase T7 #8).
     """
     if not celery_task_id or not line:
         return
     if len(line) > _LOG_LINE_MAX_LEN:
         line = line[: _LOG_LINE_MAX_LEN - 3] + "..."
     try:
-        _run_async(_persist_log_line_async(celery_task_id, line))
+        _run_async(_persist_log_line_async(
+            celery_task_id, line,
+            commit_progress=commit_progress,
+            commit_message=commit_message,
+            commit_current_epoch=commit_current_epoch,
+            commit_history=commit_history,
+        ))
     except Exception as e:
         # 日志持久化是 best-effort, 不影响主流程
         logger.debug("persist_log_line(%s) skipped: %s", celery_task_id, e)
 
 
-async def _persist_log_line_async(celery_task_id: str, line: str) -> None:
-    """异步把一行日志写入 TrainingJob.log, 含 200 行截断"""
+async def _persist_log_line_async(
+    celery_task_id: str,
+    line: str,
+    *,
+    commit_progress: Optional[float] = None,
+    commit_message: Optional[str] = None,
+    commit_current_epoch: Optional[int] = None,
+    commit_history: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """异步把一行日志写入 TrainingJob.log, 含 200 行截断
+
+    v3.5.0 Phase T7 #8 优化: 合并"epoch 多次 DB write"
+    - 原: epoch 结束调 set_task_state (写 log 行) + push_history (写 progress/history),
+          = 2 次 commit / epoch
+    - 优: 把 commit_progress / commit_message / commit_current_epoch / commit_history
+          一并在 _persist_log_line_async 内 commit, = 1 次 commit / epoch
+    - 传入 None 的字段不写, 调用方按需传
+    """
     try:
         from sqlalchemy import select
         from app.database import AsyncSessionLocal
@@ -115,6 +146,19 @@ async def _persist_log_line_async(celery_task_id: str, line: str) -> None:
             if len(log) > _LOG_MAX_LINES:
                 log = log[-_LOG_MAX_LINES:]
             job.log = log
+            # v3.5.0 Phase T7 #8: 合并写 progress / message / current_epoch / history
+            # 任一字段不为 None 才更新, 避免空值覆盖已有数据
+            if commit_progress is not None:
+                try:
+                    job.progress = float(commit_progress)
+                except (TypeError, ValueError):
+                    pass
+            if commit_message is not None:
+                job.message = commit_message
+            if commit_current_epoch is not None:
+                job.current_epoch = int(commit_current_epoch)
+            if commit_history is not None:
+                job.history = list(commit_history)
             await db.commit()
     except Exception as e:
         logger.debug("persist_log_line_async(%s) DB write failed: %s", celery_task_id, e)
@@ -147,7 +191,16 @@ def _should_persist(state: str, meta: Dict[str, Any], task_id: str) -> bool:
     return False
 
 
-def set_task_state(celery_task: Any, state: str, meta: Dict[str, Any]) -> None:
+def set_task_state(
+    celery_task: Any,
+    state: str,
+    meta: Dict[str, Any],
+    *,
+    commit_progress: Optional[float] = None,
+    commit_message: Optional[str] = None,
+    commit_current_epoch: Optional[int] = None,
+    commit_history: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """统一的 Celery update_state + 后端权威日志持久化
 
     v3.0.0 Phase T 业务规则变更:
@@ -155,10 +208,20 @@ def set_task_state(celery_task: Any, state: str, meta: Dict[str, Any]) -> None:
     - 解决 "已完成任务无日志" 的历史问题:
       之前日志只由前端 saveDetailLog 写, 已完成任务详情又不连 SSE, 永远空
 
+    v3.5.0 Phase T7 #8: 合并 DB write
+    - 传 commit_progress / commit_message / commit_current_epoch / commit_history 时,
+      在 _persist_log_line_async 内一次性 commit (log + 这些字段),
+      减少 epoch 结束时的 2 次 DB write → 1 次
+    - 调用方 (epoch_cb) 必须先调 set_task_state 再调 push_history(commit_db=False)
+
     Args:
         celery_task: Celery task 实例 (self)
         state: PROGRESS / SUCCESS / FAILURE / REVOKED
         meta: 推送给前端的 meta dict
+        commit_progress: 可选, 同步写 job.progress (epoch_cb 场景)
+        commit_message: 可选, 同步写 job.message
+        commit_current_epoch: 可选, 同步写 job.current_epoch
+        commit_history: 可选, 同步写 job.history (整列表, 训练历史)
     """
     if state == "FAILURE" and "exc_type" not in meta:
         meta["exc_type"] = "UnknownError"
@@ -181,7 +244,14 @@ def set_task_state(celery_task: Any, state: str, meta: Dict[str, Any]) -> None:
         return
 
     line = _build_log_line(state, meta)
-    _persist_log_line_sync(task_id, line)
+    # v3.5.0 Phase T7 #8: 合并写 progress/message/current_epoch/history
+    _persist_log_line_sync(
+        task_id, line,
+        commit_progress=commit_progress,
+        commit_message=commit_message,
+        commit_current_epoch=commit_current_epoch,
+        commit_history=commit_history,
+    )
     # 更新签名缓存
     try:
         progress = float(meta.get("progress") or 0)
@@ -189,6 +259,8 @@ def set_task_state(celery_task: Any, state: str, meta: Dict[str, Any]) -> None:
         progress = 0.0
     msg = (meta.get("msg") or meta.get("message") or "")[:200]
     _LAST_LOG_SIG[task_id] = (state, progress, msg, datetime.utcnow())
+    # v3.5.0 Phase T7 方案 C: 写库后 publish, 通知 SSE 端点立即推送
+    publish_job_update(task_id)
 
 
 def set_last_sticky_meta(task_id: str, sticky_meta: Dict[str, Any]) -> None:
@@ -201,10 +273,45 @@ def get_last_sticky_meta(task_id: str) -> Dict[str, Any]:
     return _LAST_STICKY_META.get(task_id, {})
 
 
+# ============== 训练任务状态事件发布 (v3.5.0 Phase T7 方案 C) ==============
+# 背景: SSE 端点原来用 1Hz 轮询 + Redis 缓存 + db_version 去重, 在没有信息更新时
+# 仍然每秒查一次缓存. 方案 C 改为事件驱动 + 1s 兜底:
+#   - worker 写库后 publish 一条通知到 `job_state_channel:{task_id}`
+#   - SSE 端点 subscribe 该频道, 收到事件后立即失效缓存 + 查 DB + 推送给前端
+#   - 1s 内无事件 → 走兜底轮询 (防 publish 失败/网络丢包)
+#
+# 为什么不直接推 state?
+#  跨进程 SSE 端点可能挂在不同 worker/gunicorn 实例, Redis Pub/Sub 是天然的
+#  跨进程广播, 简单可靠. 实际 payload (progress/epoch 等) 由 SSE 端点自己查 DB
+#  拿最新值, 避免事件丢消息后 UI 永远滞后.
+
+JOB_UPDATE_CHANNEL_TEMPLATE = "job_state_channel:{task_id}"
+
+
+def publish_job_update(task_id: Optional[str]) -> None:
+    """向 Redis 发布一次 "该 task 有新状态" 通知 (SSE 端点会订阅并立即推送)
+
+    失败静默吞掉 (best-effort, 不影响训练主流程):
+    - Redis 不可达 → SSE 端点走 1s 兜底轮询, 不影响功能
+    - 没有订阅者 → publish 是 no-op, 无副作用
+    """
+    if not task_id:
+        return
+    try:
+        channel = JOB_UPDATE_CHANNEL_TEMPLATE.format(task_id=task_id)
+        # payload 仅用作唤醒信号, 真实数据由 SSE 端点查 DB 获取
+        # (避免事件乱序 / 漏消息导致 UI 永远滞后)
+        redis_client.publish(channel, "1")
+    except Exception as e:
+        logger.debug("publish_job_update(%s) failed: %s", task_id, e)
+
+
 __all__ = [
     "set_task_state",
     "set_last_sticky_meta",
     "get_last_sticky_meta",
     "_LAST_STICKY_META",
     "_build_log_line",
+    "publish_job_update",
+    "JOB_UPDATE_CHANNEL_TEMPLATE",
 ]

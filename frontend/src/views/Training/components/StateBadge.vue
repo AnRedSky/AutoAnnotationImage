@@ -7,11 +7,13 @@
  * - 不加任何 icon (包括 SUCCESS 的 CircleCheck, PROGRESS 的 Loading spinner)
  *   训练中的"动态感"由 el-progress 列的 0-100% 数字承担
  * 取代 v2.5.24 的 icon+dark 方案, 解决表格色块过重问题
+ *
+ * v3.5.0: 增加 CANCELED 终态 (用户主动取消) — 用 info 灰, 与 REVOKED 一致
  */
 import { computed } from 'vue'
 
 const props = defineProps<{
-  state: string  // PENDING | PROGRESS | SUCCESS | FAILURE | REVOKED | PAUSED
+  state: string  // PENDING | PROGRESS | SUCCESS | FAILURE | REVOKED | PAUSED | CANCELED
   size?: 'sm' | 'md'
 }>()
 
@@ -25,6 +27,7 @@ const META: Record<string, { label: string; type: TagType }> = {
   SUCCESS:  { label: '已完成', type: 'success' },
   FAILURE:  { label: '失败',   type: 'danger' },
   REVOKED:  { label: '已取消', type: 'info' },
+  CANCELED: { label: '已取消', type: 'info' },
   PAUSED:   { label: '已暂停', type: 'warning' },
 }
 

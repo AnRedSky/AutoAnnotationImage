@@ -102,18 +102,19 @@ const filterableDatasetsForFilter = computed(() => {
 })
 
 // 顶部统计 (基于 jobs 聚合)
-const stats = computed(() => {
-  const list = jobs.value
-  const totalCount = total.value || list.length
-  const cnt: Record<string, number> = { PENDING: 0, PROGRESS: 0, SUCCESS: 0, FAILURE: 0, PAUSED: 0, REVOKED: 0 }
-  for (const j of list) cnt[j.state] = (cnt[j.state] || 0) + 1
-  return {
-    total: totalCount,
-    running: cnt.PROGRESS,
-    success: cnt.SUCCESS,
-    failed: cnt.FAILURE + cnt.REVOKED,
-  }
-})
+  // v3.5.0: 增加 CANCELED 计数 — 取消任务计入"失败"汇总 (用户视角: 不可恢复)
+  const stats = computed(() => {
+    const list = jobs.value
+    const totalCount = total.value || list.length
+    const cnt: Record<string, number> = { PENDING: 0, PROGRESS: 0, SUCCESS: 0, FAILURE: 0, PAUSED: 0, REVOKED: 0, CANCELED: 0 }
+    for (const j of list) cnt[j.state] = (cnt[j.state] || 0) + 1
+    return {
+      total: totalCount,
+      running: cnt.PROGRESS,
+      success: cnt.SUCCESS,
+      failed: cnt.FAILURE + cnt.REVOKED + cnt.CANCELED,
+    }
+  })
 
 // 表格序号: (page - 1) * pageSize + idx + 1
 const indexMethod = (idx: number) => (page.value - 1) * pageSize.value + idx + 1
@@ -300,6 +301,7 @@ onBeforeUnmount(() => {
         { value: 'SUCCESS', label: '已完成' },
         { value: 'PAUSED', label: '已暂停' },
         { value: 'REVOKED', label: '已取消' },
+        { value: 'CANCELED', label: '已取消' },
         { value: 'FAILURE', label: '失败' },
       ]"
       @change:filter="onTaskTypeFilterChange"
@@ -327,6 +329,7 @@ onBeforeUnmount(() => {
         { value: 'SUCCESS', label: '已完成' },
         { value: 'PAUSED', label: '已暂停' },
         { value: 'REVOKED', label: '已取消' },
+        { value: 'CANCELED', label: '已取消' },
         { value: 'FAILURE', label: '失败' },
       ]"
       :selected-count="selectedJobIds.length"

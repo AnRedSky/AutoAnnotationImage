@@ -233,6 +233,100 @@ def mark_paused_sync(**kwargs) -> None:
     _run_async(mark_paused(**kwargs))
 
 
+# ============== 8. 训练取消 (CANCELED 状态, v3.5.0) ==============
+
+async def mark_canceled(
+    job_id: int,
+    *,
+    started_at: datetime,
+    epoch: int,
+    total_epochs: int,
+    history_buffer: List[Dict[str, Any]],
+    model_name: str,
+    reason: str = "user_cancel",
+) -> None:
+    """写 DB CANCELED + 清理半成品 ModelVersion (与 mark_paused 对称)
+
+    区别于 mark_paused:
+    - mark_paused 保留 history 供用户"继续" (DB state=PAUSED, 非终态)
+    - mark_canceled 保留 history 但用户无法"继续" (DB state=CANCELED, 终态, 只能"再训练")
+
+    资源清理:
+    - 删 ModelVersion (与 mark_paused 策略一致: 删 WHERE name=model_name AND is_active=False)
+    - **不删 .pt/.pth 文件** (mark_paused 现状的 .pth 路径对 detection 实际是错的, 避免引入新 bug;
+      进程退出时由 OS 清理)
+    - history 保留 (前端 SSE 展示已跑完 epoch)
+
+    Args:
+        job_id: TrainingJob.id
+        started_at: 训练启动时间
+        epoch: 取消时正在跑的 epoch (1-based)
+        total_epochs: 总 epoch 数
+        history_buffer: 训练历史曲线
+        model_name: 模型名 (用于定位半成品 ModelVersion)
+        reason: 取消原因 (默认 "user_cancel")
+    """
+    from sqlalchemy import delete
+    from app.database import AsyncSessionLocal
+    from app.tasks.model.training_job import TrainingJob
+    from app.tasks.model.model_version import ModelVersion
+
+    # ---- 1) 清理半成品 ModelVersion (与 mark_paused 一致策略) ----
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                delete(ModelVersion).where(
+                    ModelVersion.name == model_name,
+                    ModelVersion.is_active == False,  # noqa: E712
+                )
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning("mark_canceled cleanup ModelVersion failed: %s", e)
+
+    # ---- 2) 写 DB CANCELED ----
+    try:
+        async with AsyncSessionLocal() as db:
+            job = await db.get(TrainingJob, job_id)
+            if job:
+                job.state = "CANCELED"
+                job.progress = round(epoch / max(total_epochs, 1) * 100, 2)
+                job.message = f"训练已取消 (epoch {epoch}/{total_epochs}, {reason})"
+                finished_at = datetime.utcnow()
+                job.finished_at = finished_at
+                job.duration_seconds = (finished_at - started_at).total_seconds()
+                # 解关联半成品 ModelVersion (与 mark_paused 不一样, 因为 mark_paused 走的是
+                # SQL DELETE, 这里是显式置 NULL, 避免和 step 1 的 DELETE 重复)
+                job.model_version_id = None
+                if history_buffer:
+                    job.history = list(history_buffer)
+                await db.commit()
+    except Exception as e:
+        logger.warning("mark_canceled DB write failed: %s", e)
+
+
+def mark_canceled_sync(
+    job_id: int,
+    *,
+    started_at: datetime,
+    epoch: int,
+    total_epochs: int,
+    history_buffer: List[Dict[str, Any]],
+    model_name: str,
+    reason: str = "user_cancel",
+) -> None:
+    """同步包装"""
+    _run_async(mark_canceled(
+        job_id=job_id,
+        started_at=started_at,
+        epoch=epoch,
+        total_epochs=total_epochs,
+        history_buffer=history_buffer,
+        model_name=model_name,
+        reason=reason,
+    ))
+
+
 __all__ = [
     "mark_success",
     "mark_success_sync",
@@ -240,4 +334,6 @@ __all__ = [
     "mark_failure_sync",
     "mark_paused",
     "mark_paused_sync",
+    "mark_canceled",       # v3.5.0 新增
+    "mark_canceled_sync",  # v3.5.0 新增
 ]

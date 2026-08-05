@@ -27,10 +27,11 @@ export function useTrainingActions(options: UseTrainingActionsOptions) {
   const { insertPlaceholder, reload, actionPending } = options
 
   // ============== 合并按钮文案/类型/操作 ==============
+  // v3.5.0: 增加 CANCELED 终态 — 用户主动取消, 不可"继续"但可"再训练"
   const runBtnLabel = (s: string) => {
     if (s === 'PROGRESS') return '暂停'
     if (s === 'PAUSED') return '继续'
-    if (s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED') return '再训练'
+    if (s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'CANCELED') return '再训练'
     return '启动'
   }
   const runBtnType = (s: string) => (s === 'PROGRESS' ? 'warning' : 'primary')
@@ -39,7 +40,7 @@ export function useTrainingActions(options: UseTrainingActionsOptions) {
     if (s === 'PROGRESS') return s !== 'PROGRESS'  // canPause(s) === s in [PENDING, PROGRESS]
     if (s === 'PAUSED') return false
     if (s === 'PENDING') return false
-    return !(s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED')
+    return !(s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED' || s === 'CANCELED')
   }
 
   // ============== 行操作 ==============
@@ -153,11 +154,12 @@ export function useTrainingActions(options: UseTrainingActionsOptions) {
   }
 
   /**
-   * 删除任务 (可删除: SUCCESS/FAILURE/REVOKED/PAUSED)
+   * 删除任务 (可删除: SUCCESS/FAILURE/REVOKED/PAUSED/CANCELED)
    * 终态才可删; 详情弹窗里展示的任务被删时, 由 page 主动关弹窗
    */
   const onRowDelete = async (row: any, onAfterDelete?: (row: any) => void) => {
-    if (!(row.state === 'SUCCESS' || row.state === 'FAILURE' || row.state === 'REVOKED' || row.state === 'PAUSED')) {
+    const terminalStates = ['SUCCESS', 'FAILURE', 'REVOKED', 'PAUSED', 'CANCELED']
+    if (!terminalStates.includes(row.state)) {
       return
     }
     try {
@@ -191,6 +193,7 @@ export function useTrainingActions(options: UseTrainingActionsOptions) {
 }
 
 // ---- 状态判定工具 (与 useTrainingJobs 重复, 单独导出供 useTrainingActions 内部使用) ----
+// v3.5.0: 增加 CANCELED 终态 — 可"再训练"
 function canStart(s: string) {
-  return s === 'PENDING' || s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED'
+  return s === 'PENDING' || s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED' || s === 'CANCELED'
 }

@@ -155,7 +155,8 @@ const rowClassName = ({ row }: { row: any }) => {
       </el-table-column>
       <el-table-column label="结束日期" min-width="92" show-overflow-tooltip>
         <template #default="{ row }">
-          {{ ['SUCCESS', 'FAILURE', 'REVOKED'].includes(row.state) ? formatTime(row.finished_at) : '-' }}
+          <!-- v3.5.0: 增加 CANCELED 终态 — 取消任务有 finished_at, 显示 -->
+          {{ ['SUCCESS', 'FAILURE', 'REVOKED', 'CANCELED'].includes(row.state) ? formatTime(row.finished_at) : '-' }}
         </template>
       </el-table-column>
       <el-table-column label="操作" width="200" fixed="right" align="center">

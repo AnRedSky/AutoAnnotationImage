@@ -22,8 +22,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+# v3.5.0: 训练控制信号 (pause/cancel 区分)
+# 顶层 import 以确保类型注解 + 异常类在训练循环里可用
+from app.tasks.workers.control_signals import SignalAction, TaskCanceled  # noqa: E402
+from app.tasks.ml.classification import TrainingPaused  # noqa: E402
+
 
 ProgressCallback = Optional[Callable[[str, int, int, str], None]]
+# v3.5.0: pause_check 返回 SignalAction 枚举, 与 classification/yolo 对齐
+PauseCheckCallback = Optional[Callable[[], SignalAction]]
 
 
 def _build_model(backbone: str, num_classes: int) -> nn.Module:
@@ -94,6 +101,7 @@ def train_segmentation(
     crop_size: int = 256,
     device: str = "cpu",
     progress_cb: ProgressCallback = None,
+    pause_check: PauseCheckCallback = None,
 ) -> Dict[str, Any]:
     """
     训练分割模型, 返回 dict {
@@ -102,6 +110,13 @@ def train_segmentation(
     }
 
     注: 缺省 CPU 训练, 生产部署建议 GPU.
+
+    Args:
+        pause_check (v3.5.0): 暂停/取消检查回调, 返回 SignalAction 枚举
+            - SignalAction.CONTINUE: 继续训练
+            - SignalAction.PAUSE:    抛 TrainingPaused (worker 写 PAUSED)
+            - SignalAction.CANCEL:   抛 TaskCanceled (worker 写 CANCELED)
+            检查点: 每个 epoch 起点 (避免打断 DataLoader 迭代器)
     """
     from .seg_dataset import SegmentationPairDataset
 
@@ -133,6 +148,20 @@ def train_segmentation(
         progress_cb("train.start", 0, epochs, f"backbone={backbone} n={len(ds)}")
 
     for epoch in range(1, epochs + 1):
+        # ---- 暂停/取消检查: 每个 epoch 起点 (避免打断 DataLoader 迭代器) ----
+        # v3.5.0: pause_check 返回 SignalAction 枚举, 区分 pause 与 cancel
+        if pause_check is not None:
+            try:
+                action = pause_check()
+            except Exception as e:
+                # pause_check 自身异常不应阻塞训练, 仅记日志并视为 CONTINUE
+                logger.warning(f"seg pause_check 调用异常: {e!r}, 视为 CONTINUE")
+                action = SignalAction.CONTINUE
+            if action == SignalAction.CANCEL:
+                raise TaskCanceled(epoch=epoch, total_epochs=epochs)
+            if action == SignalAction.PAUSE:
+                raise TrainingPaused(epoch=epoch, total_epochs=epochs)
+
         epoch_loss = 0.0
         n_batches = 0
         for batch_idx, (imgs, tgts) in enumerate(loader, start=1):

@@ -166,11 +166,17 @@ async def cancel_training_job(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    取消/停止一个训练任务
-    - 仅当任务处于 PENDING/PROGRESS 时生效
-    - 同步发送 Celery revoke 信号
-    - 更新 TrainingJob 状态为 REVOKED
+    """取消一个训练任务 (v3.5.0 重构)
+
+    v3.5.0 关键变更:
+    - 移除 Celery revoke(terminate=True, signal="SIGTERM") —— threads 池不支持 kill_job, 报 NotImplementedError
+    - 改用业务级 Redis signal: control_signals.request_cancel(task_id)
+    - worker pause_check 下次调用 (下个 epoch 边界) 读到 cancel 标志, 抛 TaskCanceled 退出
+    - DB state 从 "REVOKED" 改为 "CANCELED", 与 Celery 自动撤销语义区分
+
+    - 仅当任务处于 PENDING/PROGRESS/PAUSED 时生效 (从 PAUSED 也能取消)
+    - 立即写 DB CANCELED (UI 立即可见, 不等 worker 退出)
+    - worker 实际停下后会写完整消息 (epoch 进度等)
 
     v3.3.0 P0 修复: 必须校验所有权, 防止越权取消他人任务
     """
@@ -180,31 +186,39 @@ async def cancel_training_job(
     # 权限校验
     if not current_user.is_admin() and job.user_id != current_user.id:
         raise HTTPException(403, "无权限操作此训练任务")
-    if job.state not in ("PENDING", "PROGRESS"):
+    # v3.5.0: 允许从 PENDING/PROGRESS/PAUSED 取消 (从 PAUSED 也能取消, 业务场景常见)
+    if job.state not in ("PENDING", "PROGRESS", "PAUSED"):
         return {
             "success": False,
             "message": f"Job is already in terminal state: {job.state}",
             "state": job.state,
         }
 
-    # 1) 发 Celery revoke
+    # 1) 写 Redis cancel 标志 (v3.5.0 新增: 业务级 signal, 替换 Celery kill_job)
+    #    worker pause_check 下次调用会读到, 抛 TaskCanceled
+    if job.celery_task_id:
+        from app.tasks.workers.control_signals import request_cancel
+        request_cancel(job.celery_task_id)
+
+    # 2) revoke Celery (v3.5.0: terminate=False, 不强杀, 由 worker 自己抛异常退出)
+    #    保留 revoke 调用是为了让 Celery broker 端不重新投递 (worker 退出后, 任务不会再被其他 worker 接走)
     if job.celery_task_id:
         try:
             from app.tasks.workers.celery_app import celery_app
-            celery_app.control.revoke(job.celery_task_id, terminate=True, signal="SIGTERM")
+            celery_app.control.revoke(job.celery_task_id, terminate=False)
         except Exception:
             # broker 不可用时不强失败, 只更新 DB
             pass
 
-    # 2) 更新 DB
-    job.state = "REVOKED"
-    job.message = "Cancelled by user"
+    # 3) 立即更新 DB (UI 立即看到 CANCELED, 不等 worker 跑完这个 epoch)
+    job.state = "CANCELED"
+    job.message = "Cancel signal sent by user"
     job.finished_at = datetime.utcnow()
     if job.started_at:
         job.duration_seconds = (job.finished_at - job.started_at).total_seconds()
     await db.commit()
 
-    return {"success": True, "state": "REVOKED", "job_id": job_id}
+    return {"success": True, "state": "CANCELED", "job_id": job_id}
 
 
 @router.post("/jobs/{job_id}/error")
@@ -275,11 +289,12 @@ async def pause_training_job(
         )
 
     # 1) Redis 标志位 (worker 下个 epoch 起点读到即抛 TrainingPaused)
+    #    v3.5.0: 改用 control_signals.request_pause 统一入口, 替代 inline redis_client.setex
     if job.celery_task_id:
-        try:
-            redis_client.setex(f"train:pause:{job.celery_task_id}", 3600, "1")
-        except Exception:
-            pass  # Redis 不可用不强失败, DB 状态已写
+        from app.tasks.workers.control_signals import request_pause
+        if not request_pause(job.celery_task_id):
+            # Redis 不可用不强失败, DB 状态已写
+            pass
 
     # 2) revoke Celery (terminate=False, 不强杀, 等 worker 走 epoch 边界正常退出)
     if job.celery_task_id:

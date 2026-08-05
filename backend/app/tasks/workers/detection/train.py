@@ -48,7 +48,15 @@ def train_detection_task(
 ):
     """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)"""
     from app.tasks.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
+    from app.tasks.ml.classification import TrainingPaused
     from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
+    # v3.5.0: 统一控制信号 (pause/cancel 区分)
+    from app.tasks.workers.control_signals import (
+        SignalAction,
+        TaskCanceled,
+        clear_all as clear_control_signals,
+        make_pause_check,
+    )
 
     task_id = self.request.id
     started_at = datetime.utcnow()
@@ -71,6 +79,11 @@ def train_detection_task(
     sticky_meta: dict = {}
     history_buffer: list = []
     workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
+
+    # v3.5.0: 启动时清掉历史 pause/cancel 残留 (避免上次异常退出时残留的信号误触发)
+    clear_control_signals(task_id)
+    # v3.5.0: 工厂方法生成 pause_check 回调 — 在每个 epoch 结束检查暂停/取消信号
+    _pause_check_factory = make_pause_check(task_id)
 
     # v3.0.0: 采集训练设备信息 (CPU/GPU/CUDA/显存), 塞入 sticky_meta 供 mark_success 持久化
     # - 尽早采集, 失败路径也能通过 sticky_meta 记录运行设备
@@ -98,22 +111,31 @@ def train_detection_task(
             **metrics,
         })
         progress_pct = round(current_epoch / max(total_epochs, 1) * 100, 2)
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", {
-            "progress": progress_pct,
-            "msg": f"训练 epoch {current_epoch}/{total_epochs}",
-            "total_epochs": total_epochs,
-            "current_epoch": current_epoch,
-            **{f"train_{k}": v for k, v in metrics.items()
-               if isinstance(v, (int, float))},
-            **sticky_meta,
-        })
-        # 推历史曲线 (Redis + DB)
+        epoch_msg = f"训练 epoch {current_epoch}/{total_epochs}"
+        # v3.5.0 Phase T7 #8: 合并 commit (log + progress + current_epoch + history)
+        TrainingLifecycleService.set_task_state(
+            self, "PROGRESS", {
+                "progress": progress_pct,
+                "msg": epoch_msg,
+                "total_epochs": total_epochs,
+                "current_epoch": current_epoch,
+                **{f"train_{k}": v for k, v in metrics.items()
+                   if isinstance(v, (int, float))},
+                **sticky_meta,
+            },
+            commit_progress=progress_pct,
+            commit_message=epoch_msg,
+            commit_current_epoch=current_epoch,
+            commit_history=list(history_buffer),
+        )
+        # 推历史曲线 (RPUSH 到 Redis, commit_db=False 避免重复写 DB)
         TrainingLifecycleService.push_history(
             task_id, list(history_buffer),
             job_id=job_id,
             progress=progress_pct,
-            message=f"训练 epoch {current_epoch}/{total_epochs}",
+            message=epoch_msg,
             current_epoch=current_epoch,
+            commit_db=False,  # Phase T7 #8: 已合并到 set_task_state
         )
 
     # ---- 3) 导 YOLO 数据集 ----
@@ -164,6 +186,9 @@ def train_detection_task(
             project=str(settings.DETECTION_MODEL_DIR),
             name=model_alias,
             progress_cb=_train_cb,
+            # v3.5.0: 注入 pause_check 回调, 让 train_yolo 每个 epoch 结束检查
+            # 暂停/取消信号 (SignalAction 枚举)
+            pause_check=_pause_check_factory,
         )
 
         # ---- 5) 写 ModelVersion + TrainingJob SUCCESS (委托 Service) ----
@@ -189,6 +214,65 @@ def train_detection_task(
             "status": "SUCCESS", "job_id": job_id, "model_version_id": mv_id,
             "best_pt": result["best_pt"], "metrics": result["metrics"],
         }
+
+    except TaskCanceled as tc:
+        # v3.5.0: 用户主动取消 (TaskCanceled 异常来自 train_yolo 的 pause_check 回调)
+        # 走 mark_canceled_sync 写 CANCELED 状态 + 清理半成品 ModelVersion
+        # 与 classification 路径对称, 保证状态机一致
+        from app.database.redis import redis_client as _redis_for_cleanup
+        try:
+            _redis_for_cleanup.delete(f"train:cancel:{task_id}")
+        except Exception:
+            pass
+        TrainingLifecycleService.mark_canceled_sync(
+            job_id=job_id,
+            started_at=started_at,
+            epoch=tc.epoch,
+            total_epochs=tc.total_epochs,
+            history_buffer=history_buffer,
+            model_name=model_alias,
+            reason=getattr(tc, "reason", "user_cancel"),
+        )
+        # 走 update_state(REVOKED) 让 Celery 端状态正确
+        # v3.5.0: 显式带 exc_type, 避免 Celery _store_result 抛 "Exception information
+        # must include the exception type" 异常 (整个 worker 退出)
+        TrainingLifecycleService.set_task_state(self, "REVOKED", {
+            "progress": round(tc.epoch / max(tc.total_epochs, 1) * 100, 2),
+            "msg": f"Canceled at epoch {tc.epoch}/{tc.total_epochs} ({getattr(tc, 'reason', 'user_cancel')})",
+            "epoch": tc.epoch,
+            "total_epochs": tc.total_epochs,
+            "job_id": job_id,
+            "exc_type": "TaskCanceled",
+        })
+        return None
+
+    except TrainingPaused as tp:
+        # v3.5.0: 用户主动暂停 (TrainingPaused 异常来自 train_yolo 的 pause_check 回调)
+        from app.database.redis import redis_client as _redis_for_cleanup
+        try:
+            _redis_for_cleanup.delete(f"train:pause:{task_id}")
+        except Exception:
+            pass
+        TrainingLifecycleService.mark_paused_sync(
+            job_id=job_id,
+            started_at=started_at,
+            epoch=tp.epoch,
+            total_epochs=tp.total_epochs,
+            history_buffer=history_buffer,
+            model_name=model_alias,
+        )
+        # 走 update_state(REVOKED) 让 Celery 端状态正确
+        # v3.5.0: 显式带 exc_type, 避免 Celery _store_result 抛 "Exception information
+        # must include the exception type" 异常 (整个 worker 退出)
+        TrainingLifecycleService.set_task_state(self, "REVOKED", {
+            "progress": round(tp.epoch / max(tp.total_epochs, 1) * 100, 2),
+            "msg": f"Paused at epoch {tp.epoch}/{tp.total_epochs}",
+            "epoch": tp.epoch,
+            "total_epochs": tp.total_epochs,
+            "job_id": job_id,
+            "exc_type": "TrainingPaused",
+        })
+        return None
 
     except YoloTrainError as e:
         _finish_failed(self, job_id, e, started_at, task_id)

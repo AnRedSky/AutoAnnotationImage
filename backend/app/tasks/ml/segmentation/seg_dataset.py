@@ -157,3 +157,26 @@ async def collect_segmentation_pairs(
             paired_imgs.append(im)
             paired_masks.append(m)
     return paired_imgs, paired_masks
+
+
+async def collect_segmentation_dataset_meta(
+    db, dataset_id: int,
+) -> Tuple[List[ImageModel], List[SegmentationMask], List[str]]:
+    """v3.5.0 Phase T7 #7: 一次性拉 pairs + 类目名 (消除原 worker 二次开 session 查 Category)
+
+    返回 (imgs, masks, category_names_sorted)
+    - imgs / masks 与 collect_segmentation_pairs 行为一致
+    - category_names_sorted: 按 sort 排序, 供 num_classes 计算
+    - 与 collect_segmentation_pairs 共享同一 db session, 共用 (dataset_id) 索引, 单 round-trip
+
+    调用方迁移: 替代 _load_pairs() + _load_categories() 两条独立 SQL
+    """
+    paired_imgs, paired_masks = await collect_segmentation_pairs(db, dataset_id)
+
+    from sqlalchemy import select
+    from app.tasks.model.category import Category
+    rows = (await db.execute(
+        select(Category).where(Category.dataset_id == dataset_id)
+    )).scalars().all()
+    category_names = [c.name for c in rows]
+    return paired_imgs, paired_masks, sorted(category_names)

@@ -86,16 +86,17 @@ export function useTrainingFormatters() {
   }
 
   // ============== 状态文案/类型 ==============
+  // v3.5.0: 增加 CANCELED 终态 (用户主动取消), 与 REVOKED 同义但语义更清晰
   const stateLabel = (s: string) => {
     const m: Record<string, string> = {
       PENDING: '等待中', PROGRESS: '训练中', SUCCESS: '已完成',
-      FAILURE: '失败', REVOKED: '已取消', PAUSED: '已暂停',
+      FAILURE: '失败', REVOKED: '已取消', PAUSED: '已暂停', CANCELED: '已取消',
     }
     return m[s] || s
   }
   const progressStatus = (state: string) => {
     if (state === 'SUCCESS') return 'success'
-    if (state === 'FAILURE' || state === 'REVOKED') return 'exception'
+    if (state === 'FAILURE' || state === 'REVOKED' || state === 'CANCELED') return 'exception'
     if (state === 'PAUSED') return 'warning'
     return undefined
   }

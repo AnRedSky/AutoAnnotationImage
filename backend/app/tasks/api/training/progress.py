@@ -14,9 +14,17 @@ training.progress 模块 — 训练进度查询 (REST + SSE 实时推送)
 **v3.3.0 P0 修复**: 必须鉴权 + 校验所有权, 防止跨用户训练进度泄露
 - 之前: 即使鉴权可选, 任何 token 都能查任何 task_id 进度
 - 现在: 必须校验 task 对应 job 的 user_id == current_user.id 或 admin
+
+**v3.5.0 Phase T7 方案 C**: SSE 事件驱动 + 1s 兜底
+- worker 写库后 publish `job_state_channel:{task_id}` 通知
+- SSE 端点 subscribe 该频道, 收到事件 → 失效缓存 → 立即查 DB → 推送
+- 1s 内无事件 → 走原 1Hz 轮询 (兜底, 防 publish 失败/网络丢包)
+- 收益: 1Hz 轮询时缓存命中 → 0 DB; 有事件时延迟从 1s → ~50ms
 """
 import asyncio
 import json
+import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -24,13 +32,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.database.redis import redis_client
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user, get_user_optional_for_query
 from app.schemas.training import TrainStatusResponse
 from app.tasks.model.training_job import TrainingJob
 from app.tasks.service.job_state_service import JobStateService
+from app.tasks.service.training_lifecycle_service.celery import (
+    JOB_UPDATE_CHANNEL_TEMPLATE,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 async def _assert_can_access_task_id(task_id: str, current_user: User, db: AsyncSession) -> None:
@@ -110,7 +123,7 @@ async def stream_training_progress(
     current_user: User | None = Depends(get_user_optional_for_query),
     db: AsyncSession = Depends(get_db),
 ):
-    """SSE 端点: 实时推送训练进度 (v3.5.0 Phase T6 三重优化)
+    """SSE 端点: 实时推送训练进度 (v3.5.0 Phase T7 方案 C: 事件驱动 + 1s 兜底)
 
     v3.0.0 Phase 4: 委托 JobStateService.get_snapshot_with_fresh_db
     v3.5.0 Phase T6 优化:
@@ -123,11 +136,18 @@ async def stream_training_progress(
       3) **状态自适应轮询** (方案 1): PENDING 状态 5s 一次
          - worker 未启动的空窗期 (可能 5-30s) DB QPS 进一步降到 0.2Hz
          - PROGRESS 状态保持 1Hz 实时性
+    v3.5.0 Phase T7 方案 C: **事件驱动 + 兜底**
+      4) worker 写库后 publish `job_state_channel:{task_id}` 通知
+         - SSE 端点 subscribe 该频道, get_message(timeout=1.0) 等待事件
+         - 收到事件 → 强制失效缓存 → 立即查 DB → 立即推送 (延迟 ~50ms, 优于 1s 轮询)
+         - 1s 内无事件 → 走原 1Hz 兜底轮询 (防 publish 失败 / 网络丢包)
+         - 收益: 无更新时段 0 DB (缓存命中 + 兜底均不查); 有更新时延迟从 ≤1s 降到 ~50ms
 
     行为兼容性:
     - 客户端断开通过 request.is_disconnected() 立即退出
     - 终态推完一帧 end 事件后主动关闭流
     - 长空闲期 (PENDING 且无客户端) keepalive 防代理超时
+    - Pub/Sub 异常 → 降级到纯轮询, 不影响主流程
     """
     if current_user is None:
         raise HTTPException(401, "未授权: 需要有效的 access_token")
@@ -141,136 +161,205 @@ async def stream_training_progress(
         last_keepalive = 0.0
         loop = asyncio.get_event_loop()
 
+        # ---- v3.5.0 Phase T7 方案 C: 订阅 Redis Pub/Sub 事件 ----
+        # worker 写库后会 publish "1" 到 job_state_channel:{task_id}
+        # 收到事件 → 强制失效缓存 + 立即查 DB + 推送
+        # 1s 内无事件 → 走兜底轮询
+        pubsub = None
+        pubsub_channel = JOB_UPDATE_CHANNEL_TEMPLATE.format(task_id=task_id)
+        pubsub_failed = False  # Pub/Sub 不可达时降级到纯轮询
+        try:
+            pubsub = redis_client.pubsub()
+            # ignore_subscribe_messages=True: 跳过 subscribe 确认帧
+            pubsub.subscribe(pubsub_channel)
+        except Exception as e:
+            logger.warning(
+                "[sse] pubsub.subscribe(%s) failed, fallback to 1Hz poll: %s",
+                pubsub_channel, e,
+            )
+            pubsub_failed = True
+            pubsub = None
+
         # 首帧立即推一次, 避免前端 1s 真空
         try:
             yield f": connected task_id={task_id}\n\n"
         except Exception:
+            if pubsub is not None:
+                try:
+                    pubsub.unsubscribe(pubsub_channel)
+                    pubsub.close()
+                except Exception:
+                    pass
             return
 
-        while True:
-            # ---- 客户端断开检测 ----
-            try:
-                if await request.is_disconnected():
-                    break
-            except Exception:
-                # 某些 ASGI 中间件下 is_disconnected 会抛, 视为已断开
-                break
-
-            # ---- 委托 JobStateService (Redis 缓存 + DB 兜底) ----
-            try:
-                snap = await JobStateService.get_snapshot_with_cache(task_id)
-            except Exception:
-                # 极端异常: 5xx 兜底
-                snap = None
-
-            # 兼容极端情况: JobStateService 抛错时退化到 Celery raw
-            info: dict = {}
-            if snap is None:
-                state = "PENDING"
+        try:
+            while True:
+                # ---- 客户端断开检测 ----
                 try:
-                    r = AsyncResult(task_id)
-                    state = r.state or "PENDING"
-                    if isinstance(r.info, dict):
-                        info = r.info
+                    if await request.is_disconnected():
+                        break
+                except Exception:
+                    # 某些 ASGI 中间件下 is_disconnected 会抛, 视为已断开
+                    break
+
+                # ---- v3.5.0 Phase T7 方案 C: 等待 Pub/Sub 事件 (timeout=1.0s) ----
+                # 收到事件 → 强制失效缓存 + 立即查 DB + 推送
+                # 超时 (1s 内无事件) → 走兜底轮询
+                event_received = False
+                if pubsub is not None and not pubsub_failed:
+                    try:
+                        # redis-py 的 get_message 是同步阻塞, 放线程池避免阻塞 event loop
+                        msg = await asyncio.to_thread(
+                            pubsub.get_message, True, 1.0
+                        )
+                        if msg and msg.get("type") == "message":
+                            event_received = True
+                    except Exception as e:
+                        # Pub/Sub 失败 → 标记降级, 不再尝试订阅
+                        logger.warning(
+                            "[sse] pubsub.get_message failed, fallback to poll: %s", e,
+                        )
+                        pubsub_failed = True
+                        try:
+                            pubsub.close()
+                        except Exception:
+                            pass
+                        pubsub = None
+
+                # ---- 委托 JobStateService (Redis 缓存 + DB 兜底) ----
+                # 方案 C 收到事件 → 强制失效缓存, 保证读到最新 DB
+                if event_received:
+                    try:
+                        await JobStateService.invalidate_snapshot_cache(task_id)
+                    except Exception:
+                        pass
+                try:
+                    snap = await JobStateService.get_snapshot_with_cache(task_id)
+                except Exception:
+                    # 极端异常: 5xx 兜底
+                    snap = None
+
+                # 兼容极端情况: JobStateService 抛错时退化到 Celery raw
+                info: dict = {}
+                if snap is None:
+                    state = "PENDING"
+                    try:
+                        r = AsyncResult(task_id)
+                        state = r.state or "PENDING"
+                        if isinstance(r.info, dict):
+                            info = r.info
+                    except Exception:
+                        pass
+                    progress = float(info.get("progress", 0.0))
+                    current_epoch = info.get("epoch")
+                    total_epochs = info.get("total_epochs")
+                    message = info.get("msg") or info.get("info") or ""
+                    started_at = None
+                    finished_at = None
+                    # 异常路径无缓存 version, 强制推一次
+                    current_db_version: Optional[str] = None
+                else:
+                    state = snap.state
+                    progress = snap.progress
+                    current_epoch = snap.current_epoch
+                    total_epochs = snap.total_epochs
+                    message = snap.message
+                    started_at = snap.started_at
+                    finished_at = snap.finished_at
+                    # 透传 progress_callback 推过来的 extra (data_total/class_names 等)
+                    try:
+                        r = AsyncResult(task_id)
+                        if isinstance(r.info, dict):
+                            info = r.info
+                    except Exception:
+                        info = {}
+                    # 方案 3: 取出缓存/DB 行 version (snap 是 dataclass + setattr 附加)
+                    current_db_version = getattr(snap, "_db_version", None)
+
+                payload = {
+                    "task_id": task_id,
+                    "state": state,
+                    "progress": round(progress, 2),
+                    "current_epoch": current_epoch,
+                    "total_epochs": total_epochs,
+                    "message": message,
+                }
+                if started_at is not None:
+                    payload["started_at"] = started_at.isoformat() if hasattr(started_at, "isoformat") else started_at
+                if finished_at is not None:
+                    payload["finished_at"] = finished_at.isoformat() if hasattr(finished_at, "isoformat") else finished_at
+                # 透传 extra 字段 (data_total / num_classes / class_names / 增量训练状态)
+                for _ek, _ev in (info or {}).items():
+                    if _ek in ("data_total", "data_train", "data_val",
+                               "num_classes", "class_names",
+                               "pretrained_loaded", "pretrained_path",
+                               "pretrained_error", "model_name"):
+                        payload[_ek] = _ev
+
+                # ---- 方案 3: db_version 跳过推送 ----
+                # 优先用 db_version (粒度细, 由 DB 行直接算), 缓存命中且未变 → 跳过
+                # 异常路径 (snap=None) current_db_version=None, 强制走签名去重兜底
+                should_push = False
+                if current_db_version is not None:
+                    if current_db_version != last_db_version:
+                        should_push = True
+                        last_db_version = current_db_version
+                else:
+                    # 兜底: 旧签名去重 (state, progress, message, current_epoch, time)
+                    signature = (
+                        state,
+                        round(progress, 1),
+                        message,
+                        current_epoch,
+                        str(started_at) if started_at is not None else None,
+                        str(finished_at) if finished_at is not None else None,
+                    )
+                    if signature != last_signature:
+                        should_push = True
+                        last_signature = signature
+
+                if should_push:
+                    # SSE 字段: data= 一行 JSON, 后跟一个空行表示一帧结束
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    last_keepalive = loop.time()
+
+                # ---- 终端态: 推一帧 end 事件后退出 ----
+                if state in ("SUCCESS", "FAILURE", "REVOKED"):
+                    # 显式 end 事件方便前端 await 收尾
+                    try:
+                        yield f"event: end\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    except Exception:
+                        pass
+                    break
+
+                # ---- 长空闲期 keepalive (SSE 注释帧, 浏览器忽略, 防代理 60s 断) ----
+                now = loop.time()
+                if now - last_keepalive > SSE_KEEPALIVE_INTERVAL:
+                    try:
+                        yield f": keepalive {int(now)}\n\n"
+                    except Exception:
+                        break
+                    last_keepalive = now
+
+                # ---- 方案 1: 状态自适应 sleep ----
+                # PENDING 状态 (worker 未启动) 5s, PROGRESS/PAUSED 1s
+                # 方案 C 收到事件时已即时推送, 无需 sleep; 兜底轮询时仍 sleep 1s
+                if not event_received:
+                    if state == "PENDING":
+                        await asyncio.sleep(SSE_POLL_INTERVAL_PENDING)
+                    else:
+                        await asyncio.sleep(SSE_POLL_INTERVAL_PROGRESS)
+        finally:
+            # ---- 清理 Pub/Sub 资源 (防止 Redis 连接泄漏) ----
+            if pubsub is not None:
+                try:
+                    pubsub.unsubscribe(pubsub_channel)
                 except Exception:
                     pass
-                progress = float(info.get("progress", 0.0))
-                current_epoch = info.get("epoch")
-                total_epochs = info.get("total_epochs")
-                message = info.get("msg") or info.get("info") or ""
-                started_at = None
-                finished_at = None
-                # 异常路径无缓存 version, 强制推一次
-                current_db_version: Optional[str] = None
-            else:
-                state = snap.state
-                progress = snap.progress
-                current_epoch = snap.current_epoch
-                total_epochs = snap.total_epochs
-                message = snap.message
-                started_at = snap.started_at
-                finished_at = snap.finished_at
-                # 透传 progress_callback 推过来的 extra (data_total/class_names 等)
                 try:
-                    r = AsyncResult(task_id)
-                    if isinstance(r.info, dict):
-                        info = r.info
-                except Exception:
-                    info = {}
-                # 方案 3: 取出缓存/DB 行 version (snap 是 dataclass + setattr 附加)
-                current_db_version = getattr(snap, "_db_version", None)
-
-            payload = {
-                "task_id": task_id,
-                "state": state,
-                "progress": round(progress, 2),
-                "current_epoch": current_epoch,
-                "total_epochs": total_epochs,
-                "message": message,
-            }
-            if started_at is not None:
-                payload["started_at"] = started_at.isoformat() if hasattr(started_at, "isoformat") else started_at
-            if finished_at is not None:
-                payload["finished_at"] = finished_at.isoformat() if hasattr(finished_at, "isoformat") else finished_at
-            # 透传 extra 字段 (data_total / num_classes / class_names / 增量训练状态)
-            for _ek, _ev in (info or {}).items():
-                if _ek in ("data_total", "data_train", "data_val",
-                           "num_classes", "class_names",
-                           "pretrained_loaded", "pretrained_path",
-                           "pretrained_error", "model_name"):
-                    payload[_ek] = _ev
-
-            # ---- 方案 3: db_version 跳过推送 ----
-            # 优先用 db_version (粒度细, 由 DB 行直接算), 缓存命中且未变 → 跳过
-            # 异常路径 (snap=None) current_db_version=None, 强制走签名去重兜底
-            should_push = False
-            if current_db_version is not None:
-                if current_db_version != last_db_version:
-                    should_push = True
-                    last_db_version = current_db_version
-            else:
-                # 兜底: 旧签名去重 (state, progress, message, current_epoch, time)
-                signature = (
-                    state,
-                    round(progress, 1),
-                    message,
-                    current_epoch,
-                    str(started_at) if started_at is not None else None,
-                    str(finished_at) if finished_at is not None else None,
-                )
-                if signature != last_signature:
-                    should_push = True
-                    last_signature = signature
-
-            if should_push:
-                # SSE 字段: data= 一行 JSON, 后跟一个空行表示一帧结束
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                last_keepalive = loop.time()
-
-            # ---- 终端态: 推一帧 end 事件后退出 ----
-            if state in ("SUCCESS", "FAILURE", "REVOKED"):
-                # 显式 end 事件方便前端 await 收尾
-                try:
-                    yield f"event: end\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    pubsub.close()
                 except Exception:
                     pass
-                break
-
-            # ---- 长空闲期 keepalive (SSE 注释帧, 浏览器忽略, 防代理 60s 断) ----
-            now = loop.time()
-            if now - last_keepalive > SSE_KEEPALIVE_INTERVAL:
-                try:
-                    yield f": keepalive {int(now)}\n\n"
-                except Exception:
-                    break
-                last_keepalive = now
-
-            # ---- 方案 1: 状态自适应 sleep ----
-            # PENDING 状态 (worker 未启动) 5s, PROGRESS/PAUSED 1s
-            if state == "PENDING":
-                await asyncio.sleep(SSE_POLL_INTERVAL_PENDING)
-            else:
-                await asyncio.sleep(SSE_POLL_INTERVAL_PROGRESS)
 
     return StreamingResponse(
         event_generator(),

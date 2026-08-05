@@ -51,6 +51,8 @@ from app.tasks.service.training_lifecycle_service.state import (
     mark_failure_sync,
     mark_paused,
     mark_paused_sync,
+    mark_canceled,       # v3.5.0 新增
+    mark_canceled_sync,  # v3.5.0 新增
 )
 from app.tasks.service.training_lifecycle_service.model import (
     create_model_version,
@@ -80,7 +82,7 @@ class TrainingLifecycleService:
 
     **Phase S5 后**: 类本身只做方法挂载, 实际方法定义在 4 个子模块:
     - job    → create_or_reset_job / update_job_progress / push_history / persist_dataset_stats
-    - state  → mark_success / mark_failure / mark_paused
+    - state  → mark_success / mark_failure / mark_paused / mark_canceled (v3.5.0)
     - model  → create_model_version
     - celery → set_task_state / set_last_sticky_meta / get_last_sticky_meta
     """
@@ -94,13 +96,15 @@ class TrainingLifecycleService:
     persist_dataset_stats = staticmethod(persist_dataset_stats)
     persist_dataset_stats_sync = staticmethod(persist_dataset_stats_sync)
 
-    # ============== 2. 状态机 SUCCESS / FAILURE / PAUSED ==============
+    # ============== 2. 状态机 SUCCESS / FAILURE / PAUSED / CANCELED ==============
     mark_success = staticmethod(mark_success)
     mark_success_sync = staticmethod(mark_success_sync)
     mark_failure = staticmethod(mark_failure)
     mark_failure_sync = staticmethod(mark_failure_sync)
     mark_paused = staticmethod(mark_paused)
     mark_paused_sync = staticmethod(mark_paused_sync)
+    mark_canceled = staticmethod(mark_canceled)          # v3.5.0 新增
+    mark_canceled_sync = staticmethod(mark_canceled_sync) # v3.5.0 新增
 
     # ============== 3. ModelVersion 创建 ==============
     create_model_version = staticmethod(create_model_version)

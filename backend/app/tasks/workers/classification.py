@@ -64,6 +64,13 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     from app.tasks.ml.classification import run_training, TrainingPaused
     from app.tasks.service.training_data_service import TrainingDataService
     from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
+    # v3.5.0: 统一控制信号 (pause/cancel 区分)
+    from app.tasks.workers.control_signals import (
+        SignalAction,
+        TaskCanceled,
+        clear_all as clear_control_signals,
+        make_pause_check,
+    )
 
     task_id = self.request.id
     started_at = datetime.utcnow()
@@ -88,7 +95,15 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
 
     def progress_cb(p: float, msg: str, extra: dict = None):
-        """每 batch 进度回调"""
+        """每 batch 进度回调
+
+        v3.5.0 Phase T7 #6 优化: 移除 class_names 全量 push
+        原代码: extra 携带 class_names (50-200 项 List[str], 1-10 KB), 每 batch 进 sticky_meta
+        → SSE 客户端每 1s 1 帧 (PROGRESS) 全量重发 + Redis 缓存反复序列化
+        → 客户端 store 反复 reactive 触发
+        修复: class_names 是**慢变化数据**, 训练启动时一次性写 DB + 透传即可
+              progress_callback 阶段只传 num_classes (int, 几个字节)
+        """
         meta = {
             "progress": round(p, 2),
             "msg": msg,
@@ -97,50 +112,72 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         if sticky_meta:
             meta.update(sticky_meta)
         if extra:
-            meta.update(extra)
-            sticky_meta.update(extra)
+            # v3.5.0 Phase T7 #6: 过滤 class_names (初始化时已传, 训练中不再重发)
+            _extra = {k: v for k, v in extra.items() if k != "class_names"}
+            if _extra:
+                meta.update(_extra)
+                sticky_meta.update(_extra)
         TrainingLifecycleService.set_task_state(self, "PROGRESS", meta)
         # 持久化数据集统计到 DB
         if extra and "data_total" in extra and "num_classes" in extra:
             TrainingLifecycleService.persist_dataset_stats_sync(task_id, extra, job_id=job_id)
 
     def epoch_cb(p: float, msg: str, epoch_data: dict):
-        """每 epoch 结束回调"""
+        """每 epoch 结束回调
+
+        v3.5.0 Phase T7 #8 优化: 合并 DB write
+        - 原: set_task_state (写 log 行) + push_history (写 progress/history) = 2 次 commit / epoch
+        - 优: set_task_state 合并 commit (log + progress + current_epoch + history) = 1 次 commit,
+              push_history(commit_db=False) 仅 RPUSH 到 Redis
+        """
         history_buffer.append(epoch_data)
+        epoch_num = epoch_data.get("epoch")
         meta = {
             "progress": round(p, 2),
             "msg": msg,
             "total_epochs": total_epochs,
-            "epoch": epoch_data.get("epoch"),
-            "current_epoch": epoch_data.get("epoch"),
+            "epoch": epoch_num,
+            "current_epoch": epoch_num,
             "val_acc": epoch_data.get("val_acc"),
             "train_loss": epoch_data.get("train_loss"),
             "val_loss": epoch_data.get("val_loss"),
         }
         if sticky_meta:
             meta.update(sticky_meta)
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", meta)
-        # 推历史曲线
+        # v3.5.0 Phase T7 #8: 一次性 commit log + progress + current_epoch + history
+        TrainingLifecycleService.set_task_state(
+            self, "PROGRESS", meta,
+            commit_progress=p,
+            commit_message=msg,
+            commit_current_epoch=epoch_num,
+            commit_history=list(history_buffer),
+        )
+        # 推历史曲线 (RPUSH 到 Redis, commit_db=False 避免重复写 DB)
         TrainingLifecycleService.push_history(
             task_id, list(history_buffer),
             job_id=job_id,
             progress=p,
             message=msg,
-            current_epoch=epoch_data.get("epoch"),
+            current_epoch=epoch_num,
+            commit_db=False,  # Phase T7 #8: 已合并到 set_task_state
         )
 
-    def pause_check() -> bool:
-        """每个 epoch 起点检查 Redis 暂停标志"""
-        try:
-            return redis_client.get(f"train:pause:{task_id}") is not None
-        except Exception:
-            return False
+    # v3.5.0: 工厂方法生成 pause_check 回调 (避免内层函数捕获 task_id 变量)
+    # 必须先于 pause_check 定义 — Python 按定义顺序解析闭包
+    _pause_check_factory = make_pause_check(task_id)
 
-    # 启动时清掉旧暂停标志
-    try:
-        redis_client.delete(f"train:pause:{task_id}")
-    except Exception:
-        pass
+    def pause_check() -> SignalAction:
+        """每个 epoch 起点检查 Redis 暂停/取消信号 (v3.5.0 改: 返回 SignalAction)
+
+        走 control_signals.make_pause_check, 统一与 detection/segmentation 对齐.
+        - cancel 优先于 pause (cancel 标志存在 → 返回 CANCEL)
+        - 读 Redis 失败优雅降级为 CONTINUE (不阻塞训练)
+        """
+        return _pause_check_factory()
+
+    # 启动时清掉历史 pause/cancel 残留 (避免上次异常退出时残留的信号误触发)
+    # 注: clear_all 内部已 try/except, 失败不抛
+    clear_control_signals(task_id)
 
     try:
         # v3.0.0 Phase 5: 注入 TrainingDataService 解耦 ML ↔ DB
@@ -218,6 +255,35 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
         )
         return {"status": "SUCCESS", "result": result, "job_id": job_id}
 
+    except TaskCanceled as tc:
+        # 用户主动取消 (v3.5.0 新增) — 委托 Service 写 CANCELED 状态
+        # 区别于 TrainingPaused: CANCELED 是终态, 不可"继续", 用户必须"再训练"
+        try:
+            redis_client.delete(f"train:cancel:{task_id}")
+        except Exception:
+            pass
+        TrainingLifecycleService.mark_canceled_sync(
+            job_id=job_id,
+            started_at=started_at,
+            epoch=tc.epoch,
+            total_epochs=tc.total_epochs,
+            history_buffer=history_buffer,
+            model_name=model_name,
+            reason=getattr(tc, "reason", "user_cancel"),
+        )
+        # 走 update_state(REVOKED) 让 Celery 端状态正确
+        # v3.5.0: 显式带 exc_type, 避免 Celery _store_result 抛 "Exception information
+        # must include the exception type" 异常 (整个 worker 退出)
+        TrainingLifecycleService.set_task_state(self, "REVOKED", {
+            "progress": round(tc.epoch / max(tc.total_epochs, 1) * 100, 2),
+            "msg": f"Canceled at epoch {tc.epoch}/{tc.total_epochs} ({getattr(tc, 'reason', 'user_cancel')})",
+            "epoch": tc.epoch,
+            "total_epochs": tc.total_epochs,
+            "job_id": job_id,
+            "exc_type": "TaskCanceled",
+        })
+        return None
+
     except TrainingPaused as tp:
         # 用户主动暂停 (委托 Service, 包含清理半成品 ModelVersion + .pth)
         try:
@@ -233,12 +299,15 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             model_name=model_name,
         )
         # 走 update_state(REVOKED) 让 Celery 端状态正确
+        # v3.5.0: 显式带 exc_type, 避免 Celery _store_result 抛 "Exception information
+        # must include the exception type" 异常 (整个 worker 退出)
         TrainingLifecycleService.set_task_state(self, "REVOKED", {
             "progress": round(tp.epoch / max(tp.total_epochs, 1) * 100, 2),
             "msg": f"Paused at epoch {tp.epoch}/{tp.total_epochs}",
             "epoch": tp.epoch,
             "total_epochs": tp.total_epochs,
             "job_id": job_id,
+            "exc_type": "TrainingPaused",
         })
         return None
 
@@ -256,7 +325,15 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             redis_client.setex(
                 f"train:error:{task_id}",
                 86400,
-                json.dumps({"error": str(e)[:500], "progress": 0.0, "status": "FAILURE"}),
+                json.dumps({
+                    "error": str(e)[:500],
+                    "progress": 0.0,
+                    "status": "FAILURE",
+                    # v3.5.0: 显式带 exc_type/exc_message, 与 Celery meta 字段对齐
+                    # 便于前端 / 错误 API 读取时不需要靠 error 字符串反推
+                    "exc_type": type(e).__name__,
+                    "exc_message": str(e)[:200],
+                }),
             )
         except Exception:
             pass

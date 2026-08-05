@@ -168,6 +168,7 @@ def push_history(
     progress: Optional[float] = None,
     message: Optional[str] = None,
     current_epoch: Optional[int] = None,
+    commit_db: bool = True,
 ) -> None:
     """训练历史曲线写入 Redis + DB
 
@@ -179,6 +180,12 @@ def push_history(
     旧实现每 epoch 都 json.dumps 整个 history_buffer (随 epoch 增长线性变大).
     新实现只 RPUSH 最新 epoch 的 JSON, O(1) per epoch.
     读取端 (history.py) 用 LRANGE 0 -1 + 逐元素 json.loads 聚合.
+
+    v3.5.0 Phase T7 #8: 合并 DB write
+    - 传 commit_db=False 时, 跳过 update_job_progress_sync (DB 写)
+      适用于 epoch_cb 场景: set_task_state 已合并写 (log + progress + current_epoch + history),
+      push_history 只负责 RPUSH 到 Redis
+    - 默认 commit_db=True 保持向后兼容 (旧调用方 / 外部脚本不受影响)
 
     兼容旧 worker 调用方式 (仅 task_id + history_buffer).
     """
@@ -194,8 +201,8 @@ def push_history(
         except Exception as e:
             logger.warning("push_history redis failed for %s: %s", task_id, e)
 
-    # ---- 2) DB (job_id 存在时) ----
-    if job_id is not None:
+    # ---- 2) DB (job_id 存在时, Phase T7 #8: 可跳过) ----
+    if commit_db and job_id is not None:
         update_job_progress_sync(
             job_id=job_id,
             progress=progress or 0.0,
@@ -203,6 +210,13 @@ def push_history(
             current_epoch=current_epoch,
             history=history_buffer,
         )
+    # v3.5.0 Phase T7 方案 C: 写完 history 后 publish, 通知 SSE 端点立即推送
+    # 这样 epoch 结束的曲线数据会立即出现在前端, 而不是等 1s 兜底
+    try:
+        from app.tasks.service.training_lifecycle_service.celery import publish_job_update
+        publish_job_update(task_id)
+    except Exception:
+        pass
 
 
 # ============== 4. sticky_meta 持久化 (数据集统计) ==============

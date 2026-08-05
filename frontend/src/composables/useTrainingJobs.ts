@@ -68,12 +68,13 @@ export function useTrainingJobs() {
   let keywordDebounceTimer: any = null
 
   // ============== 工具: canXxx 状态判定 ==============
+  // v3.5.0: 增加 CANCELED 终态 — 用户主动取消的任务可"再训练"/删除, 但不可"继续"
   const canStart = (s: string) =>
-    s === 'PENDING' || s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED'
+    s === 'PENDING' || s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED' || s === 'CANCELED'
   const canPause = (s: string) => s === 'PENDING' || s === 'PROGRESS'
   const canCancel = (s: string) => s === 'PENDING' || s === 'PROGRESS'
   const canDelete = (s: string) =>
-    s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED'
+    s === 'SUCCESS' || s === 'FAILURE' || s === 'REVOKED' || s === 'PAUSED' || s === 'CANCELED'
 
   // ============== 加载 ==============
   const loadJobs = async () => {

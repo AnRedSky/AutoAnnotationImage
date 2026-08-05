@@ -457,6 +457,15 @@ async def start_existing_training_job(
             message=f"Only PAUSED job can be resumed; current state is {job.state}",
         )
 
+    # v3.3.4 (P0-2): 权限校验 — 检查用户对原 job 关联数据集的写权限
+    # 防止越权: 用户 A 拿到一个别人创建的 job_id, 即可重跑/继续训练
+    from app.tasks.model.dataset import Dataset
+    from app.tasks.service.permission_service import assert_can_access_dataset
+    orig_dataset = await db.get(Dataset, job.dataset_id)
+    if not orig_dataset:
+        raise HTTPException(404, f"原任务关联的数据集 (id={job.dataset_id}) 不存在")
+    await assert_can_access_dataset(db, current_user, orig_dataset, require_write=True)
+
     # ---- 计算最终训练参数 (旧 job 字段为基底, payload 覆盖) ----
     overrides = payload.model_dump(exclude_unset=True) if payload else {}
 
@@ -481,6 +490,15 @@ async def start_existing_training_job(
         final_batch_size = overrides.get("batch_size", job.batch_size)
         final_learning_rate = overrides.get("learning_rate", job.learning_rate)
         final_task_type = (job.task_type or "classification").lower()
+        # v3.3.4 (P0-2 增强): 如果 payload 覆盖了 dataset_id, 需校验新 dataset 写权限
+        # 防止越权: 用户对原 job 所属 dataset 有权限, 但绕过写权限写到他人 dataset
+        if final_dataset_id != job.dataset_id:
+            from app.tasks.model.dataset import Dataset as _DS
+            from app.tasks.service.permission_service import assert_can_access_dataset as _assert
+            new_dataset = await db.get(_DS, final_dataset_id)
+            if not new_dataset:
+                raise HTTPException(404, f"payload 指定的数据集 (id={final_dataset_id}) 不存在")
+            await _assert(db, current_user, new_dataset, require_write=True)
         # model_name: 强制使用 `{base_model}_r_{ts}` 规则 (忽略 payload 的 model_name)
         # v3.0.0 重构: 不再复用 payload 里的 model_name, 一律重置为
         #   `{base_model}_r_{10位秒级ts}`

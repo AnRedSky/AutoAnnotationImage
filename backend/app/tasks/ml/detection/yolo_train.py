@@ -23,10 +23,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+# v3.5.0: 训练控制信号 (pause/cancel 区分)
+# 顶层 import 以确保类型注解 + 异常类在 _on_epoch_end 回调里可用
+from app.tasks.workers.control_signals import SignalAction, TaskCanceled  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
 ProgressCallback = Optional[Callable[[str, int, int, Dict[str, Any]], None]]
+# v3.5.0: pause_check 返回 SignalAction 枚举, 与 classification 对齐
+PauseCheckCallback = Optional[Callable[[], SignalAction]]
 
 
 class YoloTrainError(RuntimeError):
@@ -46,6 +52,7 @@ def train_yolo(
     project: Optional[str] = None,
     name: str = "detect_train",
     progress_cb: ProgressCallback = None,
+    pause_check: PauseCheckCallback = None,
 ) -> Dict[str, Any]:
     """
     同步训练 YOLOv8 (在 Celery worker 线程池中调用, 不阻塞 event loop)
@@ -60,6 +67,11 @@ def train_yolo(
         project: ultralytics 训练产物根目录
         name: 训练任务名 (run 名)
         progress_cb: 进度回调
+        pause_check (v3.5.0): 暂停/取消检查回调, 返回 SignalAction 枚举
+            - SignalAction.PAUSE:  抛 TrainingPaused (worker 写 PAUSED)
+            - SignalAction.CANCEL: 抛 TaskCanceled (worker 写 CANCELED)
+            检查点: 每个 epoch 结束 (on_train_epoch_end 回调里)
+            双重保险: trainer.stop = True + 抛异常 (兼容不同 ultralytics 版本)
 
     Returns:
         dict {
@@ -103,27 +115,52 @@ def train_yolo(
             f"ultralytics 未安装: {e}. 请运行 'pip install ultralytics'"
         ) from e
 
+    # v3.5.0 Phase T7 #3 优化: 合并双重重载
+    # 原代码先 YOLO(model_name) 一次, 接着若命中本地缓存又 YOLO(candidate) 一次
+    # 第一次加载直接被丢弃, 浪费 5-50 MB 权重 mmap + 解析
+    # 修复: 先解析最终 weights 路径, 再 YOLO(weights_path) 仅 1 次
+    if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
+        # 防御性兜底 - 如果 model_name 是裸名 (如 "yolov8n") 且 weights_dir
+        # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
+        # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.tasks.ml.ultralytics_setup.
+        from app.core.config import settings
+        candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"
+        if candidate.exists():
+            model_name = str(candidate)  # 直接复用为最终路径, 避免第二次 YOLO()
+
     try:
         model = YOLO(model_name)
     except Exception as e:
         raise YoloTrainError(f"加载预训练权重失败 ({model_name}): {e}") from e
 
-    # ---- v2.5.29: 防御性兜底 - 如果 model_name 是裸名 (如 "yolov8n") 且 weights_dir
-    # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
-    # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.tasks.ml.ultralytics_setup.
-    if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
-        from app.core.config import settings
-        candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"
-        if candidate.exists():
-            try:
-                model = YOLO(str(candidate))
-            except Exception:
-                # 回退原版, 不阻塞训练
-                pass
-
     # 训练回调: ultralytics 提供 add_callback('on_train_epoch_end', fn)
     def _on_epoch_end(trainer):
         epoch = trainer.epoch + 1  # 0-based → 1-based
+
+        # v3.5.0: 暂停/取消检查 (epoch 起点, 在 progress_cb 之前)
+        # 双重保险: trainer.stop = True 让 ultralytics 优雅停止 + 抛异常让外层 except 捕获
+        if pause_check is not None:
+            try:
+                action = pause_check()
+            except Exception as e:
+                # pause_check 自身异常不应阻塞训练, 仅记日志
+                logger.warning(f"yolo pause_check 调用异常: {e!r}, 视为 CONTINUE")
+                action = SignalAction.CONTINUE
+            if action == SignalAction.CANCEL:
+                try:
+                    trainer.stop = True  # ultralytics 内置优雅停止
+                except Exception:
+                    pass
+                raise TaskCanceled(epoch=epoch, total_epochs=epochs)
+            if action == SignalAction.PAUSE:
+                try:
+                    trainer.stop = True
+                except Exception:
+                    pass
+                # 注: TrainingPaused 在 workers/detection/train.py 内导入, 这里延迟到 callback
+                from app.tasks.ml.classification import TrainingPaused
+                raise TrainingPaused(epoch=epoch, total_epochs=epochs)
+
         # trainer.tloss 在新版 ultralytics 中是 tensor (非 list), 不能直接用于布尔判断
         tloss = getattr(trainer, "tloss", None)
         tloss_len = len(tloss) if tloss is not None else 0

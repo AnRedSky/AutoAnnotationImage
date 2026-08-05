@@ -8,6 +8,7 @@ app.tasks.ml.classification 转为兼容垫片 (re-export).
 """
 import os
 import platform
+import functools
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any
 import timm
@@ -24,10 +25,45 @@ from app.core.config import settings
 # v3.0.0: 设备信息采集已抽离到共享模块, 供 classification/detection/segmentation 复用
 from app.tasks.ml.device_info import collect_device_info, select_device  # noqa: F401
 
+# v3.5.0: 引入统一的训练控制信号 (SignalAction 枚举 + TaskCanceled 异常)
+# 注: 此处反向引用 workers 包是为了获取 SignalAction 类型, 因为 ML 层是底层, workers 是上层
+# 实际运行时不会循环引用 (control_signals.py 不依赖 ml 包)
+from app.tasks.workers.control_signals import SignalAction, TaskCanceled  # noqa: E402
+
 # v3.0.0: 不合格虚拟类别常量 + 软门禁阈值 (与 app.common.enums.UNQUALIFIED_LABEL 同义)
 UNQUALIFIED_LABEL = "__unqualified__"
 # 召回率阈值: 低于此值说明模型漏检不合格样本严重, 警告用户
 UNQUALIFIED_RECALL_THRESHOLD = 0.5
+
+
+# ============== v3.5.0 Phase T7 #5: timm base model LRU 缓存 ==============
+# 训练时反复调用 timm.create_model (同 base_model, 同 num_classes) 会重复下载/解压权重.
+# 用 functools.lru_cache 缓存模型实例, 二次进入仅 ~ms 级.
+#
+# maxsize=2 限制:
+# - 同一 worker 进程通常同时只跑一个训练任务, 但 user 可能换 base_model 重训
+# - 2 个 slot 足够覆盖 "上一个 + 当前" 场景, 避免 OOM (timm base model 通常 100-500MB)
+# - 缓存 key = (name, num_classes) — num_classes 变化 (新数据集) 视为新模型
+_BASE_MODEL_CACHE_MAXSIZE = 2
+
+
+@functools.lru_cache(maxsize=_BASE_MODEL_CACHE_MAXSIZE)
+def _create_base_model_cached(name: str, num_classes: int) -> "nn.Module":
+    """LRU 缓存的 timm.create_model (v3.5.0 Phase T7 #5)
+
+    Args:
+        name: timm 模型名, 例如 "resnet50" / "efficientnet_b0"
+        num_classes: 输出类别数 (含背景/不合格虚拟类)
+
+    Returns:
+        timm 创建的 nn.Module (权重已下载/加载)
+
+    收益:
+    - 第一次: timm.create_model 下载/解压权重 (~3-10s)
+    - 第二次同 (name, num_classes): 命中缓存, ~ms 级
+    - 训练反复启动 (增量训练 / 重跑) 场景节省 ~3-10s
+    """
+    return timm.create_model(name, pretrained=True, num_classes=num_classes)
 
 
 class ImageClassificationDataset(Dataset):
@@ -68,7 +104,7 @@ def run_training(
     epoch_callback: Optional[Callable] = None,
     early_stop_patience: int = 10,
     warmup_epochs: int = 1,
-    pause_check: Optional[Callable[[], bool]] = None,
+    pause_check: Optional[Callable[[], SignalAction]] = None,
     pretrained_model_path: Optional[str] = None,
     data_loader: Optional[Callable[[int], Dict]] = None,
     model_saver: Optional[Callable[..., int]] = None,
@@ -84,8 +120,10 @@ def run_training(
                 "epoch": int, "train_loss": float, "val_loss": float,
                 "train_acc": float, "val_acc": float
             }
-        pause_check() -> bool: 每个 epoch 起点回调. 返回 True 表示用户请求暂停,
-            run_training 立即抛 TrainingPaused, 由调用方 (Celery task) 写 PAUSED 状态.
+        pause_check() -> SignalAction: 每个 epoch 起点回调. 返回值:
+            - SignalAction.CONTINUE: 继续训练
+            - SignalAction.PAUSE:    用户请求暂停 → 抛 TrainingPaused
+            - SignalAction.CANCEL:   用户请求取消 → 抛 TaskCanceled
             检查粒度为 epoch 级, 不在 batch 中间停 (避免打断 dataloader 迭代器).
         pretrained_model_path: 增量训练 (再训练) 模式时, 传入已有 .pth 路径
             - None (默认): 从 timm ImageNet 预训练权重开始 (从头微调)
@@ -212,7 +250,8 @@ def run_training(
     # - 增量训练 (pretrained_model_path 非空): 先创建 timm 模型骨架 (num_classes=新类数),
     #   再加载 .pth 的 state_dict (strict=False 允许 final layer 形状不匹配)
     # - 从头训练 (默认): timm.create_model 加载 ImageNet 预训练权重 + num_classes=新类数
-    model = timm.create_model(base_model, pretrained=(not pretrained_model_path), num_classes=num_classes)
+    # v3.5.0 Phase T7 #5: 走进程级 LRU cache, 同 (name, num_classes) 二次进入零 mmap
+    model = _create_base_model_cached(base_model, num_classes)
     if pretrained_model_path:
         pth = Path(pretrained_model_path)
         if pth.exists():
@@ -257,9 +296,14 @@ def run_training(
     actual_epochs = 0  # v3.0.0: 实际执行的 epoch 数 (早停时 < epochs)
 
     for epoch in range(epochs):
-        # ---- 暂停检查: 每个 epoch 起点 (避免打断 DataLoader 迭代器) ----
-        if pause_check and pause_check():
-            raise TrainingPaused(epoch=epoch + 1, total_epochs=epochs)
+        # ---- 暂停/取消检查: 每个 epoch 起点 (避免打断 DataLoader 迭代器) ----
+        # v3.5.0: pause_check 返回 SignalAction 枚举, 区分 pause 与 cancel
+        if pause_check is not None:
+            action = pause_check()
+            if action == SignalAction.CANCEL:
+                raise TaskCanceled(epoch=epoch + 1, total_epochs=epochs)
+            if action == SignalAction.PAUSE:
+                raise TrainingPaused(epoch=epoch + 1, total_epochs=epochs)
 
         # ---- Warmup: 线性增加 LR ----
         if epoch < warmup_epochs:
