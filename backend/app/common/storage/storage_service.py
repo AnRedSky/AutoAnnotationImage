@@ -9,7 +9,7 @@ Storage Service: Local Filesystem (开发) / MinIO (生产) 统一接口
 import hashlib
 import os
 from pathlib import Path
-from typing import BinaryIO, Union
+from typing import AsyncIterator, BinaryIO, Union
 
 import aiofiles
 import aiofiles.os
@@ -62,6 +62,23 @@ class StorageService:
         full = self._full_path(key)
         async with aiofiles.open(full, "rb") as f:
             return await f.read()
+
+    async def load_stream(self, key: str, chunk_size: int = 1 << 20) -> AsyncIterator[bytes]:
+        """流式下载文件, 默认 1MB chunks.
+
+        v3.6.0 P3: 默认实现是按 load() 一次性返回后, 假装分块.
+        大多数 backend (local / MinIO) 应重写本方法实现真流式, 避免大对象
+        (如 50MB 训练图片) 一次性驻留内存. 调用方通常用法:
+
+            async for chunk in storage_service.load_stream(key):
+                await f.write(chunk)
+
+        Args:
+            key: 存储 key
+            chunk_size: 每个 chunk 字节数, 默认 1MB. backend 可在实现中尊重或忽略.
+        """
+        # 默认实现: 走 load() 一次性返回, 单 chunk 形态. 子类重写可降低内存峰值.
+        yield await self.load(key)
 
     async def delete(self, key: str) -> None:
         """删除文件 (v3.0.0 改用 aiofiles.os)"""

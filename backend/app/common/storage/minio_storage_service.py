@@ -6,7 +6,7 @@ MinIO Storage Service (v3.3.0)
 
 设计:
   - 继承 StorageService 复用 compute_hash / generate_key (backend-agnostic)
-  - 重写 save / save_stream / load / delete / exists 用 minio SDK
+  - 重写 save / save_stream / load / load_stream / delete / exists 用 minio SDK
   - 用 asyncio.to_thread 包装同步 SDK 调用 (minio 7.x 是同步的)
   - 启动时 _ensure_bucket() 幂等创建 bucket
   - _base_dir 留 None, _full_path 抛 NotImplementedError (MinIO 没有路径概念)
@@ -23,7 +23,7 @@ import asyncio
 import io
 import logging
 from pathlib import Path
-from typing import BinaryIO, Union
+from typing import AsyncIterator, BinaryIO, Union
 
 from minio import Minio
 from minio.error import S3Error
@@ -32,6 +32,22 @@ from app.common.storage.storage_service import StorageService
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _resp_close(resp) -> None:
+    """v3.6.0 P3: 关闭 + 释放 MinIO 响应连接 (load_stream 用).
+
+    拆成独立函数方便 asyncio.to_thread 调用. close() 可能抛 S3Error
+    (例: 连接中断), 但 release_conn() 必须保证执行, 故分别 try.
+    """
+    try:
+        resp.close()
+    except Exception:
+        pass
+    try:
+        resp.release_conn()
+    except Exception:
+        pass
 
 
 class MinioStorageService(StorageService):
@@ -115,6 +131,36 @@ class MinioStorageService(StorageService):
             if e.code in ("NoSuchKey", "NoSuchObject"):
                 raise FileNotFoundError(f"MinIO object not found: {key}") from e
             raise
+
+    async def load_stream(
+        self,
+        key: str,
+        chunk_size: int = 1 << 20,
+    ) -> AsyncIterator[bytes]:
+        """v3.6.0 P3: 真流式下载 MinIO 对象, 1MB chunk.
+
+        旧版 load() 一次性 read() 全量, 50MB 训练图内存峰值 50MB.
+        流式版每块 1MB, 内存峰值 = 1 chunk = 1MB (240 图并发时峰值 = chunk × concurrency).
+
+        注:
+        - minio SDK 的 resp.read(n) 是阻塞 IO, 必须在 to_thread 里调
+        - resp.close() / release_conn() 也要在 to_thread 里调, 否则阻塞 event loop
+        - 异常处理: S3Error 由 close() 包装, 一律在 finally 里 release_conn
+        - 调用方: `async for chunk in storage_service.load_stream(key)` 即可
+        """
+        def _open():
+            return self._client.get_object(self._bucket, key)
+
+        resp = await asyncio.to_thread(_open)
+        try:
+            while True:
+                chunk = await asyncio.to_thread(resp.read, chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            # close + release_conn 均在 to_thread, 不阻塞 event loop
+            await asyncio.to_thread(_resp_close, resp)
 
     async def delete(self, key: str) -> None:
         """幂等删除."""
