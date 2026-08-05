@@ -274,18 +274,20 @@ if not member.can_manage():
 
 ## 九、提交记录
 
-(待 P2 提交后补全)
-
 ```
-[待提交] fix(permission): v3.3.4 权限角色审查整改
-  - P0-1: admin 跨团队数据穿透修复
-  - P0-2: start_existing_training_job 权限校验
-  - P0-3: change_user_role token 吊销
-  - P1-4: list_team_activities admin 旁路收紧
-  - P1-5: _assert_can_manage owner 伪造修复
+f985bb6 fix(permission): v3.3.4 权限角色审查整改 (P0/P1 越权风险修复)
+  - P0-1: admin 跨团队数据穿透修复 (permission_service.py)
+  - P0-2: start_existing_training_job 权限校验 (training/start.py)
+  - P0-3: change_user_role token 吊销 (admin/api/user.py)
+  - P1-4: list_team_activities admin 旁路收紧 (admin/api/team.py)
+  - P1-5: _assert_can_manage owner 伪造修复 (admin/api/team.py)
   - 新增 14 项权限测试 (test_permission_v334_audit.py)
   - 新增 3 项 token 吊销测试 (test_permission_v334_token_revocation.py)
   - 修改 test_team_l4_audit F04 测试, 改用 super_admin 验证
+  - 新增权限审查报告 (docs/task-summaries/008-task-summary.md)
+
+统计: 7 files changed, 1166 insertions(+), 32 deletions(-)
+未推送至远程: git push 待用户确认
 ```
 
 ---
@@ -302,4 +304,4 @@ if not member.can_manage():
 - [x] 文档归档 (本报告)
 - [x] 所有修改后端测试通过 (127 项相关测试)
 - [x] 风险评估与残留项记录
-- [ ] 代码提交 (待用户确认)
+- [x] 代码提交 (f985bb6, 待用户确认推送)
