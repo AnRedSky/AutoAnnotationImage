@@ -375,6 +375,94 @@ python start_api.py --reload
 python start_workers.py
 ```
 
+#### 步骤 2.5：GPU 训练环境（可选）
+
+> v3.3.3 起 `pyproject.toml` 已通过 `[tool.uv.sources]` 把 `torch` / `torchvision`
+> 指向 PyTorch 官方 `cu121` 索引，默认 `uv sync` 即装 CUDA 版。如果你的机器
+> 没有 NVIDIA GPU 或需要回退到 CPU，可参考下方命令。
+
+**前置检查**
+
+```powershell
+# 1) 确认有 NVIDIA 显卡 + 驱动版本 ≥ 530（支持 CUDA 12.x）
+nvidia-smi
+
+# 2) 确认 venv 是 Python 3.10 / 3.11（cu121 官方 wheel 仅发到 cp310/cp311）
+cd backend
+uv run python -V
+# Python 3.11.x   ← 正确
+# Python 3.12.x   ← 需要重新创建 venv: uv venv --python 3.11
+```
+
+**装 / 验证 CUDA 版 PyTorch**
+
+```powershell
+cd backend
+
+# 默认 uv sync 已经拉 cu121 wheel，无需额外操作
+uv sync
+
+# 验证 torch.cuda.is_available() == True
+uv run python -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.cuda.is_available()); print('device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+
+# 期望输出:
+# torch: 2.2.0+cu121
+# cuda: True
+# device: NVIDIA GeForce RTX 4060 ...    ← 你的 GPU 型号
+```
+
+**GPU 冒烟测试**
+
+```powershell
+uv run python -c "import torch; x=torch.randn(2048,2048,device='cuda'); y=x@x; print('GPU compute OK, mean=', y.mean().item())"
+
+# 跑项目里现有的 GPU 标记测试
+uv run pytest -m gpu -v
+```
+
+**回退到 CPU-only（无 GPU 机器）**
+
+```powershell
+# 方式 1：临时（不写入 pyproject.toml / uv.lock）
+uv pip install --index-url https://download.pytorch.org/whl/cpu `
+    torch==2.2.0 torchvision==0.17.0
+
+# 方式 2：永久（编辑 pyproject.toml 把 [tool.uv.sources] 段删掉 / 注释掉，
+# 然后 uv lock + uv sync；这样会让所有协作者也都走 CPU 版，慎用）
+```
+
+**Docker 镜像的 GPU 支持（可选）**
+
+默认 Dockerfile 用 `python:3.10-slim` 跑 CPU 推理，训练 worker 容器化后
+可改为 NVIDIA 官方 base 镜像以利用 host GPU：
+
+```dockerfile
+# Dockerfile.worker 第 19 行替换
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04 AS base
+# 然后用 uv 安装 Python 3.10 / 3.11（cu121 官方 wheel 覆盖范围）
+# 注意: docker-compose.yml 中对应服务需要配置 deploy.resources.reservations.devices
+```
+
+docker-compose 片段示例：
+
+```yaml
+worker-train:
+  build:
+    context: ./backend
+    dockerfile: Dockerfile.worker
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+```
+
+> ⚠️ **版本一致性提醒**: cu121 wheel 仅发布到 cp310/cp311。如果哪天 PyTorch
+> 升级到 2.3+，需要把 `[tool.uv.index]` 的 URL 同步改为 `cu124` 或 `cu126`，
+> 否则 `uv lock` 会失败。
+
 #### 步骤 3：启动前端
 
 ```bash
