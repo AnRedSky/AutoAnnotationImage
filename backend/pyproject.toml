@@ -142,6 +142,7 @@ markers = [
     "slow: 慢测试 (大模型/大数据集, 默认跳过)",
     "gpu: 需要 CUDA 设备",
     "eager: Celery eager 模式 worker 测试",
+    "perf: 性能基准测试 (默认 opt-out, 跑法: pytest -m perf)",
 ]
 addopts = [
     "-ra",
