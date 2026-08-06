@@ -54,10 +54,22 @@ async def create_or_reset_job(
     3) Worker 重投递 (崩溃恢复):
        - existing.message != 预创建文案 → 标 "Re-running"
 
+    v3.6.1 PATCH: IntegrityError 重试 (race condition 兜底)
+    - 场景: API 层 mode=resume 时先 UPDATE 旧 job 的 celery_task_id 为新 task_id
+      再 apply_async, 但 API commit 与 worker poll 启动可能并发:
+      * 路径 A (常见): API commit 在 worker 第一次 SELECT 之前 → worker 找到 existing → UPDATE ✅
+      * 路径 B (罕见, race): worker 第一次 SELECT 早于 API commit → worker 找不到 → 走 INSERT
+        → 但 API commit 在 worker INSERT 之前完成 → INSERT 撞 unique key
+    - 修复: INSERT 失败时 catch IntegrityError (1062 Duplicate entry on celery_task_id),
+      重新查询并走 UPDATE 路径. 一次重试, 仍失败则抛 (留给上层日志).
+    - 这与现有查询 → INSERT 逻辑的语义等价: 无论谁先写, 终态是
+      "DB 中只有 1 行 celery_task_id == task_id, 状态 = PROGRESS".
+
     Returns:
         TrainingJob.id
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from app.database import AsyncSessionLocal
     from app.tasks.model.training_job import TrainingJob
 
@@ -107,7 +119,71 @@ async def create_or_reset_job(
             started_at=started_at,
         )
         db.add(job)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as e:
+            # v3.6.1 PATCH: race condition 兜底
+            # 场景: API 层 resume 模式刚 commit 同一 task_id 的 UPDATE 旧 job
+            #       → worker 第一次 SELECT 没看到, 走 INSERT, 撞 unique key
+            # 处理: 回滚当前 INSERT, 重新查询 (这次 API 一定已经 commit), 走 UPDATE 路径
+            #
+            # 错误消息识别 (跨 DB 兼容):
+            #   MySQL:    (pymysql.err.IntegrityError) (1062, "Duplicate entry 'xxx' for key
+            #             'training_jobs.ix_training_jobs_celery_task_id'")
+            #   SQLite:   UNIQUE constraint failed: training_jobs.celery_task_id
+            # 两者都含 "celery_task_id" + 唯一冲突关键字 ("duplicate" / "unique"),
+            # 用这 2 个特征可跨 DB 识别. 不会误判外键 (FOREIGN KEY) 等其它 IntegrityError.
+            await db.rollback()
+            error_msg = str(e).lower()
+            is_dup_celery_task_id = (
+                "celery_task_id" in error_msg
+                and (
+                    "duplicate" in error_msg  # MySQL
+                    or "unique constraint" in error_msg  # SQLite / PostgreSQL
+                )
+            )
+            if not is_dup_celery_task_id:
+                # 其它完整性错误 (如外键) 不是 race, 直接抛
+                raise
+            logger.warning(
+                "[job] race detected: celery_task_id=%s already exists, "
+                "falling back to UPDATE existing (API resume path)",
+                task_id,
+            )
+            # 重新查询 (API 端 UPDATE 已 commit, 这次一定能找到)
+            existing = (await db.execute(
+                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+            )).scalar_one_or_none()
+            if existing is None:
+                # 极端情况: 两次操作之间行被删了, 抛原始错误
+                logger.error(
+                    "[job] race retry: celery_task_id=%s not found after rollback, "
+                    "re-raising original IntegrityError",
+                    task_id,
+                )
+                raise
+            # 走 UPDATE 路径, 复用上面的 reset 逻辑 (inlined 避免双层嵌套)
+            is_api_precreated = existing.message in (
+                "等待 worker 启动...",
+                "任务已入队, 等待 worker 启动...",
+            )
+            existing.state = "PROGRESS"
+            existing.progress = 0.0
+            existing.error = None
+            if not is_api_precreated:
+                existing.message = "Re-running (worker restart recovery)"
+            existing.started_at = started_at
+            existing.finished_at = None
+            existing.duration_seconds = None
+            existing.task_type = task_type
+            existing.data_total = None
+            existing.data_train = None
+            existing.data_val = None
+            existing.num_classes = None
+            existing.class_names = None
+            await db.commit()
+            await db.refresh(existing)
+            return existing.id
         await db.refresh(job)
         return job.id
 
