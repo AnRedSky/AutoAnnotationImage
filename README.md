@@ -811,6 +811,51 @@ CACHE_ENABLED=true
 CACHE_DEFAULT_TTL=300
 ```
 
+#### 9.5.1 v3.6.0 训练性能调优（核心 P0）
+
+[v3.6.0 训练性能优化](.trae/documents/plan-c-train-perf-v3.6.0.md) 将 240 样本 1 epoch 训练从 60-64s 降至 < 10s（6-10× 加速），关键配置项：
+
+```bash
+# backend/.env 训练性能调优 (v3.6.0)
+# -------------------------------------------------
+# DataLoader 工作进程数 (GPU 训练推荐 2-4, CPU 训练保持 0)
+# 0 = 主进程串行加载 (CPU 默认, 零回归)
+# >0 = 多进程并行加载 + pin_memory (GPU 推荐 4)
+DATALOADER_WORKERS=4
+
+# MinIO 训练样本预下载并发数 (信号量限流, 避免打爆 MinIO)
+# 1 = 走旧版串行 (零回归, debug 模式)
+# 2-10 = 并发 (GPU 训练推荐 10)
+# >20 可能触发 MinIO 限流
+MINIO_DOWNLOAD_CONCURRENCY=10
+
+# 训练图像预解码 LRU 缓存大小 (worker 进程级 lru_cache)
+# 总内存 = workers × size × per_image
+# 128 张 224×224×3×4B ≈ 75 MB / worker
+# 大图场景 (1920×1080) 建议调小到 32 防止内存爆
+TRAIN_DECODE_CACHE_SIZE=128
+```
+
+**调优 Checklist**:
+
+- [ ] GPU 环境: `DATALOADER_WORKERS=4` + `MINIO_DOWNLOAD_CONCURRENCY=10`
+- [ ] CPU 环境: `DATALOADER_WORKERS=0` (避免多进程开销, 保持串行)
+- [ ] MinIO 大文件 (>10 MB): `TRAIN_DECODE_CACHE_SIZE=32` (防内存爆)
+- [ ] 跑 `pytest -m perf tests/benchmarks/` 验证加速比例
+
+**性能基准测试**:
+
+```bash
+# 跑性能基准 (默认 opt-out, 单独跑)
+cd backend
+uv run pytest tests/benchmarks/test_train_perf_benchmark.py -v -s -m perf
+
+# 跑 240 样本 5 epochs 总耗时 < 60s (CPU 放宽至 120s)
+# 跑 1 epoch < 10s (CPU 放宽至 30s)
+```
+
+详细性能数据见 [013-train-perf-bench-report.md](docs/task-summaries/013-train-perf-bench-report.md)。
+
 ### 9.6 升级
 
 ```bash
