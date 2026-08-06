@@ -217,7 +217,11 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             pretrained_model_path=pretrained_model_path,
             # v3.6.3: 断点续训起始 epoch (0-based), 与 pretrained_model_path 配套
             # resume 时模型从 checkpoint 加载, 然后从 start_epoch 处继续训练
-            resume_from_epoch=resume_from_epoch,
+            # v3.6.3.1 HOTFIX: 之前写错为 resume_from_epoch=..., run_training 实际签名是 start_epoch=
+            #   → TypeError: run_training() got an unexpected keyword argument 'resume_from_epoch'
+            #   → 与 segmentation/detection worker 对齐: worker 入参 resume_from_epoch (业务语义)
+            #     透传到 ML 层时改名为 start_epoch (ML 层语义)
+            start_epoch=resume_from_epoch,
             data_loader=TrainingDataService.load_classification_samples_sync,
             model_saver=TrainingDataService.save_classification_model_version_sync,
         )
