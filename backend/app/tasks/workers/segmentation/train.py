@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from app.tasks.workers.celery_app import celery_app
 from app.utils.async_helpers import run_async_in_worker as _run_async
@@ -61,12 +62,18 @@ def train_segmentation_task(
     learning_rate: float = 1e-4,
     device: str = "cpu",
     pretrained_model_path: Optional[str] = None,
+    resume_from_epoch: int = 0,
 ):
     """启动分割训练 (DeepLabV3+, Phase 5: 编排下沉到 TrainingLifecycleService)
 
     v3.6.2: 新增 pretrained_model_path 参数, 断点续训用
     - None: 走 torchvision DeepLabV3 预训练骨干 + 随机初始化分类器头
     - 已存在路径: 加载 .pt 的 state_dict (strict=False 允许 num_classes 变化)
+
+    v3.6.3: 新增 resume_from_epoch 参数 (断点续训用, 跳过前 N 个 epoch)
+    - 0 (默认): 全新训练
+    - >0:       断点续训, 从该 epoch (0-based) 开始
+    - 配套: pretrained_model_path 需非空 (否则无 checkpoint 可用)
     """
     from app.tasks.ml.segmentation.seg_dataset import collect_segmentation_dataset_meta
     from app.tasks.ml.segmentation.seg_train import train_segmentation
@@ -218,6 +225,10 @@ def train_segmentation_task(
             pause_check=_pause_check_factory,
             # v3.6.2: 断点续训 — 加载 .pt 的 state_dict (strict=False 允许 num_classes 变化)
             pretrained_model_path=pretrained_model_path,
+            # v3.6.3: 断点续训起始 epoch (0-based), 跳过前 N 个 epoch
+            # 与 pretrained_model_path 配套使用: resume 时模型从 checkpoint 加载
+            # 然后从 start_epoch 处继续训练
+            start_epoch=resume_from_epoch,
         )
     except TaskCanceled as tc:
         # v3.5.0: 用户主动取消 (TaskCanceled 异常来自 train_segmentation 的 pause_check 回调)

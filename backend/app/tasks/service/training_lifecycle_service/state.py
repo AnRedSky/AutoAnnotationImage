@@ -202,23 +202,21 @@ async def mark_paused(
     except Exception as e:
         logger.warning("mark_paused cleanup ModelVersion failed: %s", e)
 
-    # ---- 2) 删磁盘 .pth ----
-    # v3.6.2 修复: 旧版路径用 settings.MODEL_DIR / f"{model_name}_best.pth"
-    #   (路径错, 真实落盘点是 settings.CLASSIFICATION_MODEL_DIR, 实际从未删成功)
-    # 新版: 按 task_type 解析正确路径, 与 worker 末尾 model_saver 写入路径一致
-    # 实际作用: 用户点 "再训练" 时, 旧 model 的 .pth 会被清理, 避免堆积
-    # 注: segmentation / detection 的 .pt 不在此处删 (它们走自己的 run 目录, 不会被复用)
+    # ---- 2) 不删磁盘 .pth ----
+    # v3.6.3 修复: 旧版 (v3.6.2 之前) 用错路径 (settings.MODEL_DIR), 实际从未删成功
+    # v3.6.2 修正路径后, classification 的 .pth 真的被删了 → resume 找不到 checkpoint
+    # 反而比 v3.6.1 更糟 (v3.6.1 路径错 = .pth 保留 = resume 实际能跑; v3.6.2 路径对 = .pth 删了 = resume 必败)
+    # v3.6.3 正确策略: mark_paused **不删任何 .pth**, 保留所有 checkpoint 供 resume 使用
+    #   - classification: {model_name}_best.pth → resume 必需, 删了 = 从头训练
+    #   - segmentation:  {model_name}.pt      → resume 必需, 删了 = 从头训练
+    #   - detection:     YOLO last.pt         → resume 必需, 删了 = 从头训练
+    # 旧 .pth 堆积问题: 走 mode=restart 时 model_name 带 _r_{ts} 后缀, 不冲突
+    #                  用户主动"再训练" → 新 model_name 自然覆盖/补充
+    # 这里不删, 等于 v3.6.2 之前的隐式行为 (路径错 = 没删成), 但**显式记录**避免后续误改
     try:
-        async with AsyncSessionLocal() as _db:
-            _job_for_pause = await _db.get(TrainingJob, job_id)
-            _tt = _job_for_pause.task_type if _job_for_pause else None
-        if _tt == "classification":
-            pth_path = settings.CLASSIFICATION_MODEL_DIR / f"{model_name}_best.pth"
-            if pth_path.exists():
-                pth_path.unlink()
-        # segmentation / detection 不在此处清理 (路径含 task_id / 走 run 目录)
-    except Exception as e:
-        logger.warning("mark_paused delete .pth failed: %s", e)
+        pass  # v3.6.3: no-op, 保留所有 checkpoint 供 resume
+    except Exception:
+        pass  # placeholder, 保持 try/except 结构兼容
 
     # ---- 3) 写 DB PAUSED ----
     try:

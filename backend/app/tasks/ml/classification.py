@@ -153,6 +153,7 @@ def run_training(
     warmup_epochs: int = 1,
     pause_check: Optional[Callable[[], SignalAction]] = None,
     pretrained_model_path: Optional[str] = None,
+    start_epoch: int = 0,
     data_loader: Optional[Callable[[int], Dict]] = None,
     model_saver: Optional[Callable[..., int]] = None,
 ) -> Dict:
@@ -176,6 +177,13 @@ def run_training(
             - None (默认): 从 timm ImageNet 预训练权重开始 (从头微调)
             - 已有路径: 加载该 .pth 的 state_dict 作为模型起点 (增量训练, fine-tune 旧模型)
             - 详见 _load_model_state 方法
+        start_epoch (v3.6.3): 断点续训起始 epoch (0-based)
+            - 0 (默认): 全新训练, 从 epoch 0 开始
+            - >0:       断点续训, 跳过前 start_epoch 个 epoch
+                       假设当前 epoch=5 时用户暂停 → 实际已完成 epoch 0,1,2,3,4
+                       → resume 时 start_epoch=5, 直接进入 epoch 5
+            - 进度计算: (epoch+1) / total_epochs * 100, 正确反映"已完成的 epoch 数 / 总数"
+            - 配套: pretrained_model_path 需非空 (否则没有 checkpoint 可用, 走随机初始化 = 从头训练)
         data_loader: 可选, 训练数据加载回调 (v3.0.0 Phase 5 新增)
             - 签名: (dataset_id: int) -> Dict[samples, label_name_to_idx, num_classes, ...]
             - 默认: 内部 DB IO (向后兼容, 走 ORM 模型层)
@@ -349,14 +357,27 @@ def run_training(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(epochs - warmup_epochs, 1))
 
     # 训练循环
+    # v3.6.3: 断点续训支持 — start_epoch 参数 (0-based, 跳过前 start_epoch 个 epoch)
+    # 例: 暂停时 epoch=5 (1-based) → mark_paused 保存 progress=25% (5/20)
+    #   → resume 时 start_epoch=5, 直接从 epoch 5 开始 (跳过 epoch 0-4)
+    #   进度计算: (epoch+1) / total_epochs * 100 (保持 0-100% 正确反映已完成 epoch)
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     best_acc = 0.0
     best_state = None
     no_improve_count = 0  # 早停计数器
     early_stopped = False  # v3.0.0: 早停触发标志, 写回 result + sticky_meta 通知前端
     actual_epochs = 0  # v3.0.0: 实际执行的 epoch 数 (早停时 < epochs)
+    # 边界保护: start_epoch 限制在 [0, epochs-1] 范围内
+    # 例: epochs=20 时 start_epoch 范围 [0, 19], 防止超过 19 时 range(start, 20) 为空
+    start_epoch = max(0, min(int(start_epoch), epochs - 1)) if epochs > 0 else 0
+    if start_epoch > 0:
+        import logging as _cls_log
+        _cls_log.getLogger(__name__).info(
+            f"v3.6.3: classification 断点续训, 跳过前 {start_epoch} 个 epoch, "
+            f"从 epoch {start_epoch+1}/{epochs} 开始 (使用 checkpoint: {pretrained_model_path})"
+        )
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         # ---- 暂停/取消检查: 每个 epoch 起点 (避免打断 DataLoader 迭代器) ----
         # v3.5.0: pause_check 返回 SignalAction 枚举, 区分 pause 与 cancel
         if pause_check is not None:
@@ -366,7 +387,9 @@ def run_training(
             if action == SignalAction.PAUSE:
                 raise TrainingPaused(epoch=epoch + 1, total_epochs=epochs)
 
-        # ---- Warmup: 线性增加 LR ----
+        # ---- Warmup: 线性增加 LR (跳过已完成的 epoch) ----
+        # v3.6.3: warmup 仅对 start_epoch 之前的 epoch 生效
+        # 例: warmup=1, start_epoch=5 → 当前 epoch 5 已超出 warmup, 走 cosine schedule
         if epoch < warmup_epochs:
             warmup_lr = lr * (epoch + 1) / warmup_epochs
             for pg in optimizer.param_groups:
@@ -396,11 +419,13 @@ def run_training(
             t_correct_t += pred.eq(labels).sum()
 
             # v3.6.0 P2: 进度回调按 batch 数动态调整粒度
-            # 小数据集 (6 batch) 每 batch 回调, 大数据集 (1000+ batch) 每 50 batch
-            # 旧版硬编码 100 batch, 240 样本训练 12 batch 一次都不回调 → 用户感觉"卡住"
+            # v3.6.3: 进度计算已包含 start_epoch 偏移 (epoch 是绝对值, total_epochs 不变)
             _cb_interval = max(1, total_batches // 50) if total_batches > 0 else 1
             if progress_callback and batch_idx % _cb_interval == 0:
-                p = (epoch * total_batches + batch_idx) / (epochs * total_batches) * 100
+                # v3.6.3: 进度 = 已完成 batch 数 / 总 batch 数
+                # epoch 1-based (epoch+1) 表示"当前 epoch 已开始", 加 batch_idx/total_batches 表示
+                # 当前 epoch 内的子进度. 总进度反映"整个训练已完成的 batch 数"
+                p = ((epoch * total_batches) + batch_idx) / (epochs * total_batches) * 100
                 progress_callback(
                     p, f"Epoch {epoch+1}/{epochs} batch {batch_idx}/{total_batches}"
                 )

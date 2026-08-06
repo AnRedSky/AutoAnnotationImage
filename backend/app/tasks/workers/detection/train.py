@@ -27,6 +27,7 @@ workers.detection.train 模块 — YOLOv8 训练任务
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from app.tasks.workers.celery_app import celery_app
 from app.utils.async_helpers import run_async_in_worker as _run_async
@@ -46,6 +47,7 @@ def train_detection_task(
     val_ratio: float = 0.2,
     device: str = "cpu",
     pretrained_model_path: Optional[str] = None,
+    resume_from_epoch: int = 0,
 ):
     """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)
 
@@ -53,6 +55,12 @@ def train_detection_task(
     - None: 走 ultralytics 内置预训练权重 (yolov8n.pt 等)
     - 已存在路径: 加载该 .pt 作为模型起点, train(resume=True) 续训
       (ultralytics 会同时恢复 optimizer / scheduler / epoch 计数)
+
+    v3.6.3: 新增 resume_from_epoch 参数 (断点续训用, 跳过前 N 个 epoch)
+    - 0 (默认): 全新训练
+    - >0:       断点续训, YOLO 走原生 resume=True 自动恢复 epoch
+                start_epoch 用于 progress_cb 偏移计算
+    - 配套: pretrained_model_path 需非空 (否则无 checkpoint 可用)
     """
     from app.tasks.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
     from app.tasks.ml.classification import TrainingPaused
@@ -199,6 +207,9 @@ def train_detection_task(
             # v3.6.2: 断点续训 — pretrained_model_path 非空时, ultralytics 用
             #   model.train(resume=True) 续训 (含 optimizer/scheduler/epoch 状态)
             pretrained_model_path=pretrained_model_path,
+            # v3.6.3: 断点续训起始 epoch (0-based), YOLO 自带 epoch 计数恢复
+            # 此参数主要用于 progress_cb 偏移计算
+            start_epoch=resume_from_epoch,
         )
 
         # ---- 5) 写 ModelVersion + TrainingJob SUCCESS (委托 Service) ----

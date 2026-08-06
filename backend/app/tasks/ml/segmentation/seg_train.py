@@ -105,6 +105,7 @@ def train_segmentation(
     progress_cb: ProgressCallback = None,
     pause_check: PauseCheckCallback = None,
     pretrained_model_path: Optional[str] = None,
+    start_epoch: int = 0,
 ) -> Dict[str, Any]:
     """
     训练分割模型, 返回 dict {
@@ -120,6 +121,12 @@ def train_segmentation(
             - SignalAction.PAUSE:    抛 TrainingPaused (worker 写 PAUSED)
             - SignalAction.CANCEL:   抛 TaskCanceled (worker 写 CANCELED)
             检查点: 每个 epoch 起点 (避免打断 DataLoader 迭代器)
+        start_epoch (v3.6.3): 断点续训起始 epoch (0-based)
+            - 0 (默认): 全新训练, 从 epoch 0 开始
+            - >0:       断点续训, 跳过前 start_epoch 个 epoch
+                       假设当前 epoch=5 时用户暂停 → 实际已完成 epoch 0,1,2,3,4
+                       → resume 时 start_epoch=5, 直接进入 epoch 5
+            - 配套: pretrained_model_path 需非空 (否则没有 checkpoint 可用, 走随机初始化 = 从头训练)
     """
     from .seg_dataset import SegmentationPairDataset
 
@@ -188,10 +195,23 @@ def train_segmentation(
     best_pix_acc = 0.0
     best_state: Optional[Dict[str, Any]] = None
 
+    # v3.6.3: 断点续训 — start_epoch 限制在 [0, epochs-1] 范围内
+    # 例: epochs=20 时 start_epoch 范围 [0, 19], 防止超过 19 时 range(start, 20) 为空
+    start_epoch = max(0, min(int(start_epoch), epochs - 1)) if epochs > 0 else 0
+    if start_epoch > 0:
+        import logging as _seg_log
+        _seg_log.getLogger(__name__).info(
+            f"v3.6.3: segmentation 断点续训, 跳过前 {start_epoch} 个 epoch, "
+            f"从 epoch {start_epoch+1}/{epochs} 开始 (使用 checkpoint: {pretrained_model_path})"
+        )
+
     if progress_cb:
         progress_cb("train.start", 0, epochs, f"backbone={backbone} n={len(ds)}")
 
-    for epoch in range(1, epochs + 1):
+    # v3.6.3: 断点续训 — epoch 循环从 start_epoch+1 开始 (1-based, 跳过前 start_epoch 个 epoch)
+    # 例: 暂停时 epoch=5 (1-based) → mark_paused 保存 progress=5/20
+    #   → resume 时 start_epoch=5, 直接从 epoch 5 开始 (跳过 epoch 0-4)
+    for epoch in range(start_epoch + 1, epochs + 1):
         # ---- 暂停/取消检查: 每个 epoch 起点 (避免打断 DataLoader 迭代器) ----
         # v3.5.0: pause_check 返回 SignalAction 枚举, 区分 pause 与 cancel
         if pause_check is not None:

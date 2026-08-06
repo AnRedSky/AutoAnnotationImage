@@ -52,7 +52,8 @@ migrate_legacy_yolo_weights()
 def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
                      user_id: int, epochs: int = 20, batch_size: int = 32,
                      learning_rate: float = 1e-4,
-                     pretrained_model_path: Optional[str] = None):
+                     pretrained_model_path: Optional[str] = None,
+                     resume_from_epoch: int = 0):
     """
     异步训练任务 (Phase 5: 委托 TrainingLifecycleService)
     - 加载已确认/修正的图片 + 标签
@@ -61,6 +62,11 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     - 实时更新 progress
     - 保存最佳模型 + 评估指标
     - 写入 TrainingJob 任务历史
+
+    v3.6.3: 新增 resume_from_epoch 参数 (断点续训用, 跳过前 N 个 epoch)
+    - 0 (默认): 全新训练
+    - >0:       断点续训, 从该 epoch (0-based) 开始
+    - 配套: pretrained_model_path 需非空 (否则无 checkpoint 可用)
     """
     from app.tasks.ml.classification import run_training, TrainingPaused
     from app.tasks.service.training_data_service import TrainingDataService
@@ -209,6 +215,9 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             early_stop_patience=settings.EARLY_STOP_PATIENCE,
             pause_check=pause_check,
             pretrained_model_path=pretrained_model_path,
+            # v3.6.3: 断点续训起始 epoch (0-based), 与 pretrained_model_path 配套
+            # resume 时模型从 checkpoint 加载, 然后从 start_epoch 处继续训练
+            resume_from_epoch=resume_from_epoch,
             data_loader=TrainingDataService.load_classification_samples_sync,
             model_saver=TrainingDataService.save_classification_model_version_sync,
         )

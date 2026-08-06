@@ -54,6 +54,7 @@ def train_yolo(
     progress_cb: ProgressCallback = None,
     pause_check: PauseCheckCallback = None,
     pretrained_model_path: Optional[str] = None,
+    start_epoch: int = 0,
 ) -> Dict[str, Any]:
     """
     同步训练 YOLOv8 (在 Celery worker 线程池中调用, 不阻塞 event loop)
@@ -77,6 +78,11 @@ def train_yolo(
             - None (默认): 用 model_name 指定的预训练权重 (e.g. yolov8n.pt)
             - 路径非空: 加载该 .pt, model.train(resume=True) 续训
               (ultralytics 同时恢复 optimizer / scheduler / epoch 计数)
+        start_epoch (v3.6.3): 断点续训起始 epoch (0-based)
+            - 0 (默认): 全新训练
+            - >0:       断点续训起点 (YOLO 走原生 resume=True 续训, 进度回调会加上此偏移)
+            - 配套: pretrained_model_path 需非空 (否则无 checkpoint 可用)
+            - 注: ultralytics 自带 epoch 计数恢复, start_epoch 主要用于 progress_cb 偏移
 
     Returns:
         dict {
@@ -111,6 +117,14 @@ def train_yolo(
     started = datetime.utcnow()
     run_dir = Path(project) / name
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # v3.6.3: start_epoch 边界保护, 限制在 [0, epochs-1] 范围内
+    start_epoch = max(0, min(int(start_epoch), epochs - 1)) if epochs > 0 else 0
+    if start_epoch > 0:
+        logger.info(
+            f"v3.6.3: YOLO 断点续训, 跳过前 {start_epoch} 个 epoch, "
+            f"从 epoch {start_epoch+1}/{epochs} 开始 (使用 checkpoint: {pretrained_model_path})"
+        )
 
     # ultralytics + torch 全部 lazy
     try:

@@ -227,6 +227,7 @@ def _build_task_kwargs(
     batch_size: int,
     learning_rate: float,
     pretrained_model_path: Optional[str] = None,
+    resume_from_epoch: int = 0,
 ) -> dict:
     """按 task_type 构建对应 Celery 任务的 kwargs.
 
@@ -237,6 +238,11 @@ def _build_task_kwargs(
     v3.6.2: detection/segmentation 也透传 pretrained_model_path (断点续训用)
     - detection 走 ultralytics 原生 resume=True (传入 last.pt)
     - segmentation 加载 .pt 的 state_dict (strict=False 允许 num_classes 变化)
+
+    v3.6.3: 新增 resume_from_epoch 参数 (断点续训用, 避免从 epoch 0 重跑)
+    - 0 (默认): 全新训练, 从 epoch 0 开始
+    - >0:       断点续训, 从该 epoch 开始 (并以此作为 progress 偏移基准)
+    - 透传给所有三种 task_type 的 worker, 由 ML 层决定如何处理
     """
     if task_type == "detection":
         return dict(
@@ -247,6 +253,7 @@ def _build_task_kwargs(
             epochs=epochs,
             batch=batch_size,
             pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+            resume_from_epoch=resume_from_epoch,
         )
     if task_type == "segmentation":
         return dict(
@@ -258,6 +265,7 @@ def _build_task_kwargs(
             batch_size=batch_size,
             learning_rate=learning_rate,
             pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+            resume_from_epoch=resume_from_epoch,
         )
     # classification (默认)
     return dict(
@@ -269,6 +277,7 @@ def _build_task_kwargs(
         batch_size=batch_size,
         learning_rate=learning_rate,
         pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
+        resume_from_epoch=resume_from_epoch,
     )
 
 
@@ -650,6 +659,24 @@ async def start_existing_training_job(
                             f"未找到断点 checkpoint (segmentation), 改为从头训练"
                         )
 
+    # ---- 计算 resume_from_epoch (v3.6.3) ----
+    # 仅 resume 模式需要: 从 PAUSED 状态保存的 progress 反推已完成的 epoch 数
+    # 关键: mark_paused 存的是 1-based epoch (tp.epoch=epoch+1), 例如 5 表示"第 5 个 epoch 开始时暂停"
+    # 含义: epoch 0..3 (0-based) 已完成, epoch 4 (0-based) 即将开始
+    #   → resume 时 start_epoch=4 (0-based), 重新跑 epoch 4 = 0-based 第 5 个 epoch
+    # 公式: resume_from_epoch (0-based) = round(progress/100 * total) - 1
+    # 边界: clamped 到 [0, total-1], 防止 0% 时算出 -1
+    # restart 模式: _resume_from_epoch = 0 (全新训练, 不需要续训)
+    if mode == "resume":
+        _saved_progress = float(job.progress or 0.0)
+        _total_epochs_calc = int(final_epochs or 1)
+        # 0-based epoch = 1-based epoch - 1
+        _resume_from_epoch = int(round(_saved_progress / 100.0 * _total_epochs_calc)) - 1
+        # 边界保护: [0, total_epochs-1]
+        _resume_from_epoch = max(0, min(_resume_from_epoch, _total_epochs_calc - 1))
+    else:
+        _resume_from_epoch = 0
+
     # ---- 预创建 TrainingJob 行 (mode=restart) ----
     new_job_id: int | None = None
     celery_task_id_to_use: str | None = None
@@ -689,6 +716,7 @@ async def start_existing_training_job(
             batch_size=final_batch_size,
             learning_rate=final_learning_rate,
             pretrained_model_path=pretrained_model_path,
+            resume_from_epoch=_resume_from_epoch,  # v3.6.3: 透传续训起点
         )
         if mode == "restart":
             task = _apply_training_task(final_task_type, apply_kwargs, task_id=celery_task_id_to_use)
@@ -706,10 +734,15 @@ async def start_existing_training_job(
             raise HTTPException(503, f"Celery broker unavailable: {err_msg}")
         raise HTTPException(500, f"Failed to submit training task: {err_msg}")
 
-    # resume 模式: 立刻把 DB 中的 job 状态从 PAUSED 改回 PENDING
+    # resume 模式: 把 DB 中的 job 状态从 PAUSED 改回 PENDING
+    # v3.6.3 修复: 旧版 job.progress = 0.0 会**清空**用户看到的进度 (e.g. 暂停时 25%, resume 后立刻变 0)
+    #   → 用户体感"进度被清空"
+    # 修复: 保留 PAUSED 时的 progress (mark_paused 时已正确保存 epoch/total_epochs*100)
+    #   → 用户看到"继续训练时进度还是 25%, 然后 worker 接着往上加"
     if mode == "resume":
         job.state = "PENDING"
-        job.progress = 0.0
+        # v3.6.3: 不再清空 progress, 保留 PAUSED 时的值
+        # job.progress 维持 mark_paused 设置的 epoch/total_epochs*100
         job.celery_task_id = task.id
         # started_at 保留 None, 由 worker 接手时填充
         # job.started_at 维持原值, 因为语义上是"任务整体首次开始"的时间
