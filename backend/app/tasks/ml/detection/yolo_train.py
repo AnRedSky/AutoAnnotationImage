@@ -53,6 +53,7 @@ def train_yolo(
     name: str = "detect_train",
     progress_cb: ProgressCallback = None,
     pause_check: PauseCheckCallback = None,
+    pretrained_model_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     同步训练 YOLOv8 (在 Celery worker 线程池中调用, 不阻塞 event loop)
@@ -72,6 +73,10 @@ def train_yolo(
             - SignalAction.CANCEL: 抛 TaskCanceled (worker 写 CANCELED)
             检查点: 每个 epoch 结束 (on_train_epoch_end 回调里)
             双重保险: trainer.stop = True + 抛异常 (兼容不同 ultralytics 版本)
+        pretrained_model_path (v3.6.2): 断点续训用, 指向已存在的 last.pt / best.pt
+            - None (默认): 用 model_name 指定的预训练权重 (e.g. yolov8n.pt)
+            - 路径非空: 加载该 .pt, model.train(resume=True) 续训
+              (ultralytics 同时恢复 optimizer / scheduler / epoch 计数)
 
     Returns:
         dict {
@@ -115,23 +120,35 @@ def train_yolo(
             f"ultralytics 未安装: {e}. 请运行 'pip install ultralytics'"
         ) from e
 
-    # v3.5.0 Phase T7 #3 优化: 合并双重重载
-    # 原代码先 YOLO(model_name) 一次, 接着若命中本地缓存又 YOLO(candidate) 一次
-    # 第一次加载直接被丢弃, 浪费 5-50 MB 权重 mmap + 解析
-    # 修复: 先解析最终 weights 路径, 再 YOLO(weights_path) 仅 1 次
-    if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
-        # 防御性兜底 - 如果 model_name 是裸名 (如 "yolov8n") 且 weights_dir
-        # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
-        # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.tasks.ml.ultralytics_setup.
-        from app.core.config import settings
-        candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"
-        if candidate.exists():
-            model_name = str(candidate)  # 直接复用为最终路径, 避免第二次 YOLO()
+    # v3.6.2: 断点续训模式判定
+    # pretrained_model_path 非空 + 文件存在 → 走 resume 路径
+    # 此时 model_name 被忽略, 用 checkpoint 路径替代
+    _is_resume = bool(pretrained_model_path) and Path(pretrained_model_path).exists()
+    if _is_resume:
+        weights_to_load = str(pretrained_model_path)
+        logger.info(
+            f"v3.6.2: YOLO 断点续训, 加载 {weights_to_load} "
+            f"(原 model_name={model_name} 被忽略)"
+        )
+    else:
+        # v3.5.0 Phase T7 #3 优化: 合并双重重载
+        # 原代码先 YOLO(model_name) 一次, 接着若命中本地缓存又 YOLO(candidate) 一次
+        # 第一次加载直接被丢弃, 浪费 5-50 MB 权重 mmap + 解析
+        # 修复: 先解析最终 weights 路径, 再 YOLO(weights_path) 仅 1 次
+        if not os.path.isabs(model_name) and not model_name.endswith((".pt", ".onnx", ".engine")):
+            # 防御性兜底 - 如果 model_name 是裸名 (如 "yolov8n") 且 weights_dir
+            # 路径下已有同名 .pt, 显式传绝对路径, 避免 ultralytics 在某些版本/配置下
+            # 把 .pt 重复下载到 cwd. 配置过的 workers 路径见 app.tasks.ml.ultralytics_setup.
+            from app.core.config import settings
+            candidate = settings.ULTRALYTICS_WEIGHTS_DIR / f"{model_name}.pt"
+            if candidate.exists():
+                model_name = str(candidate)  # 直接复用为最终路径, 避免第二次 YOLO()
+        weights_to_load = model_name
 
     try:
-        model = YOLO(model_name)
+        model = YOLO(weights_to_load)
     except Exception as e:
-        raise YoloTrainError(f"加载预训练权重失败 ({model_name}): {e}") from e
+        raise YoloTrainError(f"加载预训练权重失败 ({weights_to_load}): {e}") from e
 
     # 训练回调: ultralytics 提供 add_callback('on_train_epoch_end', fn)
     def _on_epoch_end(trainer):
@@ -188,7 +205,7 @@ def train_yolo(
 
     # 启动训练 (verbose=False 避免把 log 写满 celery worker stdout)
     try:
-        results = model.train(
+        _train_kwargs = dict(
             data=data_yaml,
             epochs=epochs,
             imgsz=imgsz,
@@ -202,6 +219,15 @@ def train_yolo(
             mosaic=0.0 if device == "cpu" else 1.0,
             amp=False if device == "cpu" else True,
         )
+        # v3.6.2: 断点续训用 ultralytics 原生 resume=True
+        # (ultralytics 会同时恢复 optimizer / scheduler / epoch 计数器)
+        if _is_resume:
+            _train_kwargs["resume"] = True
+            logger.info(
+                f"v3.6.2: YOLO 启动断点续训 (resume=True), "
+                f"weights={weights_to_load}, target_epochs={epochs}"
+            )
+        results = model.train(**_train_kwargs)
     except Exception as e:
         raise YoloTrainError(f"YOLO 训练失败: {e}") from e
 

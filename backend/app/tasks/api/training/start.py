@@ -234,8 +234,9 @@ def _build_task_kwargs(
     - detection:     ultralytics YOLO (model_name=权重名 yolov8n/..., model_alias=落盘名)
     - segmentation:   torchvision DeepLabV3+ (backbone=..., model_alias=落盘名)
 
-    detection/segmentation 的 task 签名不接受 pretrained_model_path
-    (YOLO 用 ultralytics 自带预训练权重, DeepLab 用 torchvision 预训练), 故忽略.
+    v3.6.2: detection/segmentation 也透传 pretrained_model_path (断点续训用)
+    - detection 走 ultralytics 原生 resume=True (传入 last.pt)
+    - segmentation 加载 .pt 的 state_dict (strict=False 允许 num_classes 变化)
     """
     if task_type == "detection":
         return dict(
@@ -245,6 +246,7 @@ def _build_task_kwargs(
             model_alias=model_name,  # 落盘 ModelVersion.name
             epochs=epochs,
             batch=batch_size,
+            pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
         )
     if task_type == "segmentation":
         return dict(
@@ -255,6 +257,7 @@ def _build_task_kwargs(
             epochs=epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
+            pretrained_model_path=pretrained_model_path if pretrained_model_path else None,
         )
     # classification (默认)
     return dict(
@@ -567,6 +570,85 @@ async def start_existing_training_job(
                 pretrained_source_mv_id = candidate_mv.id
             else:
                 pretrained_source_label += " [文件不存在, 改从头微调]"
+
+    elif mode == "resume":
+        # v3.6.2: 断点续训 — 按 task_type 解析上次保存的 checkpoint 路径
+        # 旧版缺陷: resume 模式 pretrained_model_path 永远是 None → 走 timm ImageNet 预训练
+        # 新版: 复用同 model_name (job.model_name) 在磁盘上找上次训练保留的 .pth/.pt
+        from app.core.config import settings as _settings_for_resume
+        _resume_name = job.model_name  # resume 模式 model_name 不变 (新_model_name = job.model_name)
+
+        if final_task_type == "classification":
+            # 路径: settings.CLASSIFICATION_MODEL_DIR / f"{model_name}_best.pth"
+            # 与 classification.py 训练中落盘路径完全一致 (v3.6.2 起每次 best_state 更新就 save)
+            _ckpt = _settings_for_resume.CLASSIFICATION_MODEL_DIR / f"{_resume_name}_best.pth"
+            if _ckpt.exists():
+                pretrained_model_path = str(_ckpt)
+                pretrained_source_label = (
+                    f"断点续训 checkpoint (classification, {_ckpt.name})"
+                )
+            else:
+                pretrained_source_label = (
+                    f"未找到断点 checkpoint ({_ckpt}), 改为从头微调"
+                )
+        elif final_task_type == "detection":
+            # YOLO: ultralytics 自动保存 weights/last.pt 和 best.pt
+            # resume 优先用 last.pt (含 optimizer/scheduler 状态, ultralytics 内部会处理)
+            _last_pt = (
+                _settings_for_resume.DETECTION_MODEL_DIR
+                / _resume_name / "weights" / "last.pt"
+            )
+            if _last_pt.exists():
+                pretrained_model_path = str(_last_pt)
+                pretrained_source_label = (
+                    f"断点续训 checkpoint (detection, last.pt)"
+                )
+            else:
+                # 兜底: 找 best.pt
+                _best_pt = (
+                    _settings_for_resume.DETECTION_MODEL_DIR
+                    / _resume_name / "weights" / "best.pt"
+                )
+                if _best_pt.exists():
+                    pretrained_model_path = str(_best_pt)
+                    pretrained_source_label = (
+                        f"断点续训 checkpoint (detection, best.pt, 无 last.pt)"
+                    )
+                else:
+                    pretrained_source_label = (
+                        f"未找到断点 checkpoint ({_last_pt}), 改为从头训练"
+                    )
+        elif final_task_type == "segmentation":
+            # v3.6.2: 文件名已改为 {model_alias}.pt (去 task_id 后缀)
+            # resume 模式 model_alias 不变, 直接按 model_name 找
+            _seg_pt = (
+                _settings_for_resume.SEGMENTATION_MODEL_DIR / f"{_resume_name}.pt"
+            )
+            if _seg_pt.exists():
+                pretrained_model_path = str(_seg_pt)
+                pretrained_source_label = (
+                    f"断点续训 checkpoint (segmentation, {_seg_pt.name})"
+                )
+            else:
+                # 兜底: 兼容 v3.6.2 之前用 {model_alias}_{task_id}.pt 命名的旧文件
+                # 找 SEGMENTATION_MODEL_DIR 下所有匹配 {model_name}_*.pt, 取最新
+                _seg_dir = _settings_for_resume.SEGMENTATION_MODEL_DIR
+                if _seg_dir.exists():
+                    _cands = sorted(
+                        _seg_dir.glob(f"{_resume_name}_*.pt"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if _cands:
+                        pretrained_model_path = str(_cands[0])
+                        pretrained_source_label = (
+                            f"断点续训 checkpoint (segmentation 旧命名, "
+                            f"{_cands[0].name})"
+                        )
+                    else:
+                        pretrained_source_label = (
+                            f"未找到断点 checkpoint (segmentation), 改为从头训练"
+                        )
 
     # ---- 预创建 TrainingJob 行 (mode=restart) ----
     new_job_id: int | None = None

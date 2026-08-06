@@ -104,6 +104,7 @@ def train_segmentation(
     device: str = "cpu",
     progress_cb: ProgressCallback = None,
     pause_check: PauseCheckCallback = None,
+    pretrained_model_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     训练分割模型, 返回 dict {
@@ -150,6 +151,33 @@ def train_segmentation(
     )
 
     model = _build_model(backbone, num_classes)
+    # v3.6.2: 断点续训 — 加载已有 .pt 的 state_dict (strict=False 允许 num_classes 变化)
+    if pretrained_model_path and Path(pretrained_model_path).exists():
+        try:
+            _ckpt_bytes = Path(pretrained_model_path).read_bytes()
+            _ckpt_buf = io.BytesIO(_ckpt_bytes)
+            _state_dict = torch.load(_ckpt_buf, map_location=device, weights_only=True)
+            _missing, _unexpected = model.load_state_dict(_state_dict, strict=False)
+            import logging as _seg_log
+            _seg_log.getLogger(__name__).info(
+                f"v3.6.2: segmentation 断点续训, 加载 {pretrained_model_path} "
+                f"(missing={len(_missing)}, unexpected={len(_unexpected)})"
+            )
+            if progress_cb:
+                try:
+                    progress_cb(
+                        "train.start", 0, epochs,
+                        f"断点续训: 加载 {Path(pretrained_model_path).name} "
+                        f"(missing={len(_missing)}, unexpected={len(_unexpected)})",
+                    )
+                except TypeError:
+                    pass
+        except Exception as _load_exc:
+            import logging as _seg_log
+            _seg_log.getLogger(__name__).warning(
+                f"v3.6.2: segmentation 断点续训失败 ({pretrained_model_path}): {_load_exc!r}, "
+                f"改为随机初始化"
+            )
     model.to(device)
     model.train()
 
@@ -210,6 +238,21 @@ def train_segmentation(
             buf = io.BytesIO()
             torch.save(model.state_dict(), buf)
             best_state = buf.getvalue()
+            # v3.6.2: 同步落盘到 settings.SEGMENTATION_MODEL_DIR / f"{model_alias}.pt"
+            # (v3.6.2 改动: 文件名去掉 task_id 后缀, 与 start.py resume 解析保持一致)
+            # 旧版: 只在 worker 末尾 (segmentation/train.py:277) 写一次
+            # 新版: 每次 mIoU 提升就 save, pause 时 .pt 已是最新最佳
+            try:
+                import logging as _logging
+                from app.core.config import settings as _seg_settings
+                _ckpt_path = _seg_settings.SEGMENTATION_MODEL_DIR / f"{model_alias}.pt"
+                _ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                _ckpt_path.write_bytes(best_state)
+            except Exception as _save_exc:
+                _logging.getLogger(__name__).warning(
+                    f"v3.6.2: segmentation 训练中 best_state 落盘失败 "
+                    f"(epoch={epoch}, miou={miou:.4f}): {_save_exc!r}"
+                )
 
         if progress_cb:
             # v2.5.27: 第 5 参数 metrics 是结构化指标 dict, 用于 SSE 透传 + history 累积

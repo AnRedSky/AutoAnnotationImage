@@ -45,8 +45,15 @@ def train_detection_task(
     batch: int = 8,
     val_ratio: float = 0.2,
     device: str = "cpu",
+    pretrained_model_path: Optional[str] = None,
 ):
-    """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)"""
+    """异步 YOLOv8 训练 (Phase 5: 编排下沉到 TrainingLifecycleService)
+
+    v3.6.2: 新增 pretrained_model_path 参数, 断点续训用
+    - None: 走 ultralytics 内置预训练权重 (yolov8n.pt 等)
+    - 已存在路径: 加载该 .pt 作为模型起点, train(resume=True) 续训
+      (ultralytics 会同时恢复 optimizer / scheduler / epoch 计数)
+    """
     from app.tasks.ml.detection import export_yolo_dataset, train_yolo, YoloTrainError
     from app.tasks.ml.classification import TrainingPaused
     from app.tasks.service.training_lifecycle_service import TrainingLifecycleService
@@ -189,6 +196,9 @@ def train_detection_task(
             # v3.5.0: 注入 pause_check 回调, 让 train_yolo 每个 epoch 结束检查
             # 暂停/取消信号 (SignalAction 枚举)
             pause_check=_pause_check_factory,
+            # v3.6.2: 断点续训 — pretrained_model_path 非空时, ultralytics 用
+            #   model.train(resume=True) 续训 (含 optimizer/scheduler/epoch 状态)
+            pretrained_model_path=pretrained_model_path,
         )
 
         # ---- 5) 写 ModelVersion + TrainingJob SUCCESS (委托 Service) ----

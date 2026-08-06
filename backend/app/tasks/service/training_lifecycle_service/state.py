@@ -203,12 +203,22 @@ async def mark_paused(
         logger.warning("mark_paused cleanup ModelVersion failed: %s", e)
 
     # ---- 2) 删磁盘 .pth ----
-    pth_path = settings.MODEL_DIR / f"{model_name}_best.pth"
-    if pth_path.exists():
-        try:
-            pth_path.unlink()
-        except OSError as e:
-            logger.warning("mark_paused delete .pth failed: %s", e)
+    # v3.6.2 修复: 旧版路径用 settings.MODEL_DIR / f"{model_name}_best.pth"
+    #   (路径错, 真实落盘点是 settings.CLASSIFICATION_MODEL_DIR, 实际从未删成功)
+    # 新版: 按 task_type 解析正确路径, 与 worker 末尾 model_saver 写入路径一致
+    # 实际作用: 用户点 "再训练" 时, 旧 model 的 .pth 会被清理, 避免堆积
+    # 注: segmentation / detection 的 .pt 不在此处删 (它们走自己的 run 目录, 不会被复用)
+    try:
+        async with AsyncSessionLocal() as _db:
+            _job_for_pause = await _db.get(TrainingJob, job_id)
+            _tt = _job_for_pause.task_type if _job_for_pause else None
+        if _tt == "classification":
+            pth_path = settings.CLASSIFICATION_MODEL_DIR / f"{model_name}_best.pth"
+            if pth_path.exists():
+                pth_path.unlink()
+        # segmentation / detection 不在此处清理 (路径含 task_id / 走 run 目录)
+    except Exception as e:
+        logger.warning("mark_paused delete .pth failed: %s", e)
 
     # ---- 3) 写 DB PAUSED ----
     try:

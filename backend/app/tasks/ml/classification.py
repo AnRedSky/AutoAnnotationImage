@@ -450,6 +450,22 @@ def run_training(
             best_acc = epoch_v_acc
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve_count = 0
+            # v3.6.2: 立即落盘 best_state (供 pause/resume 断点续训)
+            # 旧版: 只在训练结束才 torch.save, pause 时 .pth 根本不在盘上
+            # 新版: 每次 val_acc 提升就 save, pause 时 .pth 已是最新最佳
+            # 注意: 这里的 model_path 路径在函数末尾定义, 用字符串拼接提前构造
+            # 避免 forward reference, 也与函数末尾最终路径保持一致
+            try:
+                _ckpt_path = settings.CLASSIFICATION_MODEL_DIR / f"{model_name}_best.pth"
+                _ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(best_state, _ckpt_path)
+            except Exception as _save_exc:
+                # checkpoint 落盘失败不应阻塞训练 (仅记 warning)
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    f"v3.6.2: 训练中 best_state 落盘失败 (epoch={epoch+1}, "
+                    f"val_acc={epoch_v_acc:.4f}): {_save_exc!r}"
+                )
         else:
             no_improve_count += 1
 

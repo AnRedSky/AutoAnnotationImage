@@ -60,8 +60,14 @@ def train_segmentation_task(
     crop_size: int = 256,
     learning_rate: float = 1e-4,
     device: str = "cpu",
+    pretrained_model_path: Optional[str] = None,
 ):
-    """启动分割训练 (DeepLabV3+, Phase 5: 编排下沉到 TrainingLifecycleService)"""
+    """启动分割训练 (DeepLabV3+, Phase 5: 编排下沉到 TrainingLifecycleService)
+
+    v3.6.2: 新增 pretrained_model_path 参数, 断点续训用
+    - None: 走 torchvision DeepLabV3 预训练骨干 + 随机初始化分类器头
+    - 已存在路径: 加载 .pt 的 state_dict (strict=False 允许 num_classes 变化)
+    """
     from app.tasks.ml.segmentation.seg_dataset import collect_segmentation_dataset_meta
     from app.tasks.ml.segmentation.seg_train import train_segmentation
     from app.tasks.ml.classification import TrainingPaused
@@ -210,6 +216,8 @@ def train_segmentation_task(
             # v3.5.0: 注入 pause_check 回调, 让 train_segmentation 每个 epoch 起点
             # 检查暂停/取消信号 (SignalAction 枚举)
             pause_check=_pause_check_factory,
+            # v3.6.2: 断点续训 — 加载 .pt 的 state_dict (strict=False 允许 num_classes 变化)
+            pretrained_model_path=pretrained_model_path,
         )
     except TaskCanceled as tc:
         # v3.5.0: 用户主动取消 (TaskCanceled 异常来自 train_segmentation 的 pause_check 回调)
@@ -273,9 +281,13 @@ def train_segmentation_task(
     # ---- 5) 落盘 ModelVersion + TrainingJob SUCCESS (委托 Service) ----
     # v3.3.0: 落点从 settings.MODEL_DIR/seg_runs 改到 settings.SEGMENTATION_MODEL_DIR,
     #         与 classification/detection 三个 task_type 平级, 都在 MODEL_DIR 下一级子目录.
+    # v3.6.2: 文件名去掉 task_id 后缀 (旧版 `{model_alias}_{task_id}.pt`)
+    #         原因: pause/resume 时 celery_task_id 会变, 按 model_alias 找旧 checkpoint 找不回来
+    #         新版 `{model_alias}.pt` + seg_train.py 训练中也按此路径落盘,
+    #         保证 resume 时同 model_alias 一定命中.
     weights_dir = settings.SEGMENTATION_MODEL_DIR
     weights_dir.mkdir(parents=True, exist_ok=True)
-    weights_path = weights_dir / f"{model_alias}_{task_id}.pt"
+    weights_path = weights_dir / f"{model_alias}.pt"
     if result.get("state_dict_bytes"):
         weights_path.write_bytes(result["state_dict_bytes"])
 
