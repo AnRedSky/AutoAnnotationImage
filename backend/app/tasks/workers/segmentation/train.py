@@ -219,12 +219,14 @@ def train_segmentation_task(
         TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
 
         # 数据集就绪推送 + 写库
+        # v3.6.8 HOTFIX: 透传 commit_message, 让 SSE 详情页立刻看到"数据集就绪" 而非卡在"等待 worker 启动"
+        seg_ready_msg = f"数据集就绪: train={n_train} val={n_val} num_classes={num_classes}"
         TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": 0.0,
-            "msg": f"数据集就绪: train={n_train} val={n_val} num_classes={num_classes}",
+            "msg": seg_ready_msg,
             "total_epochs": epochs,
             **sticky_meta,
-        })
+        }, commit_message=seg_ready_msg)
         TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta, job_id=job_id)
 
         result = train_segmentation(

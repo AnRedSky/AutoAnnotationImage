@@ -130,7 +130,10 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
             if _extra:
                 meta.update(_extra)
                 sticky_meta.update(_extra)
-        TrainingLifecycleService.set_task_state(self, "PROGRESS", meta)
+        # v3.6.8 HOTFIX: 透传 msg 到 DB message 字段, 解决 "等待启动" 卡死
+        # 配合 celery.py 的 _should_commit_message 智能去重, 1000 calls/epoch
+        # 触发 ~20-50 DB writes/epoch (msg 变化或 progress ≥ 1%)
+        TrainingLifecycleService.set_task_state(self, "PROGRESS", meta, commit_message=msg)
         # 持久化数据集统计到 DB (仅当 class_names 变化时才写)
         if extra and "data_total" in extra and "num_classes" in extra:
             _class_names = extra.get("class_names") or []
@@ -416,7 +419,9 @@ def auto_annotate_task(self, dataset_id: int, model_name: str,
             category_names=category_names,
             async_mode=False,  # worker 内部已经异步, 不需要再起任务
             progress_cb=lambda p, msg, **kw: TrainingLifecycleService.set_task_state(
-                self, "PROGRESS", {"progress": p, "msg": msg, **kw}
+                self, "PROGRESS", {"progress": p, "msg": msg, **kw},
+                # v3.6.8 HOTFIX: 透传 commit_message (与 progress_cb 修复对齐)
+                commit_message=msg,
             ),
         )
         return {"status": "SUCCESS", **result.to_dict()}

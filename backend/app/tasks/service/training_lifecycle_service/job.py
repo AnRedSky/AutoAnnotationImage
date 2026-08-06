@@ -52,7 +52,7 @@ async def create_or_reset_job(
     2) Worker 主动创建 (罕见, 兜底):
        - INSERT 新行
     3) Worker 重投递 (崩溃恢复):
-       - existing.message != 预创建文案 → 标 "Re-running"
+       - existing.message != 预创建文案 → v3.6.8 起改为 None (worker 首次 set_task_state 写入真实进度)
 
     v3.6.1 PATCH: IntegrityError 重试 (race condition 兜底)
     - 场景: API 层 mode=resume 时先 UPDATE 旧 job 的 celery_task_id 为新 task_id
@@ -88,7 +88,10 @@ async def create_or_reset_job(
             existing.progress = 0.0
             existing.error = None
             if not is_api_precreated:
-                existing.message = "Re-running (worker restart recovery)"
+                # v3.6.8 HOTFIX: 不再写 "Re-running" 误导文案
+                # 改为 None, 让 worker 首次 set_task_state 写入真实进度
+                # 配合 job_state_service.py 的 _STALE_DB_MESSAGES 降级, 详情页 SSE 实时可见
+                existing.message = None
             existing.started_at = started_at
             existing.finished_at = None
             existing.duration_seconds = None
@@ -171,7 +174,10 @@ async def create_or_reset_job(
             existing.progress = 0.0
             existing.error = None
             if not is_api_precreated:
-                existing.message = "Re-running (worker restart recovery)"
+                # v3.6.8 HOTFIX: 不再写 "Re-running" 误导文案
+                # 改为 None, 让 worker 首次 set_task_state 写入真实进度
+                # 配合 job_state_service.py 的 _STALE_DB_MESSAGES 降级, 详情页 SSE 实时可见
+                existing.message = None
             existing.started_at = started_at
             existing.finished_at = None
             existing.duration_seconds = None

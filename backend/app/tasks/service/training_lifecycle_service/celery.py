@@ -77,6 +77,60 @@ _LOG_MAX_LINES = 200      # 与 TrainingJob.LOG_MAX_LINES 一致 (这里硬编�
 _LAST_LOG_SIG: Dict[str, tuple] = {}
 
 
+# ============== v3.6.8 HOTFIX: DB message 字段智能去重 ==============
+# 背景: progress_cb 每 batch 调一次 set_task_state (1000 calls/epoch), 全部传 commit_message 会
+#       把 DB UPDATE 频率拉到 1000+/epoch, 性能灾难.
+# 解决: 增加二级去重缓存, 只有"msg 变化 / progress 1% / 5s 兜底 / 终态" 才真写 DB.
+#       与 _LAST_LOG_SIG 平级, 独立 key 空间, 职责正交 (log 行 vs message 字段).
+_LAST_COMMIT_MSG_SIG: Dict[str, tuple] = {}  # task_id -> (msg, progress, ts)
+
+# 终态关键字 (触发强制 commit, 防止终态文案被 dedup 吃掉)
+# 包含中英文: 兼容多语言 worker 日志
+_TERMINAL_MSG_KEYWORDS = (
+    "Training completed", "Canceled at", "Paused at",
+    "训练完成", "已取消", "已暂停",
+)
+
+
+def _should_commit_message(
+    task_id: Optional[str],
+    msg: Optional[str],
+    progress: Optional[float],
+) -> bool:
+    """v3.6.8 新增: 决定是否将 msg 真正写入 DB message 字段
+
+    触发规则 (任一满足即返回 True):
+    1. 终态关键字 (Training completed / Canceled at / Paused at) → 总是 commit
+    2. msg 与上次不同 → commit
+    3. progress 与上次变化 >= 1% → commit
+    4. 首次调用 (无缓存) → commit
+    5. 上次缓存后超过 5 秒 → commit (兜底, 防 msg 长期不变卡住)
+
+    性能: 1000 calls/epoch → ~20-50 DB writes/epoch (msg 变化或 progress ≥ 1%)
+    """
+    if not task_id or not msg:
+        return True
+    if any(kw in msg for kw in _TERMINAL_MSG_KEYWORDS):
+        return True
+
+    last = _LAST_COMMIT_MSG_SIG.get(task_id)
+    now_ts = datetime.utcnow().timestamp()
+    if not last:
+        return True
+    last_msg, last_progress, last_ts = last
+    if msg != last_msg:
+        return True
+    if progress is not None and last_progress is not None:
+        try:
+            if abs(float(progress) - float(last_progress)) >= 1.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    if (now_ts - last_ts) >= 5.0:
+        return True
+    return False
+
+
 def _persist_log_line_sync(
     celery_task_id: Optional[str],
     line: str,
@@ -244,11 +298,21 @@ def set_task_state(
         return
 
     line = _build_log_line(state, meta)
+    # v3.6.8 HOTFIX: commit_message 走 _should_commit_message 智能去重
+    # 目的: progress_cb 每 batch 调用 (1000 calls/epoch), 但 msg 变化/进度 1% 才真写 DB
+    _commit_message_effective: Optional[str] = None
+    if commit_message is not None:
+        if _should_commit_message(task_id, commit_message, commit_progress):
+            _commit_message_effective = commit_message
+            _LAST_COMMIT_MSG_SIG[task_id] = (
+                commit_message, commit_progress, datetime.utcnow().timestamp()
+            )
+
     # v3.5.0 Phase T7 #8: 合并写 progress/message/current_epoch/history
     _persist_log_line_sync(
         task_id, line,
         commit_progress=commit_progress,
-        commit_message=commit_message,
+        commit_message=_commit_message_effective,  # 走 dedup 决策
         commit_current_epoch=commit_current_epoch,
         commit_history=commit_history,
     )
@@ -310,8 +374,10 @@ __all__ = [
     "set_task_state",
     "set_last_sticky_meta",
     "get_last_sticky_meta",
-    "_LAST_STICKY_META",
     "_build_log_line",
     "publish_job_update",
     "JOB_UPDATE_CHANNEL_TEMPLATE",
+    # v3.6.8 新增: 智能去重函数, 供测试用
+    "_should_commit_message",
+    "_LAST_COMMIT_MSG_SIG",
 ]

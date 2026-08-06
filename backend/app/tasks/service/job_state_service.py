@@ -71,6 +71,15 @@ def _get_celery_app_safe():
 # Celery 终态集合
 _CELERY_TERMINAL = frozenset((TRAIN_STATE_SUCCESS, TRAIN_STATE_FAILURE, TRAIN_STATE_REVOKED))
 
+# v3.6.8 HOTFIX: DB message 命中"陈旧/误导"集合时, 降级到 Celery msg
+# 防御纵深: 即便 worker 没传 commit_message (历史 task 仍在跑), 详情页也能看到实时进度
+# 包含: API 预创建占位文案 + 重投递占位文案
+_STALE_DB_MESSAGES = frozenset((
+    "等待 worker 启动...",
+    "任务已入队, 等待 worker 启动...",
+    "Re-running (worker restart recovery)",
+))
+
 
 @dataclass
 class JobStateSnapshot:
@@ -188,7 +197,14 @@ class JobStateService:
                 if celery_info.get("progress") is not None
                 else db_row.progress or 0.0
             )
-            message = db_row.message or celery_info.get("msg") or celery_info.get("message", "") or ""
+            # v3.6.8 HOTFIX: DB message 命中 _STALE_DB_MESSAGES (陈旧/占位文案) 时,
+            # 降级到 Celery 实时 msg. 防御纵深: 即便 L1 修复未生效, 详情页仍能看到实时进度.
+            db_msg = db_row.message or ""
+            celery_msg = celery_info.get("msg") or celery_info.get("message", "") or ""
+            if db_msg in _STALE_DB_MESSAGES:
+                message = celery_msg  # DB 是预创建/重投递占位, 用 Celery 实时
+            else:
+                message = db_msg or celery_msg
 
         # 时间字段 (DB 权威)
         started_at = db_row.started_at

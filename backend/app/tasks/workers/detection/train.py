@@ -127,12 +127,14 @@ def train_detection_task(
         pass
 
     def _export_cb(stage, current, total, info=""):
+        export_msg = f"[{stage}] {info}"
+        # v3.6.8 HOTFIX: 透传 commit_message (YOLO 导出阶段 SSE 实时显示)
         TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             "progress": round(current / max(total, 1) * 100, 2),
-            "msg": f"[{stage}] {info}",
+            "msg": export_msg,
             "total_epochs": epochs,
             **sticky_meta,
-        })
+        }, commit_message=export_msg)
 
     def _train_cb(stage, current_epoch, total_epochs, metrics):
         history_buffer.append({
@@ -195,12 +197,14 @@ def train_detection_task(
         TrainingLifecycleService.set_last_sticky_meta(task_id, sticky_meta)
 
         # 数据集统计写库 + 推送
+        # v3.6.8 HOTFIX: 透传 commit_message, 让 SSE 详情页立刻看到"数据集就绪" 而非卡在"等待 worker 启动"
+        dataset_ready_msg = f"数据集就绪: train={export_info['train_count']} val={export_info['val_count']}"
         TrainingLifecycleService.set_task_state(self, "PROGRESS", {
             **sticky_meta,
             "progress": 5.0,
-            "msg": f"数据集就绪: train={export_info['train_count']} val={export_info['val_count']}",
+            "msg": dataset_ready_msg,
             "total_epochs": epochs,
-        })
+        }, commit_message=dataset_ready_msg)
         TrainingLifecycleService.persist_dataset_stats_sync(task_id, sticky_meta, job_id=job_id)
 
         # ---- 4) 跑训练 (纯 ML) ----
