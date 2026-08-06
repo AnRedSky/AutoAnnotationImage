@@ -271,15 +271,23 @@ class TestWorkersPassthroughResumeFromEpoch:
 
     def test_classification_worker_passes_resume_from_epoch(self):
         src = _read(WORKERS_CLASSIFICATION_PY)
-        # 必须调用 run_training(..., resume_from_epoch=resume_from_epoch)
-        # 关键字查找: run_training 出现后, 后续应含 'resume_from_epoch=resume_from_epoch'
+        # 必须调用 run_training(..., start_epoch=resume_from_epoch) [v3.6.3.1 修复]
+        # 关键字查找: run_training 出现后, 后续应含 'start_epoch=resume_from_epoch'
         # (跨多行, 用 're.DOTALL' 不可靠; 改用 .find 定位 + 局部窗口搜索)
         idx = src.find("run_training(")
         assert idx >= 0, "workers/classification.py 中未找到 run_training( 调用"
         # 取 run_training( 后续 1500 字符 (覆盖整段 kwargs, 容忍嵌套括号)
         snippet = src[idx:idx + 1500]
-        assert "resume_from_epoch=resume_from_epoch" in snippet, (
-            "workers/classification.py 透传 resume_from_epoch 失败"
+        # v3.6.3.1 HOTFIX: 之前写错为 resume_from_epoch=resume_from_epoch, run_training
+        #   实际签名是 start_epoch, 改名为 start_epoch=resume_from_epoch
+        assert "start_epoch=resume_from_epoch" in snippet, (
+            "v3.6.3.1 HOTFIX 回归: workers/classification.py 透传 resume_from_epoch 失败, "
+            "应写为 start_epoch=resume_from_epoch (与 segmentation/detection 对齐)"
+        )
+        # 反向防御: 不应再写错为 resume_from_epoch=resume_from_epoch
+        assert "resume_from_epoch=resume_from_epoch" not in snippet, (
+            "v3.6.3.1 HOTFIX 回归: workers/classification.py 出现 resume_from_epoch=resume_from_epoch, "
+            "会导致 run_training() TypeError。已修复为 start_epoch=resume_from_epoch。"
         )
 
     def test_segmentation_worker_accepts_resume_from_epoch(self):

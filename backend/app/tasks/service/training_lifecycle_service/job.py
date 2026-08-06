@@ -193,6 +193,49 @@ def create_or_reset_job_sync(**kwargs) -> int:
     return _run_async(create_or_reset_job(**kwargs))
 
 
+# ============== 1.5. 读取 job 历史曲线 (v3.6.4 新增) ==============
+
+async def get_job_history(job_id: int) -> List[Dict[str, Any]]:
+    """读取 TrainingJob.history 字段 (供 worker resume 时加载历史曲线)
+
+    v3.6.4 HOTFIX: 训练任务详情页训练曲线丢失
+    - 场景: 暂停 → 继续训练, 新的 train_model_task 启动后 history_buffer = []
+            新 epoch_cb 调 set_task_state(commit_history=...) 会**覆盖** DB 中
+            mark_paused 时保存的旧 history
+    - 修复: worker 启动时, 显式从 DB 读出旧 history 预填到 history_buffer
+    - 边界: job_id 不存在 / history 为空 → 返回 [], 不抛异常 (避免 worker 启动失败)
+
+    Args:
+        job_id: TrainingJob.id (不是 celery_task_id)
+
+    Returns:
+        历史曲线 list, 格式同 history_buffer
+        - 找不到 job → []
+        - history 字段为空 / 非 list → []
+    """
+    from app.database import AsyncSessionLocal
+    from app.tasks.model.training_job import TrainingJob
+
+    try:
+        async with AsyncSessionLocal() as db:
+            job = await db.get(TrainingJob, job_id)
+            if not job:
+                return []
+            history = job.history
+            if not isinstance(history, list):
+                return []
+            return list(history)
+    except Exception as e:
+        # DB 不可达等异常: 返回空 list, 不阻塞 worker 启动
+        logger.warning("get_job_history(%s) failed: %s", job_id, e)
+        return []
+
+
+def get_job_history_sync(job_id: int) -> List[Dict[str, Any]]:
+    """同步包装: worker 进程直接调, 内部切到事件循环"""
+    return _run_async(get_job_history(job_id))
+
+
 # ============== 2. 进度更新 (DB) ==============
 
 async def update_job_progress(
@@ -368,6 +411,8 @@ def persist_dataset_stats_sync(
 __all__ = [
     "create_or_reset_job",
     "create_or_reset_job_sync",
+    "get_job_history",         # v3.6.4 新增
+    "get_job_history_sync",    # v3.6.4 新增
     "update_job_progress",
     "update_job_progress_sync",
     "push_history",

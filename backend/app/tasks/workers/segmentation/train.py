@@ -197,6 +197,19 @@ def train_segmentation_task(
             )
 
     # ---- 4) 训练 ----
+    # v3.6.4 HOTFIX: resume 模式加载已保存的历史曲线 (与 classification 对齐)
+    # - 场景: 暂停 → 继续训练, 新 task 启动后 history_buffer = [] 会导致
+    #         详情页曲线只显示 resume 后的数据
+    # - 修复: worker 启动时, 显式从 DB 读出旧 history 预填到 history_buffer
+    prior_history = TrainingLifecycleService.get_job_history_sync(job_id)
+    if prior_history:
+        history_buffer = list(prior_history)
+        import logging as _seg_resume_log
+        _seg_resume_log.getLogger(__name__).info(
+            f"v3.6.4: segmentation resume 加载历史曲线, "
+            f"{len(prior_history)} 个 epoch (从 epoch {resume_from_epoch} 续训)"
+        )
+
     try:
         # v3.1.0 Phase W3.1: 复用已加载的 category_names 计算 num_classes, 消除重复 DB 查询
         # 旧实现用 _count_classes() 又查了一次 Category 表 (与 L106-114 完全相同)

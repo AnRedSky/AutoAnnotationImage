@@ -93,6 +93,21 @@ def train_detection_task(
     # ---- 2) 共享状态 ----
     sticky_meta: dict = {}
     history_buffer: list = []
+
+    # v3.6.4 HOTFIX: resume 模式加载已保存的历史曲线 (与 classification/segmentation 对齐)
+    # - 场景: 暂停 → 继续训练, 新 task 启动后 history_buffer = [] 会导致
+    #         详情页曲线只显示 resume 后的数据
+    # - 修复: worker 启动时, 显式从 DB 读出旧 history 预填到 history_buffer
+    # - YOLO 注: YOLO 走 ultralytics 原生 resume=True 自动恢复 epoch 计数,
+    #            history_buffer 仅用于前端曲线展示
+    prior_history = TrainingLifecycleService.get_job_history_sync(job_id)
+    if prior_history:
+        history_buffer = list(prior_history)
+        import logging as _det_resume_log
+        _det_resume_log.getLogger(__name__).info(
+            f"v3.6.4: detection resume 加载历史曲线, "
+            f"{len(prior_history)} 个 epoch (从 epoch {resume_from_epoch} 续训)"
+        )
     workdir = settings.DATA_DIR / "yolo" / f"{model_alias}_{task_id}"
 
     # v3.5.0: 启动时清掉历史 pause/cancel 残留 (避免上次异常退出时残留的信号误触发)

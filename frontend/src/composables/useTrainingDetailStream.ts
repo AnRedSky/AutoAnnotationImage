@@ -1,4 +1,4 @@
-﻿/**
+/**
  * useTrainingDetailStream - 训练详情 SSE 流 (走共享池) + 数据集统计 + 历史曲线
  *
  * v3.1.0 Phase T1 (性能优化): 改用 useTrainingSsePool 共享底层 SSE 连接
@@ -90,6 +90,15 @@ export function useTrainingDetailStream() {
   let lastEpochSeen: number | null = null
   let historyLiveUntilAt = 0   // 在此时间之前由 SSE 驱动, 不退化轮询
 
+  // v3.6.5 HOTFIX: SSE 帧 → log.value 实时追加 (修复 "训练日志没同步 SSE 更新")
+  // - 背景: 之前 onStreamFrame 只更新 state/progress/message.value 等 ref,
+  //         从未向 log.value 追加新行 → 详情页日志面板只能看到打开时拉到的历史
+  // - 修复: 在 onStreamFrame 中基于 (state, current_epoch) 签名去重,
+  //         新帧签名不同则追加到 log.value, 并调 saveDetailLog 持久化到 DB
+  // - 边界: 与 _LAST_LOG_SIG (后端去重) 互不冲突, 双层防护
+  let lastLoggedState: string | null = null
+  let lastLoggedEpoch: number | null = null
+
   const pool = useTrainingSsePool()
 
   // ============== 持久化一行训练日志到后端 ==============
@@ -100,6 +109,58 @@ export function useTrainingDetailStream() {
     if (now - lastLogSaveAt < 500) return
     lastLogSaveAt = now
     trainingApi.appendLog(jobId, line).catch(() => { /* best-effort */ })
+  }
+
+  // v3.6.5 HOTFIX: 把 SSE 帧构造成与后端 _build_log_line 格式一致的日志行
+  // 后端格式: [YYYY-MM-DD HH:MM:SS] state=PROGRESS progress=42.5% epoch=8/20 msg=...
+  // 同步时间戳格式便于前后端日志视觉对齐 (前端时间戳比后端晚几毫秒, 不影响签名去重)
+  const buildLogLineFromSseFrame = (data: any): string => {
+    const ts = new Date().toISOString().replace('T', ' ').substring(0, 19)
+    const state = data.state || 'PROGRESS'
+    const progress =
+      typeof data.progress === 'number' ? `${data.progress.toFixed(1)}%` : ''
+    const epoch = data.current_epoch
+    const total = data.total_epochs
+    const msg = data.message || ''
+    const parts: string[] = [`[${ts}]`, `state=${state}`]
+    if (progress) parts.push(`progress=${progress}`)
+    if (epoch != null || total != null) {
+      parts.push(`epoch=${epoch != null ? epoch : '-'}/${total != null ? total : '-'}`)
+    }
+    if (msg) parts.push(`msg=${msg}`)
+    return parts.join(' ')
+  }
+
+  // v3.6.5 HOTFIX: SSE 帧 → 追加到 log.value + 调 saveDetailLog 持久化
+  // - 签名 = (state, current_epoch) — 二者任一变化即视为新行
+  // - 设计要点: 不基于 message 去重, 因为 classification 的 progress_cb 每个
+  //   batch 都推不同 message, 20 epoch × 200 batch = 4000 行, 用户无法阅读
+  //   - 每个 epoch 内的 per-batch 帧: current_epoch=undefined, 全部去重
+  //   - epoch_callback 帧: current_epoch=N, 与上一帧 epoch 不等 → 追加 1 行
+  //   - 新 epoch 首个 per-batch 帧: current_epoch=undefined, 与上一帧 (N) 不等
+  //     → 追加 1 行 "Epoch N+1 batch 1/Y" (作为新 epoch 起始标记, 信息无害)
+  //   - 终态帧: state 变化 → 追加 1 行
+  // - 与后端 _LAST_LOG_SIG (state, progress, msg) 兼容, epoch 维度是额外保护
+  // - 与 TrainingJob.log 持久化互不冲突, saveDetailLog 后端会自行去重
+  const appendLogFromSseFrame = (data: any) => {
+    if (!data || typeof data !== 'object') return
+    const newState = data.state || 'PROGRESS'
+    const newEpoch = data.current_epoch ?? null
+    const isNew = (
+      newState !== lastLoggedState ||
+      newEpoch !== lastLoggedEpoch
+    )
+    if (!isNew) return
+    lastLoggedState = newState
+    lastLoggedEpoch = newEpoch
+
+    const line = buildLogLineFromSseFrame(data)
+    // 内存追加: 详情页日志面板即时刷新
+    log.value.push(line)
+    // 持久化: 通过 saveDetailLog 写到后端 TrainingJob.log (best-effort, 500ms 节流)
+    if (job.value?.celery_task_id) {
+      saveDetailLog(job.value.celery_task_id, line)
+    }
   }
 
   // ============== 历史曲线刷新 (节流 + 智能触发) ==============
@@ -122,6 +183,11 @@ export function useTrainingDetailStream() {
     currentEpoch.value = data.current_epoch ?? null
     totalEpochs.value = data.total_epochs ?? totalEpochs.value
     message.value = data.message || message.value
+
+    // v3.6.5 HOTFIX: SSE 帧到时同步追加到 log.value (修复日志面板不更新问题)
+    // - 必须放在 message.value 更新之后 (用新值判重), 但 log.value 之前
+    // - 内部用 lastLogged* 三个局部变量做签名, 不会受 state/progress 同步赋值影响
+    appendLogFromSseFrame(data)
 
     if (data.started_at && job.value) {
       const tsNew = new Date(data.started_at).getTime()
@@ -323,6 +389,9 @@ export function useTrainingDetailStream() {
     lastEpochSeen = null
     historyLiveUntilAt = 0
     lastHistoryFetchAt = 0
+    // v3.6.5 HOTFIX: 重置 lastLogged* 签名, 防止上一任务的 SSE 状态污染新详情
+    lastLoggedState = null
+    lastLoggedEpoch = null
 
     try {
       const d: any = await trainingApi.job(row.id)
@@ -331,6 +400,12 @@ export function useTrainingDetailStream() {
       state.value = d.state
       totalEpochs.value = d.epochs
       message.value = d.message || ''
+      // v3.6.5 HOTFIX: 初始化 SSE 帧签名为 DB 当前状态
+      // - 第一个 SSE 帧若与 DB 状态一致 (worker 还没推新帧) → 签名匹配 → 跳过
+      // - 第一个 SSE 帧若 worker 已推新帧 (state/epoch 变化) → 追加一行
+      // - 避免重复: 历史 log 已包含 worker 在 DB 快照时已写入的最后一行
+      lastLoggedState = d.state || null
+      lastLoggedEpoch = (d.current_epoch ?? null)
       if (typeof d.data_total === 'number') dataTotal.value = d.data_total
       if (typeof d.data_train === 'number') dataTrain.value = d.data_train
       if (typeof d.data_val === 'number') dataVal.value = d.data_val

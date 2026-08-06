@@ -202,6 +202,22 @@ def train_model_task(self, dataset_id: int, base_model: str, model_name: str,
     clear_control_signals(task_id)
 
     try:
+        # v3.6.4 HOTFIX: resume 模式加载已保存的历史曲线
+        # - 场景: 暂停 → 继续训练, 新 train_model_task 启动后 history_buffer = []
+        #         新 epoch_cb 调 set_task_state(commit_history=...) 会**覆盖** DB 中
+        #         mark_paused 时保存的旧 history, 详情页曲线只显示 resume 后的数据
+        # - 修复: worker 启动时, 显式从 DB 读出旧 history 预填到 history_buffer
+        # - 自动判断: 不依赖 mode 参数, 只要 job.history 非空就视为续训场景
+        #   (restart 模式 job 是新建的, history 必然为空, 不会误加载)
+        prior_history = TrainingLifecycleService.get_job_history_sync(job_id)
+        history_buffer: list = list(prior_history) if prior_history else []
+        if prior_history:
+            import logging as _cls_resume_log
+            _cls_resume_log.getLogger(__name__).info(
+                f"v3.6.4: classification resume 加载历史曲线, "
+                f"{len(prior_history)} 个 epoch (从 epoch {resume_from_epoch} 续训)"
+            )
+
         # v3.0.0 Phase 5: 注入 TrainingDataService 解耦 ML ↔ DB
         result = run_training(
             dataset_id=dataset_id,
