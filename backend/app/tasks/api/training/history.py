@@ -5,15 +5,15 @@ training.history 模块 — 训练历史曲线数据
 **v3.0.0 Phase O 拆分**: 从 training.py 抽离
 **职责**: 训练历史曲线 (loss/acc 折线图) 数据接口
 
-**数据来源 (双源)**:
-1. Redis train:history:{task_id} — worker 每个 epoch 写入
-   v3.1.0: 写入格式从 STRING (全量 JSON) 改为 LIST (RPUSH 增量),
-   读取时用 LRANGE 0 -1 + 逐元素 json.loads 聚合; 兼容旧 STRING 格式.
-2. TrainingJob.history 字段 — detection/segmentation worker 写入 (YOLO/DeepLab
-   不走 classification 的 Redis 写入路径)
-
-Redis 命中则用 Redis; 否则回退查 DB.history, 保证三种任务曲线都能展示.
-Redis 不可达时返回空历史（前端展示 "暂无历史曲线"），避免 500.
+**数据来源 (双源, v3.6.7 改为「数据更全的源优先」)**:
+1. Redis train:history:{task_id} — worker 每个 epoch RPUSH 最新一条 (v3.1.0 优化: O(1) per epoch)
+2. TrainingJob.history 字段 — worker 每次 epoch 整列表写 (v3.5.0 Phase T7 #8 合并写)
+   - **关键**: mark_paused 也会写完整 history_buffer → DB 包含 pause 前所有 epoch
+   - resume 时新 task_id 的 Redis 列表为空, DB 保留 pre-resume 数据
+3. 跨源合并策略: 两条数据可能不一致 (resume 场景), 取**数据更全**的源返回
+   - Redis 与 DB 同步增长 (新训练) → 任意, 等长
+   - resume 场景: DB ≥ Redis (DB 必包含 pre-resume, Redis 只有 post-resume)
+   - 终态: DB 必有完整数据 (mark_success 写), Redis 可能因 TTL (24h) 丢失
 
 v3.3.6-STATS-ISOLATION 修复 (P0-越权):
   - 之前: 鉴权可选, 任何用户(包括匿名) 可访问任意 task_id 的训练历史
@@ -79,7 +79,7 @@ async def get_training_history(
     )
 
     history_key = f"train:history:{task_id}"
-    history = []
+    redis_history: list = []
     try:
         # v3.1.0 Phase W4.2: 兼容 LIST (增量 RPUSH) 和 STRING (旧全量) 两种格式
         key_type = redis_client.type(history_key)
@@ -88,7 +88,7 @@ async def get_training_history(
             raw_items = redis_client.lrange(history_key, 0, -1)
             for item in raw_items:
                 try:
-                    history.append(json.loads(item))
+                    redis_history.append(json.loads(item))
                 except (ValueError, TypeError):
                     pass
         elif key_type == b"string" or key_type == "string":
@@ -96,26 +96,47 @@ async def get_training_history(
             raw = redis_client.get(history_key)
             if raw:
                 try:
-                    history = json.loads(raw)
+                    redis_history = json.loads(raw)
                 except (ValueError, TypeError):
-                    history = []
-        # key 不存在 (None) 时 history 保持空列表, 走 DB 回退
+                    redis_history = []
+        # key 不存在 (None) 时 redis_history 保持空列表, 走 DB 回退
     except Exception as e:
         # Redis 不可达 / 超时 / 权限问题 → 记日志, 继续走 DB 回退
         _logger.warning(
             "redis_client.get(%s) failed: %s; fallback to DB history", history_key, e
         )
+        redis_history = []
 
-    # ---- DB 回退: Redis 无数据时, 查 TrainingJob.history (detection/segmentation) ----
-    if not history:
-        try:
-            # 重新查 (避免 ORM 缓存导致 history 字段过期)
-            row = (await db.execute(
-                select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
-            )).scalar_one_or_none()
-            if row is not None and isinstance(row.history, list):
-                history = row.history
-        except Exception:
-            # DB 也查不到, 返回空历史
-            history = []
+    # ---- DB 回退 + 跨源合并 (v3.6.7 修复 resume 场景曲线断裂) ----
+    # v3.6.7 HOTFIX: 训练曲线数据连续性
+    # - 场景: 暂停 → 恢复 → 详情页只显示 resume 后曲线, 缺失 pre-resume 数据
+    # - 根因: push_history 只 RPUSH 最新 epoch, resume 时新 task_id 的 Redis
+    #   列表从 0 开始, 仅有 post-resume epochs. mark_paused 写入的 pre-resume
+    #   数据只在 DB 中, 旧逻辑 (Redis 非空就返回 Redis) 永远拿不到.
+    # - 修复: 同时取 Redis 与 DB, 取**数据更全**的源.
+    #   * Redis delta (post-resume only) — 训练中实时增长
+    #   * DB 完整历史 (pre-resume + post-resume) — mark_paused + epoch_cb 写入
+    #   * 训练中两者等长, 任意; resume 后 DB ≥ Redis, 用 DB
+    #   * 终态 / 跨天: Redis 可能因 24h TTL 丢失, DB 仍保留
+    db_history: list = []
+    try:
+        # 重新查 (避免 ORM 缓存导致 history 字段过期)
+        row = (await db.execute(
+            select(TrainingJob).where(TrainingJob.celery_task_id == task_id)
+        )).scalar_one_or_none()
+        if row is not None and isinstance(row.history, list):
+            db_history = list(row.history)
+    except Exception:
+        # DB 查不到, db_history 保持空
+        db_history = []
+
+    # v3.6.7: 跨源选择 — 取数据更完整的源
+    # - DB 与 Redis 等长: 训练中同步, 任意; 选 DB 保证权威性
+    # - DB > Redis: resume 后必有, 用 DB (修复曲线断裂)
+    # - DB < Redis: 异常情况 (DB 没及时写, worker 刚 RPUSH), 用 Redis (保实时性)
+    # - 两者都空: 返回空 (前端展示"暂无历史")
+    if len(db_history) >= len(redis_history):
+        history = db_history
+    else:
+        history = redis_history
     return {"task_id": task_id, "history": history}
