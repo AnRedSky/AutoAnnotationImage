@@ -38,6 +38,8 @@ import logging
 from app.tasks.service.training_lifecycle_service.job import (
     create_or_reset_job,
     create_or_reset_job_sync,
+    get_job_history,         # v3.6.4 新增
+    get_job_history_sync,    # v3.6.4 新增
     update_job_progress,
     update_job_progress_sync,
     push_history,
@@ -81,7 +83,7 @@ class TrainingLifecycleService:
     所有方法都是 worker 可直接调用的同步 API (内部用 _run_async 切到事件循环).
 
     **Phase S5 后**: 类本身只做方法挂载, 实际方法定义在 4 个子模块:
-    - job    → create_or_reset_job / update_job_progress / push_history / persist_dataset_stats
+    - job    → create_or_reset_job / get_job_history (v3.6.4) / update_job_progress / push_history / persist_dataset_stats
     - state  → mark_success / mark_failure / mark_paused / mark_canceled (v3.5.0)
     - model  → create_model_version
     - celery → set_task_state / set_last_sticky_meta / get_last_sticky_meta
@@ -90,6 +92,8 @@ class TrainingLifecycleService:
     # ============== 1. TrainingJob 创建/重置/进度/历史/数据统计 ==============
     create_or_reset_job = staticmethod(create_or_reset_job)
     create_or_reset_job_sync = staticmethod(create_or_reset_job_sync)
+    get_job_history = staticmethod(get_job_history)              # v3.6.4 新增
+    get_job_history_sync = staticmethod(get_job_history_sync)    # v3.6.4 新增
     update_job_progress = staticmethod(update_job_progress)
     update_job_progress_sync = staticmethod(update_job_progress_sync)
     push_history = staticmethod(push_history)
