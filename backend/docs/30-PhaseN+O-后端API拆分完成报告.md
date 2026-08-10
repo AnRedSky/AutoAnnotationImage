@@ -1,10 +1,5 @@
 # Phase N+O 后端 API 单体文件拆分完成报告
 
-**日期**: 2026-07-25
-**作者**: Claude Code
-**提交记录**: 17929cb (Phase N) + 5d59b39 (Phase O)
-**范围**: 后端 `app/tasks/api/` 目录下 2 个超限文件 (image.py + training.py)
-
 ---
 
 ## 一、背景

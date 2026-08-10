@@ -1,13 +1,8 @@
 # v3.1.0 Phase T Celery Worker 端到端验证 — 2026-07-30
 
-> **日期**: 2026-07-30 12:05-12:11
-> **基线 commit**: `de50f36` (docs(backend): 落档 Phase T 健康端到端验证)
-> **目标**: 在 local_db 真服务上起 Celery worker, 端到端跑真训练任务, 验 P0-1 SIGTERM handler
-> **范围**: 复用现有 uvicorn (`proc_3072bf6953af`, PID 30104) — 不杀; 启一个新 celery worker session
-
 ---
 
-## 一、本次任务的三段摘要 (工程实践)
+## 一、本次任务的三段概述 (工程实践)
 
 ### 上一阶段做了什么
 - `de50f36` 落档 `40-健康端到端验证-2026-07-30.md`, 跑 V1-V5 验证一切 fresh pass
@@ -154,9 +149,9 @@ NO REDIS marker after 6s polling
 
 | 文件 | 状态 |
 |---|---|
-| `docs/41-celery-worker端到端验证-2026-07-30.md` | **新增** (本文件) |
+| `docs/41-celery-worker端到端验证-2026-07-30.md` | **新增** (本节件) |
 | 任何 Python 文件 | **未改** |
-| git commit | 待本文件撰写后 commit |
+| git commit | 待本节件撰写后 commit |
 
 ---
 
@@ -177,7 +172,6 @@ NO REDIS marker after 6s polling
 **给未来人**:
 - 不要被"我们在 worker 真跑、sigterm handler 装了"蒙蔽 — 真实段到段 (`revoke → marker 在 Redis`) 在 Windows threads pool 上**不成立**
 - 真生产部署 (Linux + prefork) 应该 OK, 但**部署后做一次端到端测试很重要**
-
 
 ---
 

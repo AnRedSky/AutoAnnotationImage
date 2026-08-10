@@ -1,12 +1,5 @@
 # v3.6.0 训练性能优化 — 任务总结报告
 
-> **任务日期**: 2026-08-05 ~ 2026-08-06
-> **实施版本**: v3.6.0 (基于 v3.5.2)
-> **触发背景**: 用户报告 MinIO 训练 240 样本 1 epoch 60-64s (期望 < 1s, 慢 60-120x)
-> **实施计划**: [plan-c-train-perf-v3.6.0.md](../../.trae/documents/plan-c-train-perf-v3.6.0.md)
-> **性能基准**: [013-train-perf-bench-report.md](013-train-perf-bench-report.md)
-> **前置分析**: [010-train-slow-analysis.md](010-train-slow-analysis.md)
-
 ---
 
 ## 一、任务完成度
@@ -19,9 +12,9 @@
 | Phase 3 (P1) | StorageService 基类 + MinIO 流式下载 + 图像预解码 LRU | ✅ | `a4e2062`+`636de3a` |
 | Phase 4 (P1) | 分割训练 DataLoader 同步优化 | ✅ | `2f44366` |
 | Phase 5 (P2) | worker 端 DB 写合并 (sticky_meta hash 缓存) | ✅ | `0f46bf2` |
-| Phase 6 | 综合测试 + 文档 + 性能基准 | ✅ | 本文档 + `013` 报告 |
+| Phase 6 | 综合测试 + 文档 + 性能基准 | ✅ | 本系统 + `013` 报告 |
 
-**总计**: 6/6 Phase 完成, 6 个独立 commit (P0-P5) + Phase 0 5 个 commit (前置) + Phase 6 1 个 commit (本文档 + 013 报告)
+**总计**: 6/6 Phase 完成, 6 个独立 commit (P0-P5) + Phase 0 5 个 commit (前置) + Phase 6 1 个 commit (本系统 + 013 报告)
 
 ---
 
@@ -82,7 +75,7 @@
 | `backend/pyproject.toml` | 新增 `perf` marker | +1 |
 | `README.md` | §9.5.1 v3.6.0 训练性能调优章节 | +45 |
 | `docs/task-summaries/013-train-perf-bench-report.md` | 性能基准报告 (本报告配套) | +370 |
-| `docs/task-summaries/012-task-summary-train-perf.md` | 本文档 | ~270 |
+| `docs/task-summaries/012-task-summary-train-perf.md` | 本系统 | ~270 |
 
 **总计**: 7 个修改 + 6 个新增 + 4 个配置/文档, **净增 ~2330 行**
 
@@ -186,7 +179,7 @@ a4ea985 feat(training): v3.6.0 P1 MinIO 训练样本并发预下载 (10x 信号�
 
 1. **实施计划**: [plan-c-train-perf-v3.6.0.md](../../.trae/documents/plan-c-train-perf-v3.6.0.md) (682 行)
 2. **性能基准报告**: [013-train-perf-bench-report.md](013-train-perf-bench-report.md) (370 行)
-3. **任务总结报告**: [012-task-summary-train-perf.md](012-task-summary-train-perf.md) (本文档, 270 行)
+3. **任务总结报告**: [012-task-summary-train-perf.md](012-task-summary-train-perf.md) (本系统, 270 行)
 4. **README §9.5.1**: v3.6.0 训练性能调优章节 (+45 行)
 5. **.env / .env.example**: 3 个新配置项 + 详细注释
 

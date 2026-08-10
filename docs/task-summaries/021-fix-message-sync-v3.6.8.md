@@ -1,13 +1,5 @@
 # v3.6.8 HOTFIX 修复报告: SSE message 字段同步 + 5 个非 epoch callback 透传 + Re-running 消除
 
-> **修复日期**: 2026-08-06
-> **前置条件**: v3.6.0 ~ v3.6.7 已完成, 端到端训练 + checkpoint 续训 + 曲线连续性均已修好
-> **触发背景**: 用户报告训练任务详情页 SSE `message` 字段异常
-> **方案类型**: 4 层防御 (worker 透传 + 智能去重 + 快照降级 + 文案清理)
-> **影响范围**: classification / detection / segmentation / auto_annotate 四种任务类型
-> **关联计划**: [plan-v3.6.8-callback-message-sync.md](../../.trae/documents/plan-v3.6.8-callback-message-sync.md)
-> **关联附录**: [plan-c-train-perf-v3.6.0.md](../../.trae/documents/plan-c-train-perf-v3.6.0.md) 附录 H
-
 ---
 
 ## 一、Context (问题与目标)
@@ -98,7 +90,6 @@ _TERMINAL_MSG_KEYWORDS = (
     "Training completed", "Canceled at", "Paused at",
     "训练完成", "已取消", "已暂停",
 )
-
 
 def _should_commit_message(task_id, msg, progress) -> bool:
     """5 条触发规则 (任一满足即 commit):

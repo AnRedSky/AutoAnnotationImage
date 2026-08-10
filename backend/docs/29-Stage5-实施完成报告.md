@@ -1,8 +1,5 @@
 # Stage 5 实施完成报告 — 性能 + 监控 (Performance & Observability)
 
-**编制日期**: 2026-07-25
-**阶段**: v3.0.0 Stage 5 (1 天工作量)
-**关联文档**:
 - [18-多应用架构优化方案](./18-多应用架构优化方案.md) — Stage 5 远期方案
 - [19-重构优先级与阶段路线图](./19-重构优先级与阶段路线图.md) — Stage 2-5 整体路线图
 - [27-Stage3-实施完成报告](./27-Stage3-实施完成报告.md) — Stage 3 (慢请求中间件)
@@ -332,7 +329,7 @@ def _after(conn, cursor, statement, parameters, context, executemany):
 
 - 业务代码全面接 @cached: 数据一致性需谨慎, 暂不批量改
 - 缓存预热: 启动时主动加载热点数据, 风险高 (启动慢)
-- APM 工具接入: 论文项目用不到 (SkyWalking / Datadog)
+- APM 工具接入: 系统项目用不到 (SkyWalking / Datadog)
 
 ---
 
@@ -364,4 +361,4 @@ def _after(conn, cursor, statement, parameters, context, executemany):
 
 下一步可选项:
 - Stage 6: 业务代码全面接 @cached + Prometheus 兼容
-- 论文撰写: 基于全部 5 个 Stage 的重构, 撰写第 4 章实现 + 第 5 章测试
+- 系统文档编写: 基于全部 5 个 Stage 的重构, 撰写对应章节实现 + 对应章节测试

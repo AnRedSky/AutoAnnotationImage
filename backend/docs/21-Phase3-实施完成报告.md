@@ -1,7 +1,5 @@
 # Phase 3 实施完成报告 — Service 层抽取 (11 个 Service + 3 个 API 端点接入)
 
-**完成日期**: 2026-07-25
-**关联文档**:
 - [19-重构优先级与阶段路线图](./19-重构优先级与阶段路线图.md) — 阶段路线图
 - [20-Phase2-实施完成报告](./20-Phase2-实施完成报告.md) — Phase 2 已完成 (Data 层)
 - [15-务实友好架构方案](./15-务实友好架构方案.md) — Service 层模式依据
@@ -28,7 +26,7 @@
 
 #### 第一批: 5 个核心 Service (commit 1)
 
-##### 1. `app/services/job_state_service.py` (核心, 解决 4 处真相源)
+#### 1. `app/services/job_state_service.py` (核心, 解决 4 处真相源)
 
 **类**: `JobStateService` (无状态, 静态方法) + `JobStateSnapshot` (dataclass)
 
@@ -49,7 +47,7 @@
 - worker 崩溃但 DB 已写 → Celery 退化为 PENDING, DB 是 FAILURE
 - Redis result 过期 (默认 1h) → Celery 不可查, 只能查 DB
 
-##### 2. `app/services/training_service.py`
+#### 2. `app/services/training_service.py`
 
 **类**: `TrainingService` (无状态, 静态方法)
 
@@ -64,7 +62,7 @@
 - `_create_pending_job(...)`: 预创建 PENDING 行 (独立 session)
 - `_rollback_pending_job(job_id)`: 投递失败时回滚
 
-##### 3. `app/services/image_service.py`
+#### 3. `app/services/image_service.py`
 
 **类**: `ImageService` (无状态, 静态方法)
 
@@ -78,7 +76,7 @@
 
 **联动**: 自动调 `DatasetService.refresh_statistics()` 刷新 dataset 统计.
 
-##### 4. `app/services/dataset_service.py`
+#### 4. `app/services/dataset_service.py`
 
 **类**: `DatasetService` (无状态, 静态方法)
 
@@ -92,7 +90,7 @@
   - 返回: `{"training_jobs": N, "model_versions": N, "images": N, "categories": N}`
 - `assert_can_delete(db, dataset)`: 业务规则 (仅 draft / done 可删)
 
-##### 5. `app/services/model_service.py`
+#### 5. `app/services/model_service.py`
 
 **类**: `ModelService` (无状态, 静态方法)
 
@@ -105,39 +103,39 @@
 
 #### 第二批: 6 个扩展 Service (commit 2)
 
-##### 6. `app/services/detection_service.py` (目标检测)
+#### 6. `app/services/detection_service.py` (目标检测)
 
 - `save_ai_predictions(db, image, predictions)`: AI 推理结果 → BBoxAnnotation
 - `save_human_bboxes(db, image, bboxes, user_id, action)`: 人工 BBox 写入
 - `apply_nms(predictions, iou_threshold)`: NMS 后处理
 - `list_bboxes(db, image_id, source)`: 查 BBox
 
-##### 7. `app/services/segmentation_service.py` (图像分割)
+#### 7. `app/services/segmentation_service.py` (图像分割)
 
 - `save_ai_mask(db, image, mask_array)`: AI mask 写入
 - `save_human_mask(db, image, mask_array, user_id, action)`: 人工 mask 写入
 - `load_mask(db, image_id)`: 加载 mask 数组
 - 内置越界像素校验 (avoid CrossEntropyLoss error)
 
-##### 8. `app/services/annotation_service.py` (标注统一入口)
+#### 8. `app/services/annotation_service.py` (标注统一入口)
 
 - `save_classification_annotation`: 派发到 ImageService
 - `save_detection_annotation`: 派发到 DetectionService
 - `save_segmentation_annotation`: 派发到 SegmentationService
 - `save_ai_prediction`: 统一 AI 预测入口 (按 task_type 派发)
 
-##### 9. `app/services/user_service.py` (用户业务)
+#### 9. `app/services/user_service.py` (用户业务)
 
 - `get / get_by_username / list_active / count`: 查询
 - `deactivate / activate / change_role`: 状态变更
 - `assert_can_modify`: 业务规则 (谁能改谁)
 
-##### 10. `app/services/stats_service.py` (统计)
+#### 10. `app/services/stats_service.py` (统计)
 
 - `global_overview(db)`: 全局概览 (datasets / images / training_jobs / users)
 - `dataset_overview(db, dataset_id)`: 单数据集统计
 
-##### 11. `app/services/auth_service.py` (认证)
+#### 11. `app/services/auth_service.py` (认证)
 
 - `login(db, username, password)`: 登录校验 + Token 签发
 - `register(db, username, password, email, role)`: 注册
@@ -330,7 +328,7 @@ class ImageService:
 
 ### 新增 (11 Service + 1 报告)
 - 11 个 `backend/app/services/*.py`
-- `backend/docs/21-Phase3-实施完成报告.md` (本文件)
+- `backend/docs/21-Phase3-实施完成报告.md` (本节件)
 
 ### 修改 (3 文件)
 - `backend/app/services/__init__.py` — 暴露 11 Service

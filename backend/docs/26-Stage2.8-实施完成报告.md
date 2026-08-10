@@ -1,8 +1,5 @@
 # Stage 2.8 实施完成报告 — 兼容垫片清理与 Stage 2 收官
 
-**编制日期**: 2026-07-25
-**版本**: v3.0.0 Stage 2.8 (Stage 2 完结)
-**关联文档**:
 - [15-务实友好架构方案](./15-务实友好架构方案.md)
 - [18-多应用架构优化方案](./18-多应用架构优化方案.md)
 - [19-重构优先级与阶段路线图](./19-重构优先级与阶段路线图.md)
@@ -458,7 +455,7 @@ backend/
 | 4 | `refactor(stage2.8d): delete app/ml/ + app/workers/, all imports to app/tasks/{ml,workers}/` | ML + Workers 兼容垫片清理 (16 文件删除) |
 | 5 | `refactor(stage2.8e): main.py + database/ + core/ + middleware/ import paths to new locations` | 核心基础设施更新 (5 文件) |
 | 6 | `chore(stage2.8f): verification scripts (verify_stage2_8_*.py + verify_routes.py)` | 验证脚本固化 (5 文件) |
-| 7 | `docs(stage2.8g): Stage 2.8 实施完成报告` | 本文档 |
+| 7 | `docs(stage2.8g): Stage 2.8 实施完成报告` | 本系统 |
 
 ---
 

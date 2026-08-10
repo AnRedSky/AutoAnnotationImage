@@ -1,9 +1,5 @@
 # Stage 5.2 — 中间件统一注册报告
 
-**任务**：将 `backend/app/main.py` 中内联的中间件配置（CORS / RequestID / RequestTiming / 全局异常处理）抽离到 `backend/app/registry.py`，新增 `MiddlewareRegistry` 单例。
-
-**完成时间**：2026-07-25
-
 **v3.0.0 Stage 5.2**，与 Stage 2.7（路由自动挂载）一脉相承。
 
 ---
@@ -297,16 +293,16 @@ MiddlewareEntry("cors", cors_factory, order=35, description="CORS 跨域配置")
 ## 八、相关文件链接
 
 - 设计模式参考：
-  - [app/registry.py:AppRegistry](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/registry.py#L89-L186)
-  - [app/registry.py:PluginRegistry](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/registry.py#L189-L382)
+  - [app/registry.py:AppRegistry](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/registry.py#L89-L186)
+  - [app/registry.py:PluginRegistry](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/registry.py#L189-L382)
 - 改造后核心：
-  - [app/registry.py:MiddlewareRegistry](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/registry.py#L383-L525)
-  - [app/common/interfaces.py:MiddlewareEntry](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/common/interfaces.py#L57-L89)
-  - [app/middleware/http/__init__.py](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/__init__.py)
-  - [app/main.py](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/main.py)
+  - [app/registry.py:MiddlewareRegistry](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/registry.py#L383-L525)
+  - [app/common/interfaces.py:MiddlewareEntry](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/common/interfaces.py#L57-L89)
+  - [app/middleware/http/__init__.py](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/__init__.py)
+  - [app/main.py](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/main.py)
 - 相关报告：
-  - [25-Stage2.7-实施完成报告.md](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/docs/25-Stage2.7-实施完成报告.md) — 路由自动挂载
-  - [28-Stage4-实施完成报告.md](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/docs/28-Stage4-实施完成报告.md) — 插件注册中心
+  - [25-Stage2.7-实施完成报告.md](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/docs/25-Stage2.7-实施完成报告.md) — 路由自动挂载
+  - [28-Stage4-实施完成报告.md](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/docs/28-Stage4-实施完成报告.md) — 插件注册中心
 
 ---
 

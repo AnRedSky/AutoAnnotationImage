@@ -1,8 +1,5 @@
 # Stage 2.7 实施完成报告 — main.py 改用 AppRegistry 自动挂载
 
-**编制日期**: 2026-07-25
-**版本**: v3.0.0 Stage 2.7
-**关联文档**:
 - [15-务实友好架构方案](./15-务实友好架构方案.md)
 - [17-3层架构重构执行计划](./17-3层架构重构执行计划.md)
 - [18-多应用架构优化方案](./18-多应用架构优化方案.md)
@@ -237,7 +234,7 @@ backend/app/admin/__init__.py      (实现 get_routes() 返回 3 个 RouteEntry)
 backend/app/auth/__init__.py       (实现 get_routes() 返回 1 个 RouteEntry)
 backend/app/tasks/__init__.py      (实现 get_routes() 返回 9 个 RouteEntry)
 backend/app/annotation/__init__.py (实现 get_routes() 返回 1 个 RouteEntry)
-backend/docs/25-Stage2.7-实施完成报告.md (本文件)
+backend/docs/25-Stage2.7-实施完成报告.md (本节件)
 ```
 
 合计: 7 个修改文件 + 1 个新增文件 = 8 个文件变更.

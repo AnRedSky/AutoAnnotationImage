@@ -1,10 +1,5 @@
 # v3.6.7 训练曲线数据连续性修复报告
 
-**修复日期**: 2026-08-06
-**影响版本**: v3.6.0 ~ v3.6.6
-**问题类型**: 训练曲线数据丢失 (P1 - 业务功能缺陷)
-**修复类型**: API 端点跨源合并 + 回归测试覆盖
-
 ---
 
 ## 一、问题描述
@@ -30,7 +25,7 @@
 - 用户无法看到训练的整体趋势
 - 无法判断模型在前 5 个 epoch 是否已经收敛
 - 无法对比 pause 前后学习率/损失变化
-- 影响论文中"训练过程分析"的可信度
+- 影响系统文档中"训练过程分析"的可信度
 
 ---
 
@@ -268,7 +263,7 @@ def test_history_py_does_not_have_old_redis_first_pattern(self):
 |------|----------|----------|----------|
 | `backend/app/tasks/api/training/history.py` | 修改 | +35 / -15 | 跨源合并: 取数据更全的源 |
 | `backend/tests/test_v367_history_resume_continuity.py` | 新增 | +368 | 19 个回归测试 |
-| `docs/task-summaries/020-fix-history-resume-continuity-v3.6.7.md` | 新增 | (本文件) | 修复报告 |
+| `docs/task-summaries/020-fix-history-resume-continuity-v3.6.7.md` | 新增 | (本节件) | 修复报告 |
 
 ---
 

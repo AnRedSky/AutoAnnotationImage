@@ -1,10 +1,5 @@
 # v3.6.1 PATCH — TrainingJob resume 训练 race condition 兜底
 
-> **报告日期**: 2026-08-06
-> **修复版本**: v3.6.1 (HOTFIX, 紧跟 v3.6.0)
-> **触发事件**: 用户报告「点击暂停后再次点击继续训练时, 出现 IntegrityError 1062」
-> **关联文档**: [plan-c-train-perf-v3.6.0.md](../../.trae/documents/plan-c-train-perf-v3.6.0.md) 附录 A
-
 ---
 
 ## 一、Bug 描述

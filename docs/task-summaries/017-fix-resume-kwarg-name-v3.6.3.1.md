@@ -1,11 +1,5 @@
 # v3.6.3.1 HOTFIX — resume 续训参数名错位 bug 修复
 
-> **修复日期**: 2026-08-06
-> **触发背景**: v3.6.3 patch (`7efb000`) 后用户点击「继续训练」时 worker 启动 → 训练崩溃
-> **错误信息**: `TypeError: run_training() got an unexpected keyword argument 'resume_from_epoch'`
-> **影响范围**: 所有使用 v3.6.3 patch 的 classification 任务 resume 场景
-> **修复提交**: 本次 hotfix (v3.6.3.1)
-
 ---
 
 ## 一、问题描述
@@ -180,9 +174,9 @@ result = run_training(
 |------|------|------|
 | [backend/tests/test_v3631_worker_kwarg_contract.py](file:///d:/works/WorkBuddy/Myhome/ThesisDesignImplementation/thesis-image-annotation/backend/tests/test_v3631_worker_kwarg_contract.py) | 4 测试类 / 9 个测试方法 | AST 静态契约测试, 防止 worker → ML 函数 kwarg 错配 |
 
-### 4.3 文档 (本文件 + 计划更新)
+### 4.3 文档 (本节件 + 计划更新)
 
-- 本文件: `docs/task-summaries/017-fix-resume-kwarg-name-v3.6.3.1.md`
+- 本节件: `docs/task-summaries/017-fix-resume-kwarg-name-v3.6.3.1.md`
 - 计划更新: `plan-c-train-perf-v3.6.0.md` 附录 D
 
 ---

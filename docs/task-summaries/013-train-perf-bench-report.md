@@ -1,10 +1,5 @@
 # v3.6.0 训练性能优化 — 性能基准测试报告
 
-> **报告日期**: 2026-08-06
-> **基准版本**: v3.6.0 (P0/P1/P2/P3/P4/P5 全部完成)
-> **测试环境**: Windows 11 Pro / Python 3.11.15 / PyTorch 2.2.0+cu121 / CPU 模式
-> **关联文档**: [plan-c-train-perf-v3.6.0.md](../../.trae/documents/plan-c-train-perf-v3.6.0.md) / [010-train-slow-analysis.md](010-train-slow-analysis.md)
-
 ---
 
 ## 一、测试环境

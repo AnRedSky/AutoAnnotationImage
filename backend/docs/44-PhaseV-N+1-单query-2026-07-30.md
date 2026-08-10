@@ -1,10 +1,5 @@
 # Phase V 优化 #2: /api/models/active N+1 → 单 query (ROW_NUMBER)
 
-> **日期**: 2026-07-30 13:15
-> **基线**: docs/43 §六 backlog (Phase V 优化 #2)
-> **触发器**: 用户在 docs/43 commit 之后提"都是文档, 不够真优化" 的反馈 — 直接 audit 上代码找真 N+1
-> **测试方法**: TDD (RED → GREEN)
-
 ---
 
 ## 一、问题 (Phase 1: Root Cause)
@@ -187,7 +182,7 @@ improvement: 18.5% (4 datasets)
 - `backend/app/tasks/service/model_service.py` — 新增 `get_active_for_all_datasets` (10 行)
 - `backend/app/tasks/api/model/query.py` — endpoint 改用新方法 + `_model_to_dict` helper
 - `backend/tests/test_model_service_no_n_plus_1.py` — 新增 (180 行, 5 tests)
-- `backend/docs/44-PhaseV-N+1-单query-2026-07-30.md` — 本文件
+- `backend/docs/44-PhaseV-N+1-单query-2026-07-30.md` — 本节件
 
 ---
 

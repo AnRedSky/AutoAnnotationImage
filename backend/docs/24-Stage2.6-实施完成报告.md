@@ -1,8 +1,5 @@
 # Stage 2.6 实施完成报告 — workers + ml 迁入 app.tasks 应用
 
-**编制日期**: 2026-07-25
-**版本**: v3.0.0 Stage 2.6
-**关联文档**:
 - [15-务实友好架构方案](./15-务实友好架构方案.md)
 - [17-3层架构重构执行计划](./17-3层架构重构执行计划.md)
 - [18-多应用架构优化方案](./18-多应用架构优化方案.md)
@@ -175,7 +172,7 @@ backend/app/tasks/workers/celery_app.py          (新建, Celery 实例)
 backend/app/tasks/workers/classification.py      (新建, 分类 worker)
 backend/app/tasks/workers/detection.py           (新建, 检测 worker)
 backend/app/tasks/workers/segmentation.py        (新建, 分割 worker)
-backend/docs/24-Stage2.6-实施完成报告.md         (本文件)
+backend/docs/24-Stage2.6-实施完成报告.md         (本节件)
 ```
 
 ### 5.2 修改文件 (兼容垫片 + 聚合导出)

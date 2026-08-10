@@ -312,7 +312,7 @@ new file:  app/common/cache.py
 new file:  app/database/redis.py
 new file:  app/database/migration.py
 new file:  app/tasks/ml/ultralytics_setup.py
-new file:  docs/34-app-core-目录整理报告.md  (本文件)
+new file:  docs/34-app-core-目录整理报告.md  (本节件)
 ```
 
 **总变更**: 21 modified + 4 deleted + 4 new file = 29 项变更.

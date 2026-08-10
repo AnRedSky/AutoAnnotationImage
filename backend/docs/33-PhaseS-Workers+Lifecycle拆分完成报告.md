@@ -1,7 +1,5 @@
 # Phase S — Workers + TrainingLifecycleService 拆分完成报告
 
-> **目标**: 把 3 个 worker 单文件 + 1 个 service 单文件全部拆为子模块,确保单文件 ≤ 350 行
-
 ---
 
 ## 一、拆分总览

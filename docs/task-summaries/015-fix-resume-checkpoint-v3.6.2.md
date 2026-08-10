@@ -1,11 +1,5 @@
 # v3.6.2 PATCH — Resume 训练真正从断点续训 (而非从头开始)
 
-> **报告日期**: 2026-08-06
-> **修复版本**: v3.6.2 (HOTFIX, 紧跟 v3.6.1)
-> **触发事件**: 用户报告「暂停后再继续训练是从头开始训练的了」
-> **前置修复**: [v3.6.1 race condition 兜底](014-fix-resume-race-condition-v3.6.1.md) (解决 IntegrityError, 但**未解决**"恢复后从头训练"的真正根因)
-> **关联文档**: [plan-c-train-perf-v3.6.0.md](../../.trae/documents/plan-c-train-perf-v3.6.0.md) 附录 B
-
 ---
 
 ## 一、Bug 描述

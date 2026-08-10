@@ -1,9 +1,5 @@
 # Phase R 后端 API 拆分完成报告 — model.py → model/ 包
 
-**日期**: 2026-07-25
-**版本**: v3.0.0 Phase R
-**范围**: `backend/app/tasks/api/model.py` 拆分
-
 ---
 
 ## 一、拆分动机

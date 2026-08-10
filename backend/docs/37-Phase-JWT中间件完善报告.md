@@ -1,11 +1,5 @@
 # Phase B: JWT 中间件完善报告 (Token 吊销 + 限流 + 审计 + 自动续期)
 
-> **日期**: 2026-07-25
-> **范围**: 后端认证 / 鉴权 / 中间件完整链路
-> **关联提交**: Phase A 标准化 + 细分异常
-> **状态**: ✅ 全部完成, 64/64 单元测试通过
-> **前置**: [36-Phase-JWT验证完善报告.md](./36-Phase-JWT验证完善报告.md)
-
 ---
 
 ## 一、问题背景
@@ -89,7 +83,7 @@ def check_revoked(*, jti=None, user_id=None, iat=None) -> bool:
 
 ### 3.2 decode_token 集成
 
-[security.py:280-298](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/security/security.py#L280-L298) 在签名/iss/aud/exp 校验后追加吊销检查:
+[security.py:280-298](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/security/security.py#L280-L298) 在签名/iss/aud/exp 校验后追加吊销检查:
 
 ```python
 # Phase-B: 吊销检查 (jti + 用户级)
@@ -111,7 +105,7 @@ if check_revocation:
 
 ### 3.3 业务集成 — `AuthService`
 
-[auth_service.py:108-150](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/auth/service/auth_service.py#L108-L150) 改密时调用 `revoke_user`:
+[auth_service.py:108-150](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/auth/service/auth_service.py#L108-L150) 改密时调用 `revoke_user`:
 
 ```python
 @staticmethod
@@ -127,7 +121,7 @@ async def change_password(db, user, old_password, new_password) -> User:
     return user
 ```
 
-[auth_service.py:153-178](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/auth/service/auth_service.py#L153-L178) 登出时调用 `revoke_jti`:
+[auth_service.py:153-178](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/auth/service/auth_service.py#L153-L178) 登出时调用 `revoke_jti`:
 
 ```python
 @staticmethod
@@ -189,7 +183,7 @@ async def logout(ctx = Depends(get_current_user_with_payload)):
 
 ### 4.2 维度 — 4 种预置策略
 
-[runtime 定义于 rate_limit.py](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/rate_limit.py):
+[runtime 定义于 rate_limit.py](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/rate_limit.py):
 
 | Profile | max_requests | window | scope | 适用端点 |
 |---------|--------------|--------|-------|----------|
@@ -222,7 +216,7 @@ if current >= profile.max_requests:
 
 ### 5.1 事件类型
 
-[auth_audit.py:42-53](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/auth_audit.py#L42-L53) 定义 8 种事件:
+[auth_audit.py:42-53](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/auth_audit.py#L42-L53) 定义 8 种事件:
 
 | 事件 | 触发场景 | 日志级别 |
 |------|----------|----------|
@@ -269,7 +263,7 @@ auth_event: type=login_success rid=abc123 user_id=1 username='alice' ip=1.2.3.4 
 
 ### 6.1 触发条件
 
-[token_refresh.py:107-112](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/token_refresh.py#L107-L112):
+[token_refresh.py:107-112](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/token_refresh.py#L107-L112):
 
 ```python
 exp = payload.get("exp")
@@ -307,7 +301,7 @@ http.interceptors.response.use((response) => {
 
 ### 6.4 续期保留声明
 
-[_renew()](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/token_refresh.py#L136-L149) 保留 `sub / username / role`, 重新生成 `iat / exp / jti`:
+[_renew()](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/token_refresh.py#L136-L149) 保留 `sub / username / role`, 重新生成 `iat / exp / jti`:
 
 ```python
 def _renew(self, old_payload: dict) -> str:
@@ -526,23 +520,23 @@ assert retry_after > 0
 ## 十二、引用
 
 ### 中间件实现
-- [token_revocation.py:1-187](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/security/token_revocation.py#L1-L187) — Token 吊销服务
-- [rate_limit.py](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/rate_limit.py) — 限流中间件
-- [auth_audit.py:1-273](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/auth_audit.py#L1-L273) — 审计中间件
-- [token_refresh.py:1-168](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/token_refresh.py#L1-L168) — 自动续期
+- [token_revocation.py:1-187](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/security/token_revocation.py#L1-L187) — Token 吊销服务
+- [rate_limit.py](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/rate_limit.py) — 限流中间件
+- [auth_audit.py:1-273](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/auth_audit.py#L1-L273) — 审计中间件
+- [token_refresh.py:1-168](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/token_refresh.py#L1-L168) — 自动续期
 
 ### 业务集成
-- [auth_service.py:1-230](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/auth/service/auth_service.py#L1-L230) — AuthService (集成吊销 + 审计)
-- [auth.py](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/auth/api/auth.py) — Auth API 端点
-- [auth.py:122-133](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/auth.py#L122-L133) — get_current_user_with_payload 依赖
+- [auth_service.py:1-230](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/auth/service/auth_service.py#L1-L230) — AuthService (集成吊销 + 审计)
+- [auth.py](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/auth/api/auth.py) — Auth API 端点
+- [auth.py:122-133](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/auth.py#L122-L133) — get_current_user_with_payload 依赖
 
 ### 中间件注册
-- [http/__init__.py:119-166](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/http/__init__.py#L119-L166) — MiddlewareRegistry 4 个新条目
+- [http/__init__.py:119-166](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/http/__init__.py#L119-L166) — MiddlewareRegistry 4 个新条目
 
 ### 测试
-- [test_auth_middleware.py:1-339](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/tests/test_auth_middleware.py#L1-L339) — 30 用例
-- [test_auth_service_revocation.py:1-415](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/tests/test_auth_service_revocation.py#L1-L415) — 14 用例
+- [test_auth_middleware.py:1-339](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/tests/test_auth_middleware.py#L1-L339) — 30 用例
+- [test_auth_service_revocation.py:1-415](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/tests/test_auth_service_revocation.py#L1-L415) — 14 用例
 
 ### Phase A 前置
 - [36-Phase-JWT验证完善报告.md](./36-Phase-JWT验证完善报告.md) — JWT 标准化 + 细分异常
-- [security.py:280-298](file:///d:/works/WorkBuddy/Myhome/毕业论文设计与实现/thesis-image-annotation/backend/app/middleware/security/security.py#L280-L298) — decode_token 吊销检查集成
+- [security.py:280-298](file:///d:/works/WorkBuddy/Myhome/系统实现/thesis-image-annotation/backend/app/middleware/security/security.py#L280-L298) — decode_token 吊销检查集成

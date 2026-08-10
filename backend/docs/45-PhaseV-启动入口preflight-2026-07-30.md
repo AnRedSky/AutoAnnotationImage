@@ -1,10 +1,5 @@
 # Phase V 优化 #3: 启动入口完善 (preflight + admin bootstrap) — 2026-07-30
 
-> **日期**: 2026-07-30 13:32
-> **基线**: commit `28a35d8` (Phase V #2 N+1 fix)
-> **触发器**: 用户 push "完善本地服务的启动, start, workers 启动入口"
-> **测试方法**: 复用现有 pytest + 实跑 start_api / start_workers
-
 ---
 
 ## 一、问题 (Phase 1: Root Cause)
@@ -116,7 +111,7 @@ def preflight_deps() -> bool:
 - `backend/start_api.py` — 新增 `preflight()` + `_check_port()`, 修 `show_status` 端口自适应
 - `backend/start_workers.py` — 新增 `preflight_deps()`, 嵌入 start_foreground/detach
 - `backend/.env.example` — 加 admin bootstrap 文档块 (注释不激活, 默认不会被读到)
-- `backend/docs/45-PhaseV-启动入口preflight-2026-07-30.md` — 本文件
+- `backend/docs/45-PhaseV-启动入口preflight-2026-07-30.md` — 本节件
 
 ---
 

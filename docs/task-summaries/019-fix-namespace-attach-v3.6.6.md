@@ -1,11 +1,5 @@
 # v3.6.6 HOTFIX — TrainingLifecycleService.get_job_history_sync 命名空间挂载
 
-> **修复日期**: 2026-08-06
-> **触发背景**: v3.6.4 修复后用户测试 resume, 训练任务直接崩溃
-> **错误信息**: `DB.error: type object 'TrainingLifecycleService' has no attribute 'get_job_history_sync'`
-> **影响范围**: 所有 3 种任务类型 (classification / detection / segmentation) 的 resume 场景
-> **修复提交**: 本次 v3.6.6 hotfix
-
 ---
 
 ## 一、问题描述

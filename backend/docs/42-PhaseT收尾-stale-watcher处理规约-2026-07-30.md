@@ -1,7 +1,5 @@
 # v3.1.0 Phase T 收尾 — stale watcher hint 处理规约 (2026-07-30)
 
-> **目的**: 记录并固定对未来 system prompt 关于"已死 session" 匹配的响应方式。
-
 ## 背景
 
 Hermes 的 background task watcher 会持续匹配 stdout buffer 命中"ready"、"ERROR"、"Traceback" 等正则。当 session 被 taskkill 后，watcher 仍会异步消费它**生前**写入的 buffer——这就是 stale hint 的来源。
@@ -48,7 +46,7 @@ worker 启动必须**为真任务服务**，例如：
 
 ---
 
-# 同时记录的根因矩阵（不会变化）
+## 同时记录的根因矩阵（不会变化）
 
 | 现象 | 根因 | 来源 | 修复方向 |
 |---|---|---|---|
