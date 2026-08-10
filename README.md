@@ -1,10 +1,11 @@
 # 图像标注平台 (Image Annotation Platform)
 
-> **版本**: v3.3.1
+> **版本**: v3.4.0
 > **状态**: 稳定运行
 > **类别**: 基于深度学习的协同标注与训练系统
 > **核心范式**: AI 预标注 + 人工修正 + 增量训练
 > **部署方式**: 一键 Docker Compose（统一 `.env` 配置文件）
+> **代码冻结点**: v1.0.0（2026-08-05）
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4-brightgreen)](https://vuejs.org/)
@@ -56,13 +57,16 @@
 
 ### 1.3 子模块文档
 
-| 模块            | 文档                                        |
-| --------------- | ------------------------------------------- |
-| 后端            | [backend/README.md](backend/README.md)       |
-| 前端            | (本文档统一说明)                            |
-| 项目说明        | [docs/项目说明文档.md](docs/项目说明文档.md) |
-| 使用手册        | [docs/使用手册.md](docs/使用手册.md)         |
-| 部署 / 运维记录 | [docs/](docs/)                               |
+| 模块               | 文档                                                          |
+| ------------------ | ------------------------------------------------------------- |
+| 后端详细说明       | [backend/README.md](backend/README.md)                        |
+| 后端历史报告       | [backend/docs/README.md](backend/docs/README.md)              |
+| 项目说明文档       | [docs/06-02-项目说明文档.md](docs/06-02-项目说明文档.md)      |
+| 使用手册           | [docs/06-01-使用手册.md](docs/06-01-使用手册.md)              |
+| 部署流程手册       | [docs/07-01-部署流程手册.md](docs/07-01-部署流程手册.md)      |
+| 部署集中管理目录   | [deploy/README.md](deploy/README.md)                          |
+| 项目文档总入口     | [docs/00-00-README.md](docs/00-00-README.md)                  |
+| 代码冻结检查清单   | [docs/05-01-代码冻结检查清单.md](docs/05-01-代码冻结检查清单.md) |
 
 ---
 
@@ -118,6 +122,13 @@
 - 训练 / 自动标注任务端到端实时进度推送
 - 单例 SSE 池 + 引用计数（同一任务始终仅 1 条连接）
 
+### 2.9 人工修正可追溯（v3.4.0 新增）
+
+- AI vs 当前 diff 徽章，标注员一眼判断是否需要修正
+- 每次修正可填原因，写完整 diff 到 AnnotationLog
+- 一键回滚到 AI 预测，保留 ai_prediction 快照
+- 数据集级修正统计（修正率、热门修正方向、修正原因分布）
+
 ---
 
 ## 三、技术架构
@@ -157,10 +168,12 @@ thesis-image-annotation/
 │   │   ├── schemas/         # Pydantic DTO
 │   │   ├── registry.py      # App/Middleware/Plugin Registry
 │   │   └── main.py          # 入口
-│   ├── tests/               # pytest 套件 (43 文件)
-│   ├── docs/                # 后端历史报告/规划
-│   ├── models/              # 训练产物 (gitignore)
-│   ├── uploads/             # 上传文件 (gitignore)
+│   ├── tests/               # pytest 套件
+│   ├── docs/                # 后端历史报告/规划 (57 个文档)
+│   ├── models/              # ORM 模型 + 训练产物 (gitignore)
+│   ├── migrations/          # Alembic 数据库迁移
+│   ├── plugin/              # 存储/ML/任务队列/通知插件
+│   ├── scripts/             # 运维脚本
 │   ├── pyproject.toml       # uv 单一来源
 │   ├── requirements.txt     # pip 兼容备份
 │   ├── Dockerfile.api       # API 镜像
@@ -176,23 +189,41 @@ thesis-image-annotation/
 │   │   ├── stores/          # Pinia 状态
 │   │   ├── styles/          # 全局样式
 │   │   ├── utils/           # 工具函数 (sse/date/format)
-│   │   └── views/           # 12 个顶级页面
-│   │       ├── Login/       Dashboard/  Datasets/
-│   │       ├── DatasetDetail/  Annotate/  Training/
-│   │       ├── Models/  Admin/  Profile/  Layout/
+│   │   └── views/           # 顶级页面
+│   │       ├── Login/       Dashboard/  Datasets/  DatasetDetail/
+│   │       ├── Annotate/    Training/   Models/    Profile/
+│   │       ├── Admin/       (Users/Teams/AuditLog)
+│   │       └── Layout/
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tsconfig.json
-├── docs/                    # 项目级文档
-│   ├── 项目说明文档.md       # 项目实现价值
-│   ├── 使用手册.md          # 完整使用指南
+├── docs/                    # 项目级文档（双段编号 00-00 ~ 09-05）
+│   ├── 00-00-README.md      # 文档总入口
+│   ├── 01-xx                # 系统设计
+│   ├── 02-xx                # 实现记录
+│   ├── 03-xx                # 功能完善
+│   ├── 04-xx                # 测试与评估
+│   ├── 05-xx                # 代码冻结与优化
+│   ├── 06-01-使用手册.md
+│   ├── 06-02-项目说明文档.md
+│   ├── 07-01-部署流程手册.md
+│   ├── 08-xx                # 发布说明
+│   └── archive/             # 历史归档
+├── deploy/                  # 部署集中管理 (v3.3.2+)
 │   ├── README.md
-│   ├── 代码优化迭代记录.md
-│   ├── cleanup-sprint-2026-07-29.md
-│   └── ... (历史 release notes)
-├── scripts/                 # 启停 / E2E 脚本
+│   ├── configs/             # Dockerfile / nginx.conf / .env.example 参考副本
+│   ├── scripts/             # 部署脚本
+│   ├── docs/                # 部署指南
+│   └── reports/             # 部署检测报告
+├── scripts/                 # 顶层运维脚本 (E2E / 验证 / 本地启停)
+│   ├── start_docker.ps1     # Windows 一键部署
+│   ├── start_docker.sh      # Linux/macOS 一键部署
+│   ├── gen_secrets.py       # 密钥生成
+│   ├── verify_deployment.py # 部署验证
+│   └── e2e/                 # 端到端测试
 ├── logs/                    # 运行时日志 (gitignore)
-├── docker-compose.yml       # 一键启动编排
+├── docker-compose.yml       # 一键启动编排 (7 个服务)
+├── .env.example             # 统一环境变量模板
 └── README.md                # ← 本文件
 ```
 
@@ -206,7 +237,7 @@ thesis-image-annotation/
        ▼              ▼              ▼
 ┌──────────┐   ┌──────────┐   ┌──────────────┐
 │  前端    │   │  API     │   │  SSE / 文件   │
-│ (5173)   │   │ (8000)   │   │  (同 8000)    │
+│ (8080)   │   │ (8000)   │   │  (同 8000)    │
 └──────────┘   └────┬─────┘   └──────────────┘
                    │
         ┌──────────┼──────────┐
@@ -233,12 +264,12 @@ thesis-image-annotation/
 
 | 角色              | CPU  | 内存  | 硬盘    | GPU         |
 | ----------------- | ---- | ----- | ------- | ----------- |
-| API 服务          | 2 核 | 4 GB  | 20 GB   | —          |
-| Worker (CPU)      | 4 核 | 8 GB  | 50 GB   | —          |
+| API 服务          | 2 核 | 4 GB  | 20 GB   | —           |
+| Worker (CPU)      | 4 核 | 8 GB  | 50 GB   | —           |
 | Worker (GPU 推荐) | 4 核 | 16 GB | 100 GB  | NVIDIA 8GB+ |
-| MySQL             | 2 核 | 4 GB  | 50 GB   | —          |
-| Redis             | 1 核 | 1 GB  | 5 GB    | —          |
-| MinIO             | 1 核 | 2 GB  | 100 GB+ | —          |
+| MySQL             | 2 核 | 4 GB  | 50 GB   | —           |
+| Redis             | 1 核 | 1 GB  | 5 GB    | —           |
+| MinIO             | 1 核 | 2 GB  | 100 GB+ | —           |
 
 ### 4.2 软件依赖
 
@@ -278,29 +309,33 @@ chmod +x scripts/start_docker.sh
 
 启动后访问：
 
-| 服务 | URL |
-| --- | --- |
-| 前端 | http://localhost:8080 |
-| API 文档 | http://localhost:8000/docs |
-| 健康检查 | http://localhost:8000/api/health |
-| MinIO 控制台 | http://localhost:9001 |
+| 服务         | URL                              |
+| ------------ | -------------------------------- |
+| 前端         | http://localhost:8080            |
+| API 文档     | http://localhost:8000/docs       |
+| 健康检查     | http://localhost:8000/api/health |
+| MinIO 控制台 | http://localhost:9001            |
 
 **常用命令**：
 
-```bash
+```powershell
 # Windows:
 .\scripts\start_docker.ps1 -Status       # 查看状态
 .\scripts\start_docker.ps1 -Logs         # 查看日志
 .\scripts\start_docker.ps1 -Stop         # 停止服务
 .\scripts\start_docker.ps1 -Rebuild      # 重新构建
 .\scripts\start_docker.ps1 -Reset        # 重置数据
+.\scripts\start_docker.ps1 -Verify       # 端到端验证
+```
 
+```bash
 # Linux/macOS:
 ./scripts/start_docker.sh --status
 ./scripts/start_docker.sh --logs
 ./scripts/start_docker.sh --stop
 ./scripts/start_docker.sh --rebuild
 ./scripts/start_docker.sh --reset
+./scripts/start_docker.sh --verify
 ```
 
 ### 5.1 方式一：Docker Compose 手动启动
@@ -329,16 +364,16 @@ docker compose logs -f api
 
 | 服务         | URL                              | 默认凭据                |
 | ------------ | -------------------------------- | ----------------------- |
-| 前端         | http://localhost:8080            | —                      |
-| API 文档     | http://localhost:8000/docs       | —                      |
-| 健康检查     | http://localhost:8000/api/health | —                      |
+| 前端         | http://localhost:8080            | —                       |
+| API 文档     | http://localhost:8000/docs       | —                       |
+| 健康检查     | http://localhost:8000/api/health | —                       |
 | MinIO 控制台 | http://localhost:9001            | 见 `.env`（自动生成）   |
 | MySQL        | localhost:3306                   | 见 `.env`（自动生成）   |
 
 **默认管理员账户**：
 
-| 用户名    | 密码         | 角色        |
-| --------- | ------------ | ----------- |
+| 用户名  | 密码       | 角色        |
+| ------- | ---------- | ----------- |
 | `admin` | `admin123` | super_admin |
 
 > ⚠️ **生产环境请第一时间修改默认密码！**
@@ -375,9 +410,9 @@ python start_api.py --reload
 python start_workers.py
 ```
 
-#### 步骤 2.5：GPU 训练环境（可选）
+#### 步骤 3：GPU 训练环境（可选）
 
-> v3.3.3 起 `pyproject.toml` 已通过 `[tool.uv.sources]` 把 `torch` / `torchvision`
+> `pyproject.toml` 已通过 `[tool.uv.sources]` 把 `torch` / `torchvision`
 > 指向 PyTorch 官方 `cu121` 索引，默认 `uv sync` 即装 CUDA 版。如果你的机器
 > 没有 NVIDIA GPU 或需要回退到 CPU，可参考下方命令。
 
@@ -463,7 +498,7 @@ worker-train:
 > 升级到 2.3+，需要把 `[tool.uv.index]` 的 URL 同步改为 `cu124` 或 `cu126`，
 > 否则 `uv lock` 会失败。
 
-#### 步骤 3：启动前端
+#### 步骤 4：启动前端
 
 ```bash
 cd frontend
@@ -473,7 +508,7 @@ npm run dev                      # http://localhost:5173
 
 ### 5.3 第一次使用流程
 
-1. 浏览器访问 http://localhost:5173
+1. 浏览器访问 http://localhost:8080（一键部署）或 http://localhost:5173（本地开发）
 2. 用 `admin / admin123` 登录
 3. 左侧菜单「数据集」→ 右上「新建」→ 选任务类型（分类/检测/分割）
 4. 进入数据集详情 → 「上传」→ 拖拽多文件
@@ -486,7 +521,7 @@ npm run dev                      # http://localhost:5173
 
 ## 六、配置说明
 
-### 6.0 统一 .env 配置（v3.3.1 新设计）
+### 6.0 统一 .env 配置
 
 > ⚠️ **核心变更**: 系统现已统一从**项目根 `.env`** 读取所有环境变量。
 > 不再使用 `backend/.env.docker` / `backend/.env.prod` 等多个分散文件。
@@ -504,7 +539,7 @@ Compose  (pydantic)   (Vite ARG)
 - **后端**：pydantic-settings 自动从项目根 `.env` 加载（兼容 `backend/.env` 回退）
 - **前端**：构建时通过 `ARG VITE_API_BASE_URL` 注入
 
-完整字段说明见 [使用手册 § 3.1](docs/使用手册.md#三系统配置)。
+完整字段说明见 [使用手册 § 3.1](docs/06-01-使用手册.md)。
 
 ### 6.1 必填项（生产环境强制）
 
@@ -559,7 +594,7 @@ HF_HUB_DISABLE_SYMLINKS=1
 HF_HUB_DISABLE_SYMLINKS_WARNING=1
 ```
 
-> 详细全字段说明、生产环境 checklist 见 [使用手册](docs/使用手册.md)。
+> 详细全字段说明、生产环境 checklist 见 [使用手册](docs/06-01-使用手册.md)。
 
 ### 6.7 前端配置
 
@@ -628,6 +663,7 @@ Celery 异步推理 → SSE 实时进度
 3. **多模型对比框架** —— ResNet / EfficientNet / ConvNeXt / ViT / YOLOv8 横向对比
 4. **端到端实时观测** —— SSE 进度推送 + 训练曲线 + 审计日志
 5. **团队协作机制** —— 数据集共享 + 角色权限 + 审计
+6. **人工修正可追溯（v3.4.0）** —— diff 提示、修正原因记录、一键回滚到 AI 预测
 
 ---
 
@@ -639,63 +675,66 @@ Celery 异步推理 → SSE 实时进度
 
 | 模块   | 路径                                          | 方法             | 说明                  |
 | ------ | --------------------------------------------- | ---------------- | --------------------- |
-| 认证   | `/api/auth/login`                           | POST             | 用户登录              |
-| 认证   | `/api/auth/register`                        | POST             | 用户注册              |
-| 认证   | `/api/auth/logout`                          | POST             | 撤销 Token            |
-| 认证   | `/api/auth/me`                              | GET              | 当前用户              |
-| 数据集 | `/api/datasets`                             | GET/POST         | 列出/创建             |
-| 数据集 | `/api/datasets/{id}`                        | GET/DELETE       | 详情/删除             |
-| 数据集 | `/api/datasets/{id}/categories`             | GET/POST         | 类别管理              |
-| 图像   | `/api/images/upload/{dataset_id}`           | POST             | 批量上传              |
-| 图像   | `/api/images/auto-label/{dataset_id}`       | POST             | AI 预标注             |
-| 图像   | `/api/images/list/{dataset_id}`             | GET              | 图片列表              |
-| 图像   | `/api/images/{id}`                          | GET/DELETE       | 详情/删除             |
-| 标注   | `/api/annotations/save`                     | POST             | 保存标注              |
-| 标注   | `/api/annotations/clear`                    | POST             | 批量清除              |
-| 标注   | `/api/annotations/mark-unqualified`         | POST             | 标记不合格            |
-| 标注   | `/api/annotations/stats/{dataset_id}`       | GET              | 标注统计              |
-| 检测   | `/api/detection/annotations/save`           | POST             | BBox 保存             |
-| 检测   | `/api/detection/annotations/{image_id}`     | GET              | 拉取 BBox             |
-| 检测   | `/api/detection/train`                      | POST             | YOLO 训练             |
-| 检测   | `/api/detection/auto-annotate`              | POST             | 自训练 YOLO 自动标注  |
-| 检测   | `/api/detection/auto-annotate-pretrained`   | POST             | 预训练 YOLO 自动标注  |
-| 分割   | `/api/segmentation/masks/upload/{image_id}` | POST             | mask 上传             |
-| 分割   | `/api/segmentation/train`                   | POST             | 分割训练              |
-| 训练   | `/api/training/start`                       | POST             | 启动训练              |
-| 训练   | `/api/training/jobs`                        | GET              | 任务列表（分页+过滤） |
-| 训练   | `/api/training/jobs/{id}`                   | GET/PATCH/DELETE | 详情/编辑/删除        |
-| 训练   | `/api/training/jobs/{id}/start`             | POST             | 重跑/恢复             |
-| 训练   | `/api/training/jobs/{id}/pause`             | POST             | 暂停                  |
-| 训练   | `/api/training/jobs/{id}/cancel`            | POST             | 取消                  |
-| 训练   | `/api/training/progress/stream/{task_id}`   | GET (SSE)        | 实时进度              |
-| 训练   | `/api/training/history/{task_id}`           | GET              | 训练历史曲线          |
-| 模型   | `/api/models/`                              | GET              | 模型列表              |
-| 模型   | `/api/models/active`                        | GET              | 激活模型              |
-| 模型   | `/api/models/{id}/activate`                 | POST             | 激活                  |
-| 模型   | `/api/models/{id}/deactivate`               | POST             | 取消激活              |
-| 模型   | `/api/models/batch-activate`                | POST             | 批量激活              |
-| 模型   | `/api/models/batch-delete`                  | POST             | 批量删除              |
-| 导出   | `/api/export/coco/{dataset_id}`             | GET              | 导出 COCO             |
-| 导出   | `/api/export/yolo/{dataset_id}`             | GET              | 导出 YOLO             |
-| 导出   | `/api/export/csv/{dataset_id}`              | GET              | 导出 CSV              |
-| 统计   | `/api/stats/overview`                       | GET              | 全局概览              |
-| 统计   | `/api/stats/dataset/{id}`                   | GET              | 数据集维度            |
-| 统计   | `/api/stats/confidence/{id}`                | GET              | 置信度分布            |
-| 统计   | `/api/stats/timeline/{id}`                  | GET              | 时间线                |
-| 统计   | `/api/stats/annotator-efficiency`           | GET              | 标注员效率            |
-| 团队   | `/api/teams`                                | GET/POST         | 团队列表/创建         |
-| 团队   | `/api/teams/{id}`                           | GET/PATCH/DELETE | 详情/编辑/删除        |
-| 团队   | `/api/teams/{id}/members`                   | POST             | 邀请成员              |
-| 团队   | `/api/teams/{id}/members/{user_id}`         | DELETE           | 移除成员              |
-| 用户   | `/api/users`                                | GET/POST         | 用户列表/创建 (admin) |
-| 用户   | `/api/users/{id}/role`                      | PATCH            | 改角色 (admin)        |
-| 用户   | `/api/users/{id}/reset-password`            | POST             | 重置密码 (admin)      |
-| 用户   | `/api/users/{id}/activate`                  | POST             | 激活 (admin)          |
-| 用户   | `/api/users/{id}/deactivate`                | POST             | 停用 (admin)          |
-| 系统   | `/api/health`                               | GET              | 健康检查              |
-| 系统   | `/api/system/info`                          | GET              | 系统信息              |
-| 文件   | `/api/files/{id}`                           | GET              | 原图 (query token)    |
-| 文件   | `/api/files/{id}/thumbnail?size=`           | GET              | 缩略图 (query token)  |
+| 认证   | `/api/auth/login`                             | POST             | 用户登录              |
+| 认证   | `/api/auth/register`                          | POST             | 用户注册              |
+| 认证   | `/api/auth/logout`                            | POST             | 撤销 Token            |
+| 认证   | `/api/auth/me`                                | GET              | 当前用户              |
+| 数据集 | `/api/datasets`                               | GET/POST         | 列出/创建             |
+| 数据集 | `/api/datasets/{id}`                          | GET/DELETE       | 详情/删除             |
+| 数据集 | `/api/datasets/{id}/categories`               | GET/POST         | 类别管理              |
+| 图像   | `/api/images/upload/{dataset_id}`             | POST             | 批量上传              |
+| 图像   | `/api/images/auto-label/{dataset_id}`         | POST             | AI 预标注             |
+| 图像   | `/api/images/list/{dataset_id}`               | GET              | 图片列表              |
+| 图像   | `/api/images/{id}`                            | GET/DELETE       | 详情/删除             |
+| 标注   | `/api/annotations/save`                       | POST             | 保存标注              |
+| 标注   | `/api/annotations/clear`                      | POST             | 批量清除              |
+| 标注   | `/api/annotations/mark-unqualified`           | POST             | 标记不合格            |
+| 标注   | `/api/annotations/stats/{dataset_id}`         | GET              | 标注统计              |
+| 标注   | `/api/annotations/correction-history`         | GET              | 修正历史（v3.4.0）    |
+| 标注   | `/api/annotations/revert-to-ai`               | POST             | 回滚到 AI 预测        |
+| 标注   | `/api/annotations/correction-stats`           | GET              | 修正统计              |
+| 检测   | `/api/detection/annotations/save`             | POST             | BBox 保存             |
+| 检测   | `/api/detection/annotations/{image_id}`       | GET              | 拉取 BBox             |
+| 检测   | `/api/detection/train`                        | POST             | YOLO 训练             |
+| 检测   | `/api/detection/auto-annotate`                | POST             | 自训练 YOLO 自动标注  |
+| 检测   | `/api/detection/auto-annotate-pretrained`     | POST             | 预训练 YOLO 自动标注  |
+| 分割   | `/api/segmentation/masks/upload/{image_id}`   | POST             | mask 上传             |
+| 分割   | `/api/segmentation/train`                     | POST             | 分割训练              |
+| 训练   | `/api/training/start`                         | POST             | 启动训练              |
+| 训练   | `/api/training/jobs`                          | GET              | 任务列表（分页+过滤） |
+| 训练   | `/api/training/jobs/{id}`                     | GET/PATCH/DELETE | 详情/编辑/删除        |
+| 训练   | `/api/training/jobs/{id}/start`               | POST             | 重跑/恢复             |
+| 训练   | `/api/training/jobs/{id}/pause`               | POST             | 暂停                  |
+| 训练   | `/api/training/jobs/{id}/cancel`              | POST             | 取消                  |
+| 训练   | `/api/training/progress/stream/{task_id}`     | GET (SSE)        | 实时进度              |
+| 训练   | `/api/training/history/{task_id}`             | GET              | 训练历史曲线          |
+| 模型   | `/api/models/`                                | GET              | 模型列表              |
+| 模型   | `/api/models/active`                          | GET              | 激活模型              |
+| 模型   | `/api/models/{id}/activate`                   | POST             | 激活                  |
+| 模型   | `/api/models/{id}/deactivate`                 | POST             | 取消激活              |
+| 模型   | `/api/models/batch-activate`                  | POST             | 批量激活              |
+| 模型   | `/api/models/batch-delete`                    | POST             | 批量删除              |
+| 导出   | `/api/export/coco/{dataset_id}`               | GET              | 导出 COCO             |
+| 导出   | `/api/export/yolo/{dataset_id}`               | GET              | 导出 YOLO             |
+| 导出   | `/api/export/csv/{dataset_id}`                | GET              | 导出 CSV              |
+| 统计   | `/api/stats/overview`                         | GET              | 全局概览              |
+| 统计   | `/api/stats/dataset/{id}`                     | GET              | 数据集维度            |
+| 统计   | `/api/stats/confidence/{id}`                  | GET              | 置信度分布            |
+| 统计   | `/api/stats/timeline/{id}`                    | GET              | 时间线                |
+| 统计   | `/api/stats/annotator-efficiency`             | GET              | 标注员效率            |
+| 团队   | `/api/teams`                                  | GET/POST         | 团队列表/创建         |
+| 团队   | `/api/teams/{id}`                             | GET/PATCH/DELETE | 详情/编辑/删除        |
+| 团队   | `/api/teams/{id}/members`                     | POST             | 邀请成员              |
+| 团队   | `/api/teams/{id}/members/{user_id}`           | DELETE           | 移除成员              |
+| 用户   | `/api/users`                                  | GET/POST         | 用户列表/创建 (admin) |
+| 用户   | `/api/users/{id}/role`                        | PATCH            | 改角色 (admin)        |
+| 用户   | `/api/users/{id}/reset-password`              | POST             | 重置密码 (admin)      |
+| 用户   | `/api/users/{id}/activate`                    | POST             | 激活 (admin)          |
+| 用户   | `/api/users/{id}/deactivate`                  | POST             | 停用 (admin)          |
+| 系统   | `/api/health`                                 | GET              | 健康检查              |
+| 系统   | `/api/system/info`                            | GET              | 系统信息              |
+| 文件   | `/api/files/{id}`                             | GET              | 原图 (query token)    |
+| 文件   | `/api/files/{id}/thumbnail?size=`             | GET              | 缩略图 (query token)  |
 
 ---
 
@@ -811,13 +850,11 @@ CACHE_ENABLED=true
 CACHE_DEFAULT_TTL=300
 ```
 
-#### 9.5.1 v3.6.0 训练性能调优（核心 P0）
+#### 9.5.1 训练性能调优
 
-[v3.6.0 训练性能优化](.trae/documents/plan-c-train-perf-v3.6.0.md) 将 240 样本 1 epoch 训练从 60-64s 降至 < 10s（6-10× 加速），关键配置项：
+训练性能优化可参考 [deploy/reports/部署深度检测报告.md](deploy/reports/部署深度检测报告.md) 与 [backend/docs/40-健康端到端验证-2026-07-30.md](backend/docs/40-健康端到端验证-2026-07-30.md)。关键配置项：
 
-```bash
-# backend/.env 训练性能调优 (v3.6.0)
-# -------------------------------------------------
+```ini
 # DataLoader 工作进程数 (GPU 训练推荐 2-4, CPU 训练保持 0)
 # 0 = 主进程串行加载 (CPU 默认, 零回归)
 # >0 = 多进程并行加载 + pin_memory (GPU 推荐 4)
@@ -826,11 +863,9 @@ DATALOADER_WORKERS=4
 # MinIO 训练样本预下载并发数 (信号量限流, 避免打爆 MinIO)
 # 1 = 走旧版串行 (零回归, debug 模式)
 # 2-10 = 并发 (GPU 训练推荐 10)
-# >20 可能触发 MinIO 限流
 MINIO_DOWNLOAD_CONCURRENCY=10
 
 # 训练图像预解码 LRU 缓存大小 (worker 进程级 lru_cache)
-# 总内存 = workers × size × per_image
 # 128 张 224×224×3×4B ≈ 75 MB / worker
 # 大图场景 (1920×1080) 建议调小到 32 防止内存爆
 TRAIN_DECODE_CACHE_SIZE=128
@@ -841,20 +876,6 @@ TRAIN_DECODE_CACHE_SIZE=128
 - [ ] GPU 环境: `DATALOADER_WORKERS=4` + `MINIO_DOWNLOAD_CONCURRENCY=10`
 - [ ] CPU 环境: `DATALOADER_WORKERS=0` (避免多进程开销, 保持串行)
 - [ ] MinIO 大文件 (>10 MB): `TRAIN_DECODE_CACHE_SIZE=32` (防内存爆)
-- [ ] 跑 `pytest -m perf tests/benchmarks/` 验证加速比例
-
-**性能基准测试**:
-
-```bash
-# 跑性能基准 (默认 opt-out, 单独跑)
-cd backend
-uv run pytest tests/benchmarks/test_train_perf_benchmark.py -v -s -m perf
-
-# 跑 240 样本 5 epochs 总耗时 < 60s (CPU 放宽至 120s)
-# 跑 1 epoch < 10s (CPU 放宽至 30s)
-```
-
-详细性能数据见 [013-train-perf-bench-report.md](docs/task-summaries/013-train-perf-bench-report.md)。
 
 ### 9.6 升级
 
@@ -877,9 +898,9 @@ docker compose --env-file .env up -d
 
 | 组件   | 日志位置                          |
 | ------ | --------------------------------- |
-| API    | `backend/logs/api.log`          |
-| Worker | `backend/logs/worker_*.log`     |
-| Docker | `docker compose logs <service>` |
+| API    | `logs/api.log`                    |
+| Worker | `logs/worker_*.log`               |
+| Docker | `docker compose logs <service>`   |
 
 慢请求监控：`REQUEST_SLOW_THRESHOLD_MS=500`（默认），超过则 WARNING 日志。
 
@@ -964,19 +985,25 @@ A: 调用 `POST /api/auth/logout` 写黑名单，或修改 `SECRET_KEY` 强制�
 
 ## 十一、版本演进
 
-| 版本 | 关键能力                                                                  |
-| ---- | ------------------------------------------------------------------------- |
-| v1.0 | 基础认证、分类数据集、上传、预标注、人工修正                              |
-| v2.0 | 训练全流程、模型版本、COCO/YOLO/CSV 导出、审计日志                        |
-| v2.5 | 目标检测 YOLOv8、语义分割 DeepLabV3+、不合格图片标记、SSE                 |
-| v2.6 | 训练暂停/恢复、日志持久化、训练列表分页与多维过滤                         |
-| v3.0 | 多应用架构重构（admin / auth / tasks / annotation）、中间件注册、插件化   |
-| v3.1 | 后端 worker 4 阶段优化 + 前端训练性能 4 阶段优化（池化/节流/细粒度/联动） |
-| v3.2 | 多租户、用户/角色/审计 admin 页面、显式 CORS                              |
-| v3.3 | 团队管理、MinIO 存储后端、路径锚定项目根、ultralytics 缓存收敛            |
-| v3.3.1 | **统一 .env 配置（项目根 Single Source of Truth）** + 一键启动脚本 (`start_docker.ps1` / `start_docker.sh`) |
+| 版本     | 关键能力                                                                                                |
+| -------- | ------------------------------------------------------------------------------------------------------- |
+| v1.0.0   | **代码冻结基线**（2026-08-05）：路由 44 条、7 个 ORM 模型、5 个 Pydantic Schema、E2E 10 步全通          |
+| v1.0     | 基础认证、分类数据集、上传、预标注、人工修正                                                            |
+| v2.0     | 训练全流程、模型版本、COCO/YOLO/CSV 导出、审计日志                                                      |
+| v2.5     | 目标检测 YOLOv8、语义分割 DeepLabV3+、不合格图片标记、SSE                                               |
+| v2.5.15  | P0/P1 安全修复 + 性能优化 + 测试增量（A-D 阶段）                                                       |
+| v2.6     | 训练暂停/恢复、日志持久化、训练列表分页与多维过滤                                                       |
+| v3.0     | 多应用架构重构（admin / auth / tasks / annotation）、中间件注册、插件化                                 |
+| v3.1     | 后端 worker 4 阶段优化 + 前端训练性能 4 阶段优化（池化/节流/细粒度/联动）                               |
+| v3.2     | 多租户、用户/角色/审计 admin 页面、显式 CORS                                                            |
+| v3.3     | 团队管理、MinIO 存储后端、路径锚定项目根、ultralytics 缓存收敛                                          |
+| v3.3.0   | 统一 .env 配置（项目根 Single Source of Truth）+ 一键启动脚本 (`start_docker.ps1` / `start_docker.sh`)  |
+| v3.3.2   | 部署集中管理（`deploy/` 目录）                                                                          |
+| v3.4.0   | **人工修正方案**：diff 徽章、修正原因记录、一键回滚到 AI 预测、修正率统计                               |
 
-详细变更记录：[docs/代码优化迭代记录.md](docs/代码优化迭代记录.md) / [docs/cleanup-sprint-2026-07-29.md](docs/cleanup-sprint-2026-07-29.md)
+详细变更记录：[docs/05-02-代码优化迭代记录.md](docs/05-02-代码优化迭代记录.md) / [docs/08-01-v2.5.9-release-notes.md](docs/08-01-v2.5.9-release-notes.md) / [docs/08-02-v3.4.0-人工修正方案.md](docs/08-02-v3.4.0-人工修正方案.md)
+
+完整后端演进历史：[backend/docs/README.md](backend/docs/README.md) 含 57 个历史报告
 
 ---
 
@@ -989,7 +1016,10 @@ A: 调用 `POST /api/auth/logout` 写黑名单，或修改 `SECRET_KEY` 强制�
 ## 附录
 
 - [后端 README](backend/README.md) — 后端模块详细说明
-- [项目说明文档](docs/项目说明文档.md) — 项目实现价值客观描述
-- [使用手册](docs/使用手册.md) — 完整使用指南
+- [项目说明文档](docs/06-02-项目说明文档.md) — 项目实现价值客观描述
+- [使用手册](docs/06-01-使用手册.md) — 完整使用指南
+- [部署流程手册](docs/07-01-部署流程手册.md) — Docker Compose 部署操作手册
+- [项目文档索引](docs/00-00-README.md) — 全部项目文档入口
+- [代码冻结检查清单](docs/05-01-代码冻结检查清单.md) — v1.0.0 冻结基线
 - [API 文档](http://localhost:8000/docs) — 启动后访问
 - [健康检查](http://localhost:8000/api/health) — 启动后访问
