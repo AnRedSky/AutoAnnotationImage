@@ -87,8 +87,8 @@ RATE_LIMIT_PROFILES: dict[str, RateLimitProfile] = {
     # 全局通用: 防止接口被高频刷 (DDoS 基础防护)
     "global": RateLimitProfile(
         name="global",
-        max_requests=600,
-        window_seconds=60,
+        max_requests=100,
+        window_seconds=1,
         scope="ip",
         enabled=True,
     ),
