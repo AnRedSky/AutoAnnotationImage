@@ -34,7 +34,7 @@ from app.tasks.model.dataset import Dataset
 from app.admin.model.user import User
 from app.middleware.http.auth import get_current_user
 from app.tasks.service.model_service import ModelService
-from app.tasks.service.permission_service import assert_can_access_model
+from app.tasks.service.permission_service import assert_can_access_model, assert_can_access_dataset
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
