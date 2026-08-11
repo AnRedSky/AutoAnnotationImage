@@ -328,6 +328,24 @@ async function onHistoryReverted() {
               {{ detail.final_label.name }}
             </el-tag>
           </div>
+          <!--
+            ai_labeled 状态: 还没人确认/修正, 但已有 AI 预测快照.
+            原逻辑直接走 v-else 渲染"尚未标注", 与顶部"AI 预标注"状态徽章语义冲突,
+            用户会误以为数据缺失. 这里补一条: 有 ai_prediction.top1 时, 展示 AI 候选
+            并加 "AI 预测" 角标, 仅当 status=pending (或 ai_prediction 也不存在) 时
+            才显示"尚未标注".
+          -->
+          <div v-else-if="detail.status === 'ai_labeled' && detail.ai_prediction?.top1">
+            <el-tag type="info" effect="plain" size="large">
+              {{ detail.ai_prediction.top1 }}
+              <span v-if="detail.ai_prediction.top1_conf != null" style="margin-left: 4px;">
+                ({{ (detail.ai_prediction.top1_conf * 100).toFixed(1) }}%)
+              </span>
+            </el-tag>
+            <el-tag type="info" size="small" effect="plain" style="margin-left: 6px;">
+              AI 预测 (未确认)
+            </el-tag>
+          </div>
           <el-empty v-else description="尚未标注" :image-size="60" />
           <template v-if="!readonly && editable !== false">
             <el-divider>选择其他类别（修正）</el-divider>
