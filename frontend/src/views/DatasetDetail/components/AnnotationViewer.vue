@@ -157,6 +157,8 @@ function confColor(c: number): string {
  *   (见 backend/app/annotation/api/annotation.py 清除标注端点)
  * - 新增 4 个: auto_annotate_pretrained / auto_annotate_finetuned /
  *   mark_unqualified / unmark_unqualified
+ * v3.4.0: 补 revert_to_ai (恢复 AI 预测), 否则 imageApi.detail 返回的
+ *   annotation_history 含该记录时, 内嵌时间线会回退显示英文原文
  */
 const ACTION_LABELS: Record<string, string> = {
   ai_predict: 'AI 预测',
@@ -167,6 +169,7 @@ const ACTION_LABELS: Record<string, string> = {
   auto_annotate_finetuned: '微调模型自动标注',
   mark_unqualified: '标记不合格',
   unmark_unqualified: '撤销不合格',
+  revert_to_ai: '恢复 AI 预测',
 }
 
 /** action → el-tag / el-timeline-item 颜色类型 */
@@ -179,6 +182,7 @@ const ACTION_TYPES: Record<string, 'primary' | 'success' | 'warning' | 'info' | 
   auto_annotate_finetuned: 'primary',
   mark_unqualified: 'danger',
   unmark_unqualified: 'success',
+  revert_to_ai: 'info',
 }
 
 function actionLabel(a: string): string {

@@ -70,11 +70,13 @@ INDEXES = [
 
 
 # v3.0.0: annotation_log.action ENUM 扩展 (加 mark_unqualified / unmark_unqualified)
+# v3.4.0: 再加 revert_to_ai (人工撤销 → 状态回 ai_labeled, 保留 ai_prediction)
 # MySQL 需 MODIFY COLUMN; SQLite 用 VARCHAR 存储, 无需迁移
 _ANNOTATION_LOG_ACTION_TARGETS = (
     "ai_predict", "confirm", "correct", "reject",
     "auto_annotate_pretrained", "auto_annotate_finetuned",
     "mark_unqualified", "unmark_unqualified",
+    "revert_to_ai",
 )
 
 

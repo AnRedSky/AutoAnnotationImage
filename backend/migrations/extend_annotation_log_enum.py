@@ -6,6 +6,14 @@
 
 幂等: 重复执行安全 (用 information_schema.COLUMNS 判定)
 
+注意 (v3.4.0 维护):
+- 本脚本的 new_values 仅含 v2.5.15 当初扩展的 2 个值;
+  v3.0.0 增 mark_unqualified / unmark_unqualified, v3.4.0 增 revert_to_ai
+  均不在这里维护, 走 app/database/migration.py:ensure_annotation_log_action_enum
+  (启动 init_db 自动执行, 幂等补齐, 跨所有环境生效).
+- 若本脚本直接运行 (脱离 init_db), 只对未跑过 v3.0.0 的环境补上 auto_annotate_*,
+  其他扩展将由数据库迁移系统后续接管.
+
 用法:
     cd backend
     python -m migrations.extend_annotation_log_enum
