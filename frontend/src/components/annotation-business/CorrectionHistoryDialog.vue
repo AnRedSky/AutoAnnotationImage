@@ -334,7 +334,13 @@ function getLogToName(log: HistoryItem): string {
 function formatTime(iso: string | null | undefined): string {
   if (!iso) return '-'
   try {
-    return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+    // 后端 datetime.utcnow() 写入的 created_at / annotated_at 不带时区后缀,
+    // 实际是 UTC 时间. 直接 new Date(iso) 会被当作本地时间解析 (当前为 UTC+8),
+    // 导致显示比真实时间快 8 小时. 这里显式补 'Z' 标记为 UTC, 再由 toLocaleString
+    // 按浏览器本地时区 (中国为 UTC+8) 正确转换.
+    const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(iso)
+    const normalized = hasTz ? iso : (iso.includes('T') ? `${iso}Z` : `${iso.replace(' ', 'T')}Z`)
+    return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
   } catch { return iso }
 }
 
