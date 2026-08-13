@@ -1,11 +1,22 @@
-"""为 TrainingJob 加 created_at 字段 (任务入库时间)
+"""
+迁移脚本 03: 为 TrainingJob 加 created_at 字段 (任务入库时间)
+============================================================
+**MIGRATION_ID**: 03
+**功能**:
 - 与 started_at 区分: created_at 是 API 入库瞬间, started_at 是 worker 接手
 - ALTER TABLE 加字段, 已有行用 NOW() 兜底 (近似值, 仅历史回填用)
 - 同时给 created_at 加索引, 方便后续按创建时间倒序/分页
+**幂等**: 重复执行安全 (information_schema 判定)
+**执行顺序**: 03, 依赖 02 (training_jobs 表已存在)
+**依赖关系**: 02_add_training_log
 """
 import asyncio
 from app.database import engine
 from sqlalchemy import text
+
+
+MIGRATION_ID = "03"
+MIGRATION_DESCRIPTION = "training_jobs 加 created_at DATETIME 字段, 历史行回填, 加索引"
 
 
 async def add_created_at_column():
@@ -61,9 +72,15 @@ async def add_created_at_column():
     # engine.begin() 上下文退出时自动 commit, 整段原子完成
 
 
-async def main():
+async def run_migration() -> None:
+    """runner 入口"""
     await add_created_at_column()
+    print(f"[done] [{MIGRATION_ID}] {MIGRATION_DESCRIPTION}")
 
 
-if __name__ == '__main__':
+async def main():
+    await run_migration()
+
+
+if __name__ == "__main__":
     asyncio.run(main())

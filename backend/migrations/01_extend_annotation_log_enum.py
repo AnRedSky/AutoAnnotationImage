@@ -1,12 +1,14 @@
-"""v2.5.15 P0-2 迁移: 扩展 annotation_log 表
-
-变更:
+"""
+迁移脚本 01: v2.5.15 P0-2 迁移 - 扩展 annotation_log 表
+====================================================
+**MIGRATION_ID**: 01
+**功能**:
 1. action 枚举: 增加 auto_annotate_pretrained / auto_annotate_finetuned
 2. 新增 payload JSON 字段: 存额外审计信息 (模型名/box数 等)
 
-幂等: 重复执行安全 (用 information_schema.COLUMNS 判定)
+**幂等**: 重复执行安全 (用 information_schema.COLUMNS 判定)
 
-注意 (v3.4.0 维护):
+**注意 (v3.4.0 维护)**:
 - 本脚本的 new_values 仅含 v2.5.15 当初扩展的 2 个值;
   v3.0.0 增 mark_unqualified / unmark_unqualified, v3.4.0 增 revert_to_ai
   均不在这里维护, 走 app/database/migration.py:ensure_annotation_log_action_enum
@@ -14,16 +16,22 @@
 - 若本脚本直接运行 (脱离 init_db), 只对未跑过 v3.0.0 的环境补上 auto_annotate_*,
   其他扩展将由数据库迁移系统后续接管.
 
-用法:
+**用法**:
     cd backend
-    python -m migrations.extend_annotation_log_enum
+    python -m migrations.01_extend_annotation_log_enum
     # 或
-    python migrations/extend_annotation_log_enum.py
+    python migrations/01_extend_annotation_log_enum.py
+
+**执行顺序**: 01, 依赖 00 (annotation_log 表已建)
 """
 import asyncio
 from sqlalchemy import text
 from app.database import engine, Base
 from app.models.annotation_log import AnnotationLog  # noqa: F401  触发 SQLAlchemy metadata 注册
+
+
+MIGRATION_ID = "01"
+MIGRATION_DESCRIPTION = "v2.5.15 P0-2: annotation_log 加 payload JSON, action ENUM 扩展 (auto_annotate_pretrained/auto_annotate_finetuned)"
 
 
 async def _column_exists(conn, table: str, column: str) -> bool:
@@ -104,6 +112,8 @@ async def run_migration():
                 print(f"[OK] ALTER TABLE annotation_log MODIFY COLUMN action ENUM (扩展 2 个值)")
         else:
             print("[SKIP] annotation_log.action 已包含 auto_annotate_pretrained")
+
+    print(f"\n[done] [{MIGRATION_ID}] {MIGRATION_DESCRIPTION}")
 
 
 async def main():

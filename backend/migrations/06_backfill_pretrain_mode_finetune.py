@@ -1,22 +1,24 @@
-"""回填历史 TrainingJob.pretrain_mode = 'from_scratch' (NULL → '微调')
-
-背景:
-- v3.0.0 新增 pretrain_mode 字段, 迁移前 (add_training_pretrain_mode.py 跑之前)
-  创建的 TrainingJob 记录, pretrain_mode 是 NULL
-- 业务侧要求: 历史的训练任务, 训练模式统一默认为「微调」(NULL → 'from_scratch')
-- 'from_scratch' 在 DB 中保留英文, 前端 label 展示为「微调」(见 training_job.PRETRAIN_MODE_LABELS)
-
-幂等:
+"""
+迁移脚本 06: 回填历史 TrainingJob.pretrain_mode = 'from_scratch' (NULL → '微调')
+============================================================================
+**MIGRATION_ID**: 06
+**功能**:
+- 历史 NULL 行 → 统一设为 'from_scratch' (前端展示为「微调」)
+**幂等**:
 - 仅更新 pretrain_mode IS NULL 的行
 - 已存在的 from_scratch / incremental / resume 不会被覆盖
 - 重复执行输出 "已处理 0 行", 不抛错
-
-执行: python migrations/backfill_pretrain_mode_finetune.py
+**执行顺序**: 06, 强依赖 05 (pretrain_mode 字段必须先建)
+**依赖关系**: 05_add_training_pretrain_mode
 """
 import asyncio
 from sqlalchemy import text
 
 from app.database import engine
+
+
+MIGRATION_ID = "06"
+MIGRATION_DESCRIPTION = "回填历史 training_jobs.pretrain_mode = 'from_scratch' (NULL → from_scratch)"
 
 
 async def backfill_null_pretrain_mode():
@@ -47,9 +49,15 @@ async def backfill_null_pretrain_mode():
         return affected
 
 
-async def main():
+async def run_migration() -> None:
+    """runner 入口"""
     affected = await backfill_null_pretrain_mode()
-    print(f"\n[done] 历史 NULL 任务回填完成 (affected={affected})")
+    print(f"[done] [{MIGRATION_ID}] {MIGRATION_DESCRIPTION} (affected={affected})")
+
+
+async def main():
+    """兼容历史 CLI 调用"""
+    await run_migration()
 
 
 if __name__ == "__main__":

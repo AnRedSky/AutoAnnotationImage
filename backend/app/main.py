@@ -78,6 +78,27 @@ async def lifespan(app: FastAPI):
     startup_profiler.begin()
     with startup_profiler.step("init_db"):
         await init_db()
+    # v3.6.0+: 按规范化编号升序执行 migrations/ 下的迁移脚本
+    # (00 -> 01 -> ... -> 10, 全部幂等, 失败立即停止)
+    with startup_profiler.step("ordered_migrations"):
+        try:
+            from migrations.runner import run_all_migrations
+            results = await run_all_migrations()
+            failed = [r for r in results if not r.success]
+            if failed:
+                logger.error(
+                    "[startup] 迁移失败 %d 条, 拒绝启动以保护数据一致性: %s",
+                    len(failed),
+                    [(r.order, r.error) for r in failed],
+                )
+                raise RuntimeError(
+                    f"ordered migrations failed: {[r.order for r in failed]}"
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[startup] 迁移执行器异常: %s", e)
+            raise
     # v2.5.29: ultralytics 路径集中配置 (与 worker 启动时一致)
     # 防止 API 进程第一次调用 YOLO(...) 时把 .pt 落到 cwd
     with startup_profiler.step("ultralytics_setup"):

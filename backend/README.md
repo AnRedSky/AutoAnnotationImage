@@ -783,8 +783,43 @@ python start_workers.py stop
 
 ### 10.2 数据库迁移
 
+迁移脚本位于 `backend/migrations/`, 采用**两位数字编号 + 严格升序执行**的规范化体系:
+
 ```bash
-# 生成迁移
+# 列出所有迁移
+python -m migrations.runner --list
+
+# 校验 _registry 与磁盘文件一致性
+python -m migrations.runner --check
+
+# 执行全部迁移 (应用启动时自动调用)
+python -m migrations.runner
+
+# 只跑某一条
+python -m migrations.runner --only 03
+
+# 从某条开始 (含) 一直跑到末尾
+python -m migrations.runner --from 05
+```
+
+**编号规则**:
+- 文件名格式: `NN_name.py` (NN 为两位数字, 升序连续, 允许预留空号)
+- 严格按 `_registry.MIGRATIONS` 列表的 `order` 字段升序执行
+- 后一个脚本不得依赖前一个脚本未生成的列/表/索引
+- 全部幂等 (基于 `information_schema` 判定)
+- 失败立即停止, 防止数据库结构异常
+
+**新增迁移的标准流程** (详见 `migrations/README.md`):
+1. 取当前最大序号 + 1
+2. 创建 `NN_descriptive_name.py`, 暴露 `async def run_migration()`
+3. 在 `_registry.MIGRATIONS` 追加 `Migration(order, name, description, module)`
+4. 跑 `--check` 校验一致性
+5. 加 smoke test
+
+历史 Alembic 工作流保留 (但本项目当前以 migrations/ 顺序脚本为主):
+
+```bash
+# 生成迁移 (Alembic 兼容)
 alembic revision --autogenerate -m "描述变更"
 
 # 应用迁移
@@ -792,9 +827,6 @@ alembic upgrade head
 
 # 回滚
 alembic downgrade -1
-
-# 查看历史
-alembic history
 ```
 
 ### 10.3 数据备份与恢复

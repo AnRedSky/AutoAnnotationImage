@@ -1,39 +1,31 @@
-"""ModelVersion 强制 dataset_id 非空 (v3.3.5-PERMISSION-REWRITE)
-================================================================
-
-v3.3.5 核心目标 — 数据完整性约束:
-  - ModelVersion.dataset_id 从 nullable=True 改为 nullable=False
-  - 理由: 「孤儿 model」(dataset_id IS NULL) 在 v3.3.5 严格最小权限下无法
-    通过任何角色访问 (owner 不存在, team 校验也无从下手), 等于「死数据」
-  - 修复策略 (两步):
-    1. **数据清洗**: 将历史孤儿 model 关联到默认「系统孤儿 dataset」,
-       或直接删除 (按业务决定, 这里采用「关联到系统孤儿 dataset」)
-    2. **Schema 约束**: ALTER COLUMN dataset_id SET NOT NULL
-
-执行步骤 (幂等):
+"""
+迁移脚本 09: ModelVersion 强制 dataset_id 非空 (v3.3.5-PERMISSION-REWRITE)
+==========================================================================
+**MIGRATION_ID**: 09
+**功能**:
+- ModelVersion.dataset_id 从 nullable=True 改为 nullable=False
+- 理由: 「孤儿 model」(dataset_id IS NULL) 在 v3.3.5 严格最小权限下无法
+  通过任何角色访问 (owner 不存在, team 校验也无从下手), 等于「死数据」
+- 修复策略 (两步):
+  1. **数据清洗**: 将历史孤儿 model 关联到默认「系统孤儿 dataset」
+  2. **Schema 约束**: ALTER COLUMN dataset_id SET NOT NULL
+**执行步骤 (幂等)**:
   1. 统计孤儿 model 数量
-  2. 创建一个「_system_orphan_dataset」系统级 dataset (owner=NULL 或系统用户)
-     - 实际方案: 关联到第一个 super_admin 用户下的「orphan_models」dataset
-       (若不存在则创建), 这样保证 dataset 拥有有效 owner, model 仍可被审计
+  2. 找一个/创建一个「_system_orphan_models_holder」dataset
   3. UPDATE model_version SET dataset_id = <orphan_ds_id> WHERE dataset_id IS NULL
   4. ALTER TABLE model_version MODIFY COLUMN dataset_id INT NOT NULL
-     (MySQL) / 重建表 (SQLite)
   5. 验证: 再次统计, 应为 0
-
-回滚方案:
-  - 此迁移为 v3.3.5 安全修复, 不可逆
-  - 紧急回滚可: ALTER COLUMN dataset_id DROP NOT NULL
-
-跨 DB 兼容: MySQL 5.7+ / SQLite (重建表)
-幂等: 重复执行安全
+**回滚方案**: 此迁移为 v3.3.5 安全修复, 不可逆
+**执行顺序**: 09, 依赖 00 (model_version/task_type 等列已建)
 """
 import asyncio
 import logging
-from sqlalchemy import text, select
+from sqlalchemy import text
 from app.database import engine
-from app.database import AsyncSessionLocal
 
-logger = logging.getLogger(__name__)
+
+MIGRATION_ID = "09"
+MIGRATION_DESCRIPTION = "model_version.dataset_id 强制 NOT NULL; 历史孤儿 model 关联到 _system_orphan_models_holder dataset"
 
 
 ORPHAN_DATASET_NAME = "_system_orphan_models_holder"
@@ -53,8 +45,8 @@ async def _find_or_create_orphan_dataset(conn) -> int:
 
     优先级:
       1. 已存在 name = ORPHAN_DATASET_NAME 的 dataset → 复用
-      2. 否则取第一个 user.id = 1 (初始 super_admin) 作为 owner,
-         创建一个 ORPHAN_DATASET_NAME 的 dataset
+      2. 否则取第一个 super_admin 用户下的「orphan_models」dataset
+         (若不存在则创建), 这样保证 dataset 拥有有效 owner, model 仍可被审计
       3. 若 user 不存在 → 报错 (环境不健康, 终止)
     """
     # 1) 查找现有
@@ -181,11 +173,16 @@ async def run_migration() -> None:
         await _verify(conn)
         # 收紧约束
         await _enforce_not_null(conn)
-    logger.info("[migration] v3.3.5 enforce model_version.dataset_id NOT NULL done")
+    logger.info(f"[done] [{MIGRATION_ID}] {MIGRATION_DESCRIPTION}")
 
 
-if __name__ == "__main__":
+async def main():
+    """兼容历史 CLI 调用"""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    asyncio.run(run_migration())
+    await run_migration()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

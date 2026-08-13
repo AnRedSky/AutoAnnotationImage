@@ -185,18 +185,30 @@ class TestSourceContract:
         )
 
     def test_migration_script_exists(self):
-        """迁移脚本必须存在"""
+        """迁移脚本必须存在 (序号化: 05_add_training_pretrain_mode.py)"""
         from pathlib import Path as _P
         repo_root = _P(__file__).resolve().parents[1]
-        mig = repo_root / "migrations" / "add_training_pretrain_mode.py"
+        mig = repo_root / "migrations" / "05_add_training_pretrain_mode.py"
         assert mig.exists(), f"迁移脚本缺失: {mig}"
+        # 防御: 旧的非编号命名不应再出现 (避免脚本执行顺序混乱)
+        old_mig = repo_root / "migrations" / "add_training_pretrain_mode.py"
+        assert not old_mig.exists(), (
+            f"检测到非编号命名的迁移脚本: {old_mig}, "
+            "请改用 NN_xxx.py 两位数字序号命名以保证执行顺序"
+        )
 
     def test_backfill_script_exists(self):
-        """历史 NULL → from_scratch 回填脚本必须存在"""
+        """历史 NULL → from_scratch 回填脚本必须存在 (序号化: 06_backfill_pretrain_mode_finetune.py)"""
         from pathlib import Path as _P
         repo_root = _P(__file__).resolve().parents[1]
-        backfill = repo_root / "migrations" / "backfill_pretrain_mode_finetune.py"
+        backfill = repo_root / "migrations" / "06_backfill_pretrain_mode_finetune.py"
         assert backfill.exists(), f"历史回填脚本缺失: {backfill}"
+        # 防御: 旧的非编号命名不应再出现
+        old_backfill = repo_root / "migrations" / "backfill_pretrain_mode_finetune.py"
+        assert not old_backfill.exists(), (
+            f"检测到非编号命名的迁移脚本: {old_backfill}, "
+            "请改用 NN_xxx.py 两位数字序号命名以保证执行顺序"
+        )
         content = backfill.read_text(encoding="utf-8")
         # 关键 SQL: NULL → from_scratch
         assert "pretrain_mode IS NULL" in content

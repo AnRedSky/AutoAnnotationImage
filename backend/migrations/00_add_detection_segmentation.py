@@ -1,13 +1,16 @@
-"""v2.0.0 任务类型拓展 - 数据库迁移
-
-新增:
+"""
+迁移脚本 00: v2.0.0 任务类型拓展 - 数据库迁移
+===========================================
+**MIGRATION_ID**: 00
+**功能**:
 1. bbox_annotation 表 (BBox 标注)
 2. segmentation_mask 表 (Mask 标注)
 3. image.task_type 字段 (默认 classification, 兼容 v1.0.0 历史数据)
 4. model_version.task_type 字段 (默认 classification)
 5. model_version 任务专属指标: map_50 / map_50_95 / miou / pixel_accuracy / dice_score
-
-幂等: 重复执行安全 (用 information_schema.COLUMNS + SHOW TABLES 判定)
+6. training_jobs.task_type (S3.2: 区分 classification / detection / segmentation)
+**幂等**: 重复执行安全 (用 information_schema.COLUMNS + SHOW TABLES 判定)
+**执行顺序**: 00, 必须最早执行 (其他迁移依赖 task_type 等列)
 """
 import asyncio
 from sqlalchemy import text
@@ -16,6 +19,10 @@ from app.models import (  # noqa: F401  触发 SQLAlchemy metadata 注册
     User, Dataset, Category, Image, AnnotationLog, ModelVersion, TrainingJob,
     BBoxAnnotation, SegmentationMask,
 )
+
+
+MIGRATION_ID = "00"
+MIGRATION_DESCRIPTION = "v2.0.0: 新建 bbox_annotation/segmentation_mask 表, image/model_version/training_jobs 加 task_type, model_version 加 5 个任务指标"
 
 
 # ================== 1. 新建表 (SQLAlchemy create_all 已自动建) ==================
@@ -93,6 +100,7 @@ async def _index_exists(conn, table: str, index_name: str) -> bool:
 
 
 async def run_migration():
+    """runner 入口: 按 _registry 声明的顺序执行"""
     async with engine.begin() as conn:
         # 1. 先建所有新表 (create_all 只建不存在的)
         await conn.run_sync(Base.metadata.create_all)
@@ -124,8 +132,11 @@ async def run_migration():
                 else:
                     raise
 
+    print(f"\n[done] [{MIGRATION_ID}] {MIGRATION_DESCRIPTION}")
+
 
 async def main():
+    """兼容历史 CLI 调用 (直接 python migrations/00_add_detection_segmentation.py)"""
     await run_migration()
     print("\n=== v2.0.0 迁移完成 ===")
     print("- 新表: bbox_annotation, segmentation_mask")
