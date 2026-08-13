@@ -75,6 +75,9 @@ docs/img/*.jpg
 !frontend/public/
 frontend//*.jpg
 
+# 例外: README 引用的系统截图
+!docs/img/系统img/
+
 # OS
 .DS_Store
 Thumbs.db
