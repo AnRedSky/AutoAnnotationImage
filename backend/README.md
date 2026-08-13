@@ -26,7 +26,6 @@
 - [九、测试](#九测试)
 - [十、运维与维护](#十运维与维护)
 - [十一、常见问题](#十一常见问题)
-- [十二、附录](#十二附录)
 
 ---
 
@@ -972,7 +971,6 @@ A: 加分页参数，缩略图已 Redis 缓存。
 - [项目说明文档](../docs/项目说明文档.md) — 项目实现价值
 - [使用手册](../docs/使用手册.md) — 完整使用指南
 - [代码优化迭代记录](../docs/代码优化迭代记录.md) — 性能优化历史
-- [后端历史报告](docs/) — Stage / Sprint 报告归档
 
 ### 12.2 包管理规范
 
@@ -996,23 +994,6 @@ healthcheck      = "app.core.healthcheck:main"
 ```
 
 安装后可全局调用：`image-annotation-backend` / `worker` / `worker-train` / `worker-annotate` / `healthcheck`
-
-### 12.4 变更追溯
-
-| 版本 | 关键能力 |
-|---|---|
-| v1.0 | 基础认证、分类数据集、上传、预标注、人工修正 |
-| v2.0 | 训练全流程、模型版本、COCO/YOLO/CSV 导出、审计日志 |
-| v2.5 | 目标检测 YOLOv8、语义分割 DeepLabV3+、不合格图片标记、SSE |
-| v2.6 | 训练暂停/恢复、日志持久化、训练列表分页与多维过滤 |
-| v3.0 | 多应用架构重构（admin / auth / tasks / annotation）、中间件注册、插件化 |
-| v3.1 | 后端 worker 4 阶段优化（W1 异步 / W2 Celery / W3 SQL / W4 ML） |
-| v3.2 | 多租户（tenant）、用户/角色/审计 admin 页面、显式 CORS |
-| v3.3 | 团队管理、MinIO 存储后端、路径锚定项目根、ultralytics 缓存收敛 |
-
-详细变更：[docs/代码优化迭代记录.md](../docs/代码优化迭代记录.md) / [docs/cleanup-sprint-2026-07-29.md](../docs/cleanup-sprint-2026-07-29.md) / 后端 [docs/](docs/)
-
----
 
 ## License
 
