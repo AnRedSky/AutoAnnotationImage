@@ -82,6 +82,9 @@ COPY --chown=app:app alembic.ini* /app/
 
 # v3.3.2: 入口脚本 — 修复命名卷权限后通过 gosu 降权到 app 用户
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+# 强制清除windows回车符，兜底
+RUN sed -i 's/\r$//g' /app/docker-entrypoint.sh \
+    && chmod +x /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
 # PATH 优先级：.venv/bin 优先
