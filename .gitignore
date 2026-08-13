@@ -32,6 +32,7 @@ frontend/.env.production.local
 
 # Project
 uploads/
+docs/img/*.jpg
 
 # 项目根目录的 ML 权重 (历史, 未使用; 后端运行时不会写到这里)
 /models/
@@ -69,10 +70,10 @@ uploads/
 *.tmp.download
 
 # 图片 (排除前端 public 下的合法资源)
-*.jpg
-*.png
+# *.jpg
+# *.png
 !frontend/public/
-
+frontend//*.jpg
 
 # OS
 .DS_Store
@@ -93,3 +94,13 @@ htmlcov/
 # 包管理器锁文件 (按需保留, 这里统一忽略避免 PR diff 噪声)
 # uv.lock / pnpm-lock.yaml / yarn.lock / package-lock.json
 # 保留 uv.lock 便于可复现构建
+backend/tests/fixtures/images/fixture_01.png
+backend/tests/fixtures/images/fixture_02.png
+backend/tests/fixtures/images/fixture_03.png
+backend/tests/fixtures/images/fixture_04.png
+backend/tests/fixtures/images/fixture_05.png
+backend/tests/fixtures/images/fixture_06.png
+backend/tests/fixtures/images/fixture_07.png
+backend/tests/fixtures/images/fixture_08.png
+backend/tests/fixtures/images/fixture_09.jpg
+backend/tests/fixtures/images/fixture_10.jpg
