@@ -1,7 +1,7 @@
 # =============================================================================
-#  Image Annotation System - Docker Compose (v3.3.0 一键部署版)
+#  Image Annotation System - Docker Compose (v3.6.0 精简版)
 # -----------------------------------------------------------------------------
-#  拆分：
+#  拆分:
 #    - mysql          : MySQL 8.0 主数据库
 #    - redis          : Redis 7 缓存 + Celery broker/backend
 #    - minio          : MinIO 对象存储
@@ -10,7 +10,13 @@
 #    - worker-annotate: Celery annotate 队列 (concurrency=4)
 #    - frontend       : Vue 3 + Nginx 生产构建 (静态托管 + /api 反代)
 #
-#  配置: 统一从项目根 .env 读取 (无需 --env-file 参数)
+#  配置策略 (v3.6.0 精简):
+#    - 全部环境变量统一从项目根 .env 读取 (env_file: - .env)
+#    - compose 里 environment 只保留"容器内必须覆盖"的值
+#      (服务名 / 容器内绝对路径 / 容器特定开关),
+#      不再重复声明 .env 里已有的密码/端口等
+#    - ${VAR:?msg} 形式仍用于显式强制检查关键变量
+#
 #  启动:  docker compose up -d
 #  停止:  docker compose down
 #  重建:  docker compose build --no-cache
@@ -25,7 +31,7 @@
 # =============================================================================
 
 # -----------------------------
-#  公共配置：x-logging 锚点
+#  公共配置: x-logging 锚点
 # -----------------------------
 x-logging: &default-logging
   driver: json-file
@@ -35,7 +41,7 @@ x-logging: &default-logging
     labels: "service,environment"
 
 # -----------------------------
-#  公共配置：x-restart 锚点
+#  公共配置: x-restart 锚点
 # -----------------------------
 x-restart: &default-restart
   restart: unless-stopped
@@ -46,11 +52,13 @@ services:
     image: mysql:8.0
     container_name: annotation_mysql
     <<: *default-restart
+    env_file:
+      - .env
     environment:
+      # 强制检查关键变量 (避免 .env 漏配时静默启动)
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD required}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_annotation}
-      MYSQL_USER: ${MYSQL_USER:-annotation}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD required}
+      # 容器的 charset/collation/TZ 是部署硬性要求, 写死 (与 .env 解耦)
       MYSQL_CHARACTER_SET_SERVER: utf8mb4
       MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
       TZ: Asia/Shanghai
@@ -67,7 +75,7 @@ services:
       retries: 10
       start_period: 30s
     logging: *default-logging
-    # 资源限制（生产基线，可按需调整）
+    # 资源限制 (生产基线, 可按需调整)
     mem_limit: 2g
     cpus: "2.0"
     pids_limit: 200
@@ -76,6 +84,8 @@ services:
     image: redis:7-alpine
     container_name: annotation_redis
     <<: *default-restart
+    env_file:
+      - .env
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD required}
@@ -103,8 +113,11 @@ services:
     image: minio/minio:latest
     container_name: annotation_minio
     <<: *default-restart
+    env_file:
+      - .env
     command: server /data --console-address ":9001"
     environment:
+      # MinIO 必须用 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD, 与 .env 的 MINIO_ACCESS_KEY / MINIO_SECRET_KEY 对应
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY required}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY required}
     ports:
@@ -125,6 +138,8 @@ services:
     cpus: "2.0"
 
   # ================== 应用服务 ==================
+  # v3.6.0 精简: API / worker 全部从 .env 读通用配置,
+  #             environment 只覆盖"容器内必须不同"的服务名/路径
   api:
     build:
       context: ./backend
@@ -136,33 +151,16 @@ services:
     env_file:
       - .env
     environment:
-      # 容器内服务名 (覆盖 .env 中的宿主机 localhost)
-      APP_ENV: ${APP_ENV:-production}
-      APP_DEBUG: "false"
-      APP_HOST: "0.0.0.0"
-      APP_PORT: "8000"
-      # 使用 docker compose 服务名（容器内 DNS 自动解析）
+      # ----- 容器内服务名 (覆盖 .env 中可能的 localhost) -----
       MYSQL_HOST: mysql
-      MYSQL_PORT: "3306"
       REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
       MINIO_ENDPOINT: minio:9000
-      # 容器内绝对路径（避免 ./uploads 解析问题）
-      UPLOAD_DIR: /app/uploads
-      MODEL_DIR: /app/models
-      # 容器内不走 HF 镜像环境变量
-      HF_HUB_DISABLE_SYMLINKS: "1"
-      HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
     ports:
       - "8000:8000"
     volumes:
       - model_data:/app/models
       - upload_data:/app/uploads
       - api_logs:/app/logs
-      - ./backend/app:/app/app
     networks:
       - annotation_net
     depends_on:
@@ -188,7 +186,7 @@ services:
       - no-new-privileges:true
     read_only: false     # /app/uploads /app/models 需写
 
-  # 训练 worker：CPU/GPU 密集，concurrency=1
+  # 训练 worker: CPU/GPU 密集, concurrency=1
   worker-train:
     build:
       context: ./backend
@@ -200,29 +198,18 @@ services:
     env_file:
       - .env
     environment:
-      APP_ENV: ${APP_ENV:-production}
-      APP_DEBUG: "false"
+      # 容器内服务名 (覆盖 .env)
       MYSQL_HOST: mysql
-      MYSQL_PORT: "3306"
       REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
       MINIO_ENDPOINT: minio:9000
-      UPLOAD_DIR: /app/uploads
-      MODEL_DIR: /app/models
-      # v3.3.0: 容器内 HF_HOME 显式指向 /app/models/cache/huggingface (持久化卷),
+      # v3.6.0: 容器内 HF_HOME 显式指向 /app/models/cache/huggingface (持久化卷),
       #         避免 base 镜像自带 HF_HOME 默认 /root/.cache/huggingface 导致容器重建丢缓存.
+      #         根 .env 留空 (本地开发用), 故此处必须显式注入容器内路径.
       HF_HOME: /app/models/cache/huggingface
-      INFERENCE_DEVICE: ${INFERENCE_DEVICE:-cpu}
-      HF_HUB_DISABLE_SYMLINKS: "1"
-      HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
     volumes:
       - model_data:/app/models
       - upload_data:/app/uploads
       - api_logs:/app/logs
-      - ./backend/app:/app/app
     networks:
       - annotation_net
     depends_on:
@@ -247,7 +234,7 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  # 标注 worker：I/O 密集，concurrency=4
+  # 标注 worker: I/O 密集, concurrency=4
   worker-annotate:
     build:
       context: ./backend
@@ -259,29 +246,17 @@ services:
     env_file:
       - .env
     environment:
-      APP_ENV: ${APP_ENV:-production}
-      APP_DEBUG: "false"
+      # 容器内服务名 (覆盖 .env)
       MYSQL_HOST: mysql
-      MYSQL_PORT: "3306"
       REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
       MINIO_ENDPOINT: minio:9000
-      UPLOAD_DIR: /app/uploads
-      MODEL_DIR: /app/models
-      # v3.3.0: 容器内 HF_HOME 显式指向 /app/models/cache/huggingface (持久化卷),
-      #         避免 base 镜像自带 HF_HOME 默认 /root/.cache/huggingface 导致容器重建丢缓存.
+      # v3.6.0: 容器内 HF_HOME 显式指向 /app/models/cache/huggingface (持久化卷),
+      #         同 worker-train 注释.
       HF_HOME: /app/models/cache/huggingface
-      INFERENCE_DEVICE: ${INFERENCE_DEVICE:-cpu}
-      HF_HUB_DISABLE_SYMLINKS: "1"
-      HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
     volumes:
       - model_data:/app/models
       - upload_data:/app/uploads
       - api_logs:/app/logs
-      - ./backend/app:/app/app
     networks:
       - annotation_net
     depends_on:
