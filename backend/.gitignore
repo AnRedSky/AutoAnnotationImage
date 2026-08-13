@@ -9,7 +9,8 @@ env/
 
 # uv
 .uv/
-uv.lock
+# uv.lock 显式保留 (便于可复现构建, API/Worker 镜像构建都依赖此锁文件)
+!uv.lock
 
 # 环境
 .env
