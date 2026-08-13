@@ -592,9 +592,12 @@ Docker    Backend      Frontend
 Compose  (pydantic)   (Vite ARG)
 ```
 
-- **Docker Compose**：`env_file: - .env`
+- **Docker Compose**：`env_file: - .env`（v3.6.0 精简：compose 内 `environment:` 只覆盖"容器内必须不同"的服务名/路径，不再重复声明 `.env` 已有的密码/端口等）
 - **后端**：pydantic-settings 自动从项目根 `.env` 加载（兼容 `backend/.env` 回退）
 - **前端**：构建时通过 `ARG VITE_API_BASE_URL` 注入
+
+> 容器内硬性差异（如 `MYSQL_HOST=mysql`、`HF_HOME=/app/models/cache/huggingface`）由 `docker-compose.yml` 的 `environment:` 显式注入，
+> 本地开发 `.env` 中则保留 `localhost` 或留空，**不要在根 `.env` 写 `/app/...` 绝对路径**（会被解析到盘符根，如 `D:\app\...`）。
 
 完整字段说明见 [使用手册 § 3.1](docs/06-01-使用手册.md)。
 
