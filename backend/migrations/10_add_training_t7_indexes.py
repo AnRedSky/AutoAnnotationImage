@@ -21,6 +21,8 @@ import logging
 from sqlalchemy import text
 from app.database import engine
 
+logger = logging.getLogger(__name__)
+
 
 MIGRATION_ID = "10"
 MIGRATION_DESCRIPTION = "training_jobs T7 索引优化 (base_model/model_name/user_type/dataset)"

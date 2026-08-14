@@ -23,6 +23,8 @@ import logging
 from sqlalchemy import text
 from app.database import engine
 
+logger = logging.getLogger(__name__)
+
 
 MIGRATION_ID = "09"
 MIGRATION_DESCRIPTION = "model_version.dataset_id 强制 NOT NULL; 历史孤儿 model 关联到 _system_orphan_models_holder dataset"
