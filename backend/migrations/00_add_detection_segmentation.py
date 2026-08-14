@@ -15,10 +15,17 @@
 import asyncio
 from sqlalchemy import text
 from app.database import engine, Base
-from app.models import (  # noqa: F401  触发 SQLAlchemy metadata 注册
-    User, Dataset, Category, Image, AnnotationLog, ModelVersion, TrainingJob,
-    BBoxAnnotation, SegmentationMask,
-)
+# v3.0.0 拆分: app.models 已被 app.admin.model / app.tasks.model / app.annotation.model 取代.
+#              这里按类来源精确导入, 保证 Base.metadata.create_all() 能注册全部表.
+from app.admin.model.user import User                       # noqa: F401
+from app.tasks.model.dataset import Dataset                 # noqa: F401
+from app.tasks.model.category import Category               # noqa: F401
+from app.tasks.model.image import Image                      # noqa: F401
+from app.tasks.model.annotation_log import AnnotationLog    # noqa: F401
+from app.tasks.model.model_version import ModelVersion      # noqa: F401
+from app.tasks.model.training_job import TrainingJob        # noqa: F401
+from app.annotation.model.bbox_annotation import BBoxAnnotation     # noqa: F401
+from app.annotation.model.segmentation_mask import SegmentationMask  # noqa: F401
 
 
 MIGRATION_ID = "00"

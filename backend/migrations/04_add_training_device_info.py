@@ -12,7 +12,7 @@
 """
 import asyncio
 from app.database import engine, Base
-from app.models.training_job import TrainingJob
+from app.tasks.model.training_job import TrainingJob
 from sqlalchemy import text
 
 

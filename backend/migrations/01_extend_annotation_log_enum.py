@@ -27,7 +27,7 @@
 import asyncio
 from sqlalchemy import text
 from app.database import engine, Base
-from app.models.annotation_log import AnnotationLog  # noqa: F401  触发 SQLAlchemy metadata 注册
+from app.tasks.model.annotation_log import AnnotationLog  # noqa: F401  触发 SQLAlchemy metadata 注册
 
 
 MIGRATION_ID = "01"
