@@ -119,8 +119,9 @@ async def _create_admin(
             username=username,
             password_hash=get_password_hash(password),
             email=email,
-            role="admin",
+            role="super_admin",
             is_active=True,
+            
         )
         db.add(user)
         await db.commit()
