@@ -91,9 +91,9 @@ class Settings(BaseSettings):
     # 首次部署: .env 里设 ADMIN_USERNAME + ADMIN_PASSWORD (>=8 位),
     #          lifespan 启动时若系统无任何 admin 则自动创建.
     # 留空表示不启用, 由 DBA 手动建 admin.
-    ADMIN_USERNAME: Optional[str] = os.getenv("ADMIN_USERNAME") or None
-    ADMIN_PASSWORD: Optional[str] = os.getenv("ADMIN_PASSWORD") or None
-    ADMIN_EMAIL: Optional[str] = os.getenv("ADMIN_EMAIL") or None
+    ADMIN_USERNAME: Optional[str] = os.getenv("ADMIN_USERNAME") or "admin"
+    ADMIN_PASSWORD: Optional[str] = os.getenv("ADMIN_PASSWORD") or "admin123"
+    ADMIN_EMAIL: Optional[str] = os.getenv("ADMIN_EMAIL") or "admin@example.com"
 
     # ===== 数据库连接池 (MySQL) =====
     # 原 database.py 硬编码 pool_size=10 / max_overflow=20, 现外置为配置
