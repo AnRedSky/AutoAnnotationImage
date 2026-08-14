@@ -236,9 +236,35 @@ else
 fi
 
 # ============================================================
-# 步骤 6: 部署后验证
+# 步骤 6: 自动 bootstrap admin (仅首启 + .env 配置)
 # ============================================================
-step "6) 部署后验证"
+# 触发条件 (同时满足):
+#   1) .env 中 ADMIN_USERNAME 与 ADMIN_PASSWORD 均非空
+#   2) 当前 API 容器可达 (healthy)
+# 行为: 在 API 容器内执行 `python -m scripts.bootstrap_admin --check`
+#       → 若返回 "无 admin", 自动执行不带 --check 的 bootstrap (非交互)
+#       → 若返回 "已有 admin", 静默跳过
+# 失败仅 WARN, 不阻塞后续 verify
+step "6) 自动 bootstrap admin (仅首启)"
+if grep -qE "^ADMIN_USERNAME=.+$" "$ENV_FILE" && grep -qE "^ADMIN_PASSWORD=.+$" "$ENV_FILE"; then
+    CHECK_OUT=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" exec -T api \
+        python -m scripts.bootstrap_admin --check 2>&1 || true)
+    echo "$CHECK_OUT" | sed 's/^/      /'
+    if echo "$CHECK_OUT" | grep -q "系统无任何 admin 用户"; then
+        info "系统无 admin, 按 .env 自动创建..."
+        docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" exec -T api \
+            python -m scripts.bootstrap_admin || warn "自动 bootstrap 失败, 可手动: docker compose exec api python -m scripts.bootstrap_admin"
+    else
+        ok "系统已有 admin, 跳过自动 bootstrap"
+    fi
+else
+    info ".env 未配置 ADMIN_USERNAME/ADMIN_PASSWORD, 跳过 (如需首启初始化, 编辑 .env 后重跑)"
+fi
+
+# ============================================================
+# 步骤 7: 部署后验证
+# ============================================================
+step "7) 部署后验证"
 info "等待 API 启动 (15s)..."
 sleep 15
 python3 "$SCRIPT_DIR/verify_deployment.py" --skip-build --env-file "$ENV_FILE" || true

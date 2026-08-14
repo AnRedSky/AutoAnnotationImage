@@ -108,6 +108,39 @@ async def lifespan(app: FastAPI):
             migrate_legacy_yolo_weights()
         except Exception as e:
             logger.warning(f"ultralytics_setup 失败, 不影响 API 启动: {e}")
+    # v3.6.0: 自动 bootstrap admin (仅当 .env 配置了 ADMIN_USERNAME + ADMIN_PASSWORD 且系统无 admin)
+    # - 失败不阻塞启动, 只记录 WARN: bootstrap 是 "补全缺失", 不应拖垮整个服务
+    # - 与 migrations/runner 的 "失败立即 raise" 形成对照: 迁移是结构, admin 是账号
+    with startup_profiler.step("bootstrap_admin"):
+        try:
+            from scripts.bootstrap_admin import _has_any_admin, _create_admin
+            from app.core.config import settings as _cfg
+            from app.database import AsyncSessionLocal as _ASL
+            if _cfg.ADMIN_USERNAME and _cfg.ADMIN_PASSWORD:
+                async with _ASL() as _db:
+                    _has = await _has_any_admin(_db)
+                if not _has:
+                    logger.info(
+                        "[startup] 系统无 admin, 正在按 .env 自动创建 admin=%s",
+                        _cfg.ADMIN_USERNAME,
+                    )
+                    await _create_admin(
+                        _cfg.ADMIN_USERNAME, _cfg.ADMIN_PASSWORD, _cfg.ADMIN_EMAIL,
+                        confirm_existing=False,
+                    )
+                else:
+                    logger.debug("[startup] 系统已有 admin, 跳过自动 bootstrap")
+            else:
+                logger.debug(
+                    "[startup] 未配置 ADMIN_USERNAME/ADMIN_PASSWORD, "
+                    "跳过自动 bootstrap (需手动执行 scripts.bootstrap_admin)"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[startup] 自动 bootstrap admin 失败, 不阻塞启动: %s. "
+                "请手动执行: python -m scripts.bootstrap_admin",
+                e,
+            )
     # 调用各应用的 startup 钩子 (Stage 2.7)
     with startup_profiler.step("app_startup"):
         try:

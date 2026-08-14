@@ -434,7 +434,13 @@ docker compose logs -f api
 | `admin` | `admin123` | super_admin |
 
 > ⚠️ **生产环境请第一时间修改默认密码！**
-> 推荐用 `python backend/scripts/bootstrap_admin.py --username admin --password "新密码"` 创建/重置。
+>
+> **v3.6.0+ 初始化方式**：
+> - **Docker 一键部署**：在根 `.env` 取消注释并填写 `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `ADMIN_EMAIL`，
+>   `docker compose up -d` 完成后 `start_docker.sh` 会自动检测系统无 admin 时创建；`app/main.py` 的 lifespan 也会做同样兜底。
+> - **本地开发**：直接 `cd backend && python -m scripts.bootstrap_admin --username admin --password "YourStrong!Pass1" --email admin@example.com`。
+> - **仅检查**：`python -m scripts.bootstrap_admin --check`（`verify_deployment.py` 已集成此检查）。
+> - **生产安全**：`APP_ENV=production` 时拒绝从 CLI 读取明文密码，只能由 `.env` / 密钥管理平台注入 `ADMIN_PASSWORD`。
 
 ### 5.2 方式二：本地开发模式
 

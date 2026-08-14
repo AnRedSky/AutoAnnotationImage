@@ -11,8 +11,9 @@
   6) 镜像存在性检查 (annotation/api, annotation/worker, frontend)
   7) 容器健康状态 (docker compose ps)
   8) /api/health 端到端健康检查
-  9) E2E 业务测试 (调用 scripts/run_e2e.py)
-  10) 资源占用检查 (docker stats)
+  9) admin 用户存在性检查 (v3.6.0+, 通过 `scripts.bootstrap_admin --check`)
+  10) E2E 业务测试 (调用 scripts/run_e2e.py)
+  11) 资源占用检查 (docker stats)
 
 用法:
   python scripts/verify_deployment.py
@@ -37,6 +38,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import Optional  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "backend"
@@ -267,8 +269,53 @@ def check_api_health(port: int = 8000) -> bool:
     return False
 
 
+def check_admin_user(env_file: Optional[Path] = None) -> bool:
+    """v3.6.0: 9/11 admin 用户存在性检查
+    调用 API 容器内 `python -m scripts.bootstrap_admin --check` 间接验证.
+    返回 True 表示系统已有 >=1 个 admin (OK); False 表示无 admin (FAIL, 部署不完整).
+    """
+    step("9/11 admin 用户存在性检查")
+    if not shutil.which("docker"):
+        warn("docker 不在 PATH, 跳过 admin 检查")
+        return True
+    cmd = ["docker", "compose", "ps", "--format", "{{.Service}}\t{{.State}}"]
+    try:
+        ps = subprocess.run(cmd, capture_output=True, text=True, timeout=10, cwd=ROOT)
+        if ps.returncode != 0 or "api" not in ps.stdout or "running" not in ps.stdout.lower():
+            warn("API 容器未运行, 跳过 admin 检查 (需先 docker compose up -d)")
+            return True
+    except subprocess.TimeoutExpired:
+        warn("docker compose ps 超时, 跳过 admin 检查")
+        return True
+
+    cmd = ["docker", "compose", "exec", "-T", "api",
+           "python", "-m", "scripts.bootstrap_admin", "--check"]
+    if env_file:
+        cmd = ["docker", "compose", "--env-file", str(env_file), "exec", "-T", "api",
+               "python", "-m", "scripts.bootstrap_admin", "--check"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=ROOT)
+        out = (r.stdout or "") + (r.stderr or "")
+        for line in out.strip().splitlines()[:8]:
+            print(f"    {line}")
+        if r.returncode == 0 and "已有 admin" in out:
+            ok("系统已有 admin, 可正常登录")
+            return True
+        if "无任何 admin" in out:
+            err("系统无任何 admin, 请执行: docker compose exec api python -m scripts.bootstrap_admin")
+            return False
+        warn(f"admin 状态未知 (exit={r.returncode}), 建议手动检查")
+        return True
+    except subprocess.TimeoutExpired:
+        warn("admin 检查超时, 跳过")
+        return True
+    except FileNotFoundError:
+        warn("docker 不在 PATH, 跳过")
+        return True
+
+
 def run_e2e_tests() -> bool:
-    step("9/10 E2E 业务流程测试")
+    step("10/11 E2E 业务流程测试")
     e2e_script = ROOT / "scripts" / "run_e2e.py"
     if not e2e_script.exists():
         warn("scripts/run_e2e.py 不存在, 跳过 E2E")
@@ -295,7 +342,7 @@ def run_e2e_tests() -> bool:
 
 
 def check_resource_usage() -> bool:
-    step("10/10 容器资源占用")
+    step("11/11 容器资源占用")
     try:
         r = subprocess.run(
             ["docker", "stats", "--no-stream", "--format",
@@ -345,6 +392,7 @@ def main():
     checks += [
         ("containers_running", check_containers_running, ()),
         ("api_health", check_api_health, (args.api_port,)),
+        ("admin_user", check_admin_user, (args.env_file,)),
     ]
     if not args.skip_e2e:
         checks.append(("e2e_tests", run_e2e_tests, ()))
