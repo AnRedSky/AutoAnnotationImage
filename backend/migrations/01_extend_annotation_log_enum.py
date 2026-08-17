@@ -96,20 +96,26 @@ async def run_migration():
         else:
             print("[SKIP] annotation_log.payload 已存在")
 
-        # 3. 扩展 action ENUM (兼容已存在的 4 枚举值 + 旧数据)
-        new_values = ("'ai_predict', 'confirm', 'correct', 'reject',"
-                      "'auto_annotate_pretrained', 'auto_annotate_finetuned'")
+        # 3. 扩展 action ENUM (兼容已存在的所有枚举值 + 旧数据)
+        # 注意: 必须使用完整的 9 个目标值 (含 v3.0.0 的 mark/unmark_unqualified 和 v3.4.0 的 revert_to_ai),
+        # 否则数据库中已有这些值的记录会触发 MySQL "Data truncated for column 'action'" 错误.
+        all_target_values = (
+            "'ai_predict', 'confirm', 'correct', 'reject',"
+            "'auto_annotate_pretrained', 'auto_annotate_finetuned',"
+            "'mark_unqualified', 'unmark_unqualified',"
+            "'revert_to_ai'"
+        )
         if not await _enum_has_value(conn, "annotation_log", "action", "auto_annotate_pretrained"):
             dialect = conn.dialect.name
             if dialect == "sqlite":
                 # SQLite 不支持直接修改 CHECK, 跳过 (测试环境用 create_all 即可)
                 print("[SKIP] SQLite ENUM 修改受限, 测试环境依赖 create_all")
             else:
-                # MySQL: ALTER COLUMN 扩展 ENUM
+                # MySQL: ALTER COLUMN 扩展 ENUM (使用完整枚举列表, 避免截断已有数据)
                 await conn.execute(
-                    text(f"ALTER TABLE annotation_log MODIFY COLUMN action ENUM({new_values}) NOT NULL")
+                    text(f"ALTER TABLE annotation_log MODIFY COLUMN action ENUM({all_target_values}) NOT NULL")
                 )
-                print(f"[OK] ALTER TABLE annotation_log MODIFY COLUMN action ENUM (扩展 2 个值)")
+                print(f"[OK] ALTER TABLE annotation_log MODIFY COLUMN action ENUM (使用完整 9 个枚举值)")
         else:
             print("[SKIP] annotation_log.action 已包含 auto_annotate_pretrained")
 
