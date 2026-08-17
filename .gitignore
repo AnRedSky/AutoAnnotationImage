@@ -98,3 +98,4 @@ htmlcov/
 # uv.lock / pnpm-lock.yaml / yarn.lock / package-lock.json
 # 保留 uv.lock 便于可复现构建
 backend/tests/*
+docs/img/系统img.zip
