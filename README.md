@@ -409,6 +409,9 @@ cp .env.example .env
 # 自动生成强随机密钥:
 python scripts/gen_secrets.py --write --env-file .env
 
+# 无缓存重新构建镜像
+docker compose --env-file .env build --no-cache
+
 # 3) 启动全部服务
 docker compose --env-file .env up -d
 
